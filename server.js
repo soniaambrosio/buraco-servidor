@@ -2747,6 +2747,17 @@ function criarConexao(socket, handlers) {
   let fragOp = null;
   let vivo = true;
 
+  // KEEPALIVE: manda um PING a cada 20s. Sem isso, o proxy da hospedagem
+  // (Railway/Render/etc.) corta a conexão parada depois de ~1min de silêncio —
+  // que é o que derrubava a mesa quando alguém demorava a jogar ("a conexão
+  // caiu"). O ping mantém a conexão viva mesmo sem jogada acontecendo. O
+  // navegador responde PONG sozinho (nível de protocolo).
+  const keepalive = setInterval(() => {
+    if (!vivo) { clearInterval(keepalive); return; }
+    try { socket.write(encodeFrame(OP.PING, Buffer.alloc(0))); } catch (_) {}
+  }, 20000);
+  if (keepalive.unref) keepalive.unref(); // não segura o processo vivo à toa
+
   function enviarTexto(str) {
     if (!vivo) return;
     try { socket.write(encodeFrame(OP.TEXT, Buffer.from(str, "utf8"))); } catch (_) {}
@@ -2754,6 +2765,7 @@ function criarConexao(socket, handlers) {
   function fechar(code) {
     if (!vivo) return;
     vivo = false;
+    clearInterval(keepalive);
     try {
       const b = Buffer.alloc(2); b.writeUInt16BE(code || 1000, 0);
       socket.write(encodeFrame(OP.CLOSE, b));
@@ -2803,8 +2815,8 @@ function criarConexao(socket, handlers) {
       }
     }
   });
-  socket.on("close", () => { vivo = false; handlers.close(); });
-  socket.on("error", () => { vivo = false; handlers.close(); });
+  socket.on("close", () => { vivo = false; clearInterval(keepalive); handlers.close(); });
+  socket.on("error", () => { vivo = false; clearInterval(keepalive); handlers.close(); });
 
   return { enviarTexto, fechar, get vivo() { return vivo; } };
 }
