@@ -1,0 +1,12 @@
+{
+  "name": "buraco-master-vip-servidor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor de salas (multiplayer) do Buraco Master VIP — Node puro, arquivo único.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
