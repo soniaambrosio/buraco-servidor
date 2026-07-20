@@ -260,13 +260,19 @@ function validarTrinca(cartas) {
  * @param {{permiteTrinca?:boolean}} [opts]
  */
 function validarJogo(cartas, opts = {}) {
+  // O GRUPO DE ASES ("canastra de ás") é da família TRINCA — mesmo VALOR, não é
+  // sequência de verdade. Só vale onde trinca vale (Fechado). No SBTL/Aberto, ás
+  // só entra em SEQUÊNCIA (A-2-3 ou Q-K-A). Bug pego pela Sônia (20/jul): o robô
+  // descia AAA no SBTL porque essa exceção furava a trava de trinca.
+  const soAses = !!(cartas && cartas.length && cartas.every((c) => c && c.valor === "A" && !c.eh_coringa));
   const rSeq = validarSequencia(cartas);
-  if (rSeq.valido) return rSeq;
+  if (rSeq.valido && !(soAses && !opts.permiteTrinca)) return rSeq;
   if (opts.permiteTrinca) {
     const rTri = validarTrinca(cartas);
     if (rTri.valido) return rTri;
     return { valido: false, motivo: "não forma uma sequência nem uma trinca válida" };
   }
+  if (soAses) return { valido: false, motivo: "no SBTL/Aberto o ás só entra em sequência (trinca de ases é só no Fechado)" };
   return rSeq;
 }
 
@@ -2396,6 +2402,9 @@ function criarContas(opts = {}) {
   const dir = opts.dir || process.env.DADOS_DIR || path.join(__dirname, "..", "dados");
   const arquivo = opts.arquivo || path.join(dir, "contas.json");
   const agora = opts.agora || (() => Date.now());
+  // fotos de avatar ficam ao lado do contas.json (no Volume, em DADOS_DIR/avatares)
+  const avatarDir = path.join(path.dirname(arquivo), "avatares");
+  const _avatarMem = {}; // fallback em memória (testes com persistir:false)
 
   let dados = { versao: 1, contas: {} };
 
@@ -2437,6 +2446,9 @@ function criarContas(opts = {}) {
       partidas: c.partidas, vitorias: c.vitorias, derrotas: c.derrotas,
       canastras: c.canastras,
       aproveitamento: c.partidas ? Math.round((c.vitorias / c.partidas) * 100) : 0,
+      // avatar: tipo "foto" (upload, servido em /avatar/<id>), "galeria" (avatarId
+      // = índice do avatar pronto) ou null (padrão). avatarVer serve de "cache-bust".
+      avatarTipo: c.avatarTipo || null, avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0,
     };
   }
 
@@ -2556,10 +2568,84 @@ function criarContas(opts = {}) {
 
   function totalDeContas() { return Object.keys(dados.contas).length; }
 
+  // ------------------------------- AVATAR -------------------------------
+  const AVATAR_MAX_BYTES = 250 * 1024; // teto ~250KB (o navegador já manda pequeno)
+  function _avatarFile(id) { return path.join(avatarDir, encodeURIComponent(id) + ".jpg"); }
+
+  /** Salva a FOTO do jogador (upload). Recebe data-URL ou base64 puro (JPEG/PNG).
+   *  A imagem já vem pequena do navegador (recortada+redimensionada). */
+  function definirAvatarFoto(id, dataUrl) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    let b64 = String(dataUrl || "");
+    const m = b64.match(/^data:image\/(jpeg|jpg|png|webp);base64,(.*)$/i);
+    if (m) b64 = m[2];
+    let buf;
+    try { buf = Buffer.from(b64, "base64"); } catch (e) { return { erro: "imagem inválida" }; }
+    if (!buf || !buf.length) return { erro: "imagem vazia" };
+    if (buf.length > AVATAR_MAX_BYTES) return { erro: "imagem muito grande (máx. 250KB)" };
+    if (persistir) {
+      try { fs.mkdirSync(avatarDir, { recursive: true }); fs.writeFileSync(_avatarFile(id), buf); }
+      catch (e) { console.error("[contas] avatar write:", e.message); return { erro: "falha ao salvar a foto" }; }
+    } else { _avatarMem[id] = buf; }
+    c.avatarTipo = "foto"; c.avatarId = null; c.avatarVer = agora();
+    c.reportsAvatar = 0; // foto nova zera denúncias anteriores
+    c.atualizadoEm = agora(); salvar();
+    return contaPublica(c);
+  }
+
+  /** Escolhe um avatar da GALERIA (avatar pronto). galeriaId = índice (1..N). */
+  function definirAvatarGaleria(id, galeriaId) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.avatarTipo = "galeria"; c.avatarId = Math.max(1, parseInt(galeriaId, 10) || 1);
+    c.avatarVer = agora(); c.atualizadoEm = agora();
+    try { if (persistir && fs.existsSync(_avatarFile(id))) fs.unlinkSync(_avatarFile(id)); } catch (e) {}
+    delete _avatarMem[id];
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Volta pro avatar padrão (apaga a foto). */
+  function removerAvatar(id) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.avatarTipo = null; c.avatarId = null; c.avatarVer = agora(); c.atualizadoEm = agora();
+    try { if (persistir && fs.existsSync(_avatarFile(id))) fs.unlinkSync(_avatarFile(id)); } catch (e) {}
+    delete _avatarMem[id];
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Bytes da foto de um jogador (pra rota HTTP /avatar/<id>). null se não tiver. */
+  function avatarBuffer(id) {
+    const c = dados.contas[id];
+    if (!c || c.avatarTipo !== "foto") return null;
+    if (!persistir) return _avatarMem[id] || null;
+    try { return fs.existsSync(_avatarFile(id)) ? fs.readFileSync(_avatarFile(id)) : null; } catch (e) { return null; }
+  }
+
+  /** Denúncia de foto imprópria (proteção do app público). Ao atingir o limite, a
+   *  foto é OCULTADA automaticamente (volta pro padrão) até revisão. */
+  function denunciarAvatar(alvoId) {
+    const c = dados.contas[alvoId];
+    if (!c || c.avatarTipo !== "foto") return { ok: false, motivo: "sem foto pra denunciar" };
+    c.reportsAvatar = (c.reportsAvatar || 0) + 1;
+    let ocultado = false;
+    if (c.reportsAvatar >= 3) {
+      c.avatarTipo = null; c.avatarVer = agora(); ocultado = true;
+      try { if (persistir && fs.existsSync(_avatarFile(alvoId))) fs.unlinkSync(_avatarFile(alvoId)); } catch (e) {}
+      delete _avatarMem[alvoId];
+    }
+    c.atualizadoEm = agora(); salvar();
+    return { ok: true, reports: c.reportsAvatar, ocultado };
+  }
+
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
     ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
+    definirAvatarFoto, definirAvatarGaleria, removerAvatar, avatarBuffer, denunciarAvatar,
     _dados: () => dados, ECON,
   };
 }
@@ -2783,7 +2869,24 @@ function criarGerenciador(opts = {}) {
           : { vazio: true }),
       };
     }
-    return J.visaoDoAssento(sala.jogo, assento);
+    const v = J.visaoDoAssento(sala.jogo, assento);
+    // injeta o AVATAR de cada jogador humano (do cofre) na visão, pro cliente
+    // desenhar a foto/galeria de quem está na mesa. Bots ficam sem (avatar padrão).
+    if (contas && v && v.assentos) {
+      for (let i = 0; i < v.assentos.length; i++) {
+        const sj = sala.assentos[i];
+        if (sj && sj.jogadorId) {
+          const c = contas.obter(sj.jogadorId);
+          if (c) {
+            v.assentos[i].jogadorId = sj.jogadorId;
+            v.assentos[i].avatarTipo = c.avatarTipo || null;
+            v.assentos[i].avatarId = c.avatarId || null;
+            v.assentos[i].avatarVer = c.avatarVer || 0;
+          }
+        }
+      }
+    }
+    return v;
   }
 
   /** Um jogador saiu da sala. No lobby, libera o assento; em jogo, vira bot
@@ -2895,6 +2998,23 @@ function criarServidor(opts = {}) {
       case "ranking": {
         if (!contas) return enviarPara(id, { tipo: "ranking", lista: [] });
         return enviarPara(id, { tipo: "ranking", lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio }) });
+      }
+      case "definirAvatar": {
+        // foto própria (upload), avatar da galeria, ou remover (voltar ao padrão)
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "avatar", conta: null });
+        contas.obterOuCriar(jid, msg.apelido);
+        let r;
+        if (msg.foto) r = contas.definirAvatarFoto(jid, msg.foto);
+        else if (msg.galeria != null) r = contas.definirAvatarGaleria(jid, msg.galeria);
+        else if (msg.remover) r = contas.removerAvatar(jid);
+        else r = { erro: "avatar: informe foto, galeria ou remover" };
+        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        return enviarPara(id, { tipo: "avatar", conta: r });
+      }
+      case "denunciarAvatar": {
+        if (!contas || !msg.alvo) return;
+        return enviarPara(id, Object.assign({ tipo: "denuncia" }, contas.denunciarAvatar(msg.alvo)));
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
@@ -3141,6 +3261,16 @@ function iniciar(porta) {
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
       res.writeHead(200, { "content-type": "text/plain" }); return res.end("ok");
+    }
+    // FOTO DE AVATAR do jogador: /avatar/<jogadorId>  → a imagem enviada por upload
+    if (req.url.indexOf("/avatar/") === 0) {
+      const idc = decodeURIComponent(req.url.slice("/avatar/".length).split("?")[0]);
+      const buf = contas && contas.avatarBuffer ? contas.avatarBuffer(idc) : null;
+      if (buf) {
+        res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "public, max-age=60", "access-control-allow-origin": "*" });
+        return res.end(buf);
+      }
+      res.writeHead(404, { "content-type": "text/plain" }); return res.end("sem avatar");
     }
     if (PUBLIC_DIR) {
       let rel = decodeURIComponent(req.url.split("?")[0]);
