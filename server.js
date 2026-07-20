@@ -2338,6 +2338,238 @@ module.exports = { jogarTurnoBot, cartaTxt, escolherDescarteLegal };
 
   };
 
+  __fabricas["contas"] = function (module, exports, require) {
+// servidor/contas.js — CONTAS + PERSISTÊNCIA ("ligar aos dados reais")
+// O COFRE do jogo: guarda, por jogador, o que hoje é mock na tela (moedas, XP,
+// nível, vitórias, partidas, canastras) e sobrevive a reinícios do servidor.
+//
+// Princípios pé-no-chão desta camada:
+//  1) IDENTIDADE SEM SENHA — cada jogador tem um `id` estável gerado no aparelho
+//     dele (estilo "continuar como convidado"). Nada de e-mail/senha aqui: é o
+//     padrão dos joguinhos casuais e evita todo o risco de guardar credencial.
+//  2) SEM DEPENDÊNCIAS — persiste num arquivo JSON usando só `fs` (built-in do
+//     Node), igual ao resto do servidor. No deploy, o arquivo mora num VOLUME do
+//     Railway (disco que não some no redeploy). Zero banco de dados por enquanto.
+//  3) ECONOMIA AJUSTÁVEL — todos os números (bônus, prêmios, XP) ficam no objeto
+//     ECON, num lugar só, fáceis de a Sônia mexer sem caçar pelo código.
+//
+// Moedas são VIRTUAIS e não sacáveis (anti-aposta / regras de loja). O "pote" é
+// só troca de fichas de brincadeira entre os jogadores da mesa.
+
+const fs = require("fs");
+const path = require("path");
+
+// ------------------------- ECONOMIA (mexa à vontade) -------------------------
+const ECON = {
+  BONUS_BOAS_VINDAS: 1000, // moedas que todo novo jogador ganha ao criar a conta
+  MOEDAS_VITORIA: 50,      // prêmio por vencer numa mesa SEM aposta
+  MOEDAS_PARTICIPACAO: 10, // consolo por jogar (mesa sem aposta), pra todos
+  XP_VITORIA: 100,         // XP base de quem vence
+  XP_DERROTA: 40,          // XP base de quem perde (ninguém sai de mãos vazias)
+  XP_POR_CANASTRA: 15,     // XP extra por canastra feita na partida
+  XP_FRACAO_PLACAR: 0.02,  // + 2% dos pontos da dupla viram XP (recompensa jogar bem)
+};
+
+/** XP acumulado necessário pra ATINGIR o nível n. Curva suave e sempre crescente:
+ *  nível 1 = 0 · 2 = 100 · 3 = 300 · 4 = 600 · 5 = 1.000 · 6 = 1.500 … */
+function xpAcumuladoParaNivel(n) { return 50 * (n - 1) * n; }
+function nivelDeXp(xp) {
+  let n = 1;
+  while (xpAcumuladoParaNivel(n + 1) <= xp) n++;
+  return n;
+}
+/** Progresso dentro do nível atual: {nivel, xpNoNivel, xpProxNivel, faltam}. */
+function progressoDeXp(xp) {
+  const nivel = nivelDeXp(xp);
+  const base = xpAcumuladoParaNivel(nivel);
+  const prox = xpAcumuladoParaNivel(nivel + 1);
+  return { nivel, xpNoNivel: xp - base, xpProxNivel: prox - base, faltam: prox - xp };
+}
+
+const DUPLAS = { nos: [0, 2], eles: [1, 3] };
+function duplaDoAssento(a) { return (a === 0 || a === 2) ? "nos" : "eles"; }
+
+/** Cria o gerenciador de contas. `opts.arquivo` define onde persistir; `opts.agora`
+ *  injeta o relógio (testes); `opts.persistir:false` deixa tudo em memória. */
+function criarContas(opts = {}) {
+  const persistir = opts.persistir !== false;
+  const dir = opts.dir || process.env.DADOS_DIR || path.join(__dirname, "..", "dados");
+  const arquivo = opts.arquivo || path.join(dir, "contas.json");
+  const agora = opts.agora || (() => Date.now());
+
+  let dados = { versao: 1, contas: {} };
+
+  function carregar() {
+    if (!persistir) return;
+    try {
+      if (fs.existsSync(arquivo)) {
+        const bruto = JSON.parse(fs.readFileSync(arquivo, "utf8"));
+        if (bruto && bruto.contas) dados = bruto;
+      }
+    } catch (e) {
+      // arquivo corrompido não pode derrubar o servidor: começa limpo e avisa no log
+      console.error("[contas] falha ao ler " + arquivo + " — começando vazio:", e.message);
+      dados = { versao: 1, contas: {} };
+    }
+  }
+
+  function salvar() {
+    if (!persistir) return;
+    try {
+      fs.mkdirSync(path.dirname(arquivo), { recursive: true });
+      // escrita atômica: grava num .tmp e renomeia (renomear não deixa arquivo
+      // pela metade se cair energia no meio da gravação)
+      const tmp = arquivo + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(dados));
+      fs.renameSync(tmp, arquivo);
+    } catch (e) {
+      console.error("[contas] falha ao salvar " + arquivo + ":", e.message);
+    }
+  }
+
+  function contaPublica(c) {
+    if (!c) return null;
+    const p = progressoDeXp(c.xp);
+    return {
+      id: c.id, apelido: c.apelido,
+      moedas: c.moedas, xp: c.xp, nivel: p.nivel,
+      xpNoNivel: p.xpNoNivel, xpProxNivel: p.xpProxNivel, faltamXp: p.faltam,
+      partidas: c.partidas, vitorias: c.vitorias, derrotas: c.derrotas,
+      canastras: c.canastras,
+      aproveitamento: c.partidas ? Math.round((c.vitorias / c.partidas) * 100) : 0,
+    };
+  }
+
+  /** Pega a conta do jogador; cria (com bônus de boas-vindas) se for a 1ª vez. */
+  function obterOuCriar(id, apelido) {
+    if (!id) throw new Error("id do jogador é obrigatório");
+    let c = dados.contas[id];
+    if (!c) {
+      c = dados.contas[id] = {
+        id, apelido: (apelido || "Jogador").slice(0, 24),
+        moedas: ECON.BONUS_BOAS_VINDAS, xp: 0,
+        partidas: 0, vitorias: 0, derrotas: 0, canastras: 0,
+        criadoEm: agora(), atualizadoEm: agora(),
+      };
+      salvar();
+    } else if (apelido && apelido !== c.apelido) {
+      c.apelido = apelido.slice(0, 24); c.atualizadoEm = agora(); salvar();
+    }
+    return contaPublica(c);
+  }
+
+  function obter(id) { return contaPublica(dados.contas[id]); }
+
+  function atualizarApelido(id, apelido) {
+    const c = dados.contas[id];
+    if (!c) return null;
+    c.apelido = (apelido || c.apelido).slice(0, 24); c.atualizadoEm = agora(); salvar();
+    return contaPublica(c);
+  }
+
+  /** Ajusta moedas (piso em 0). n>0 credita, n<0 debita. */
+  function ajustarMoedas(id, n) {
+    const c = dados.contas[id];
+    if (!c) return null;
+    c.moedas = Math.max(0, c.moedas + Math.round(n)); c.atualizadoEm = agora();
+    return c.moedas;
+  }
+
+  /**
+   * Liquida o resultado de UMA partida encerrada e atualiza cada humano.
+   * Entrada:
+   *   jogadores: [{assento, id, apelido, canastras?}] — só assentos com conta
+   *              (bots ficam de fora; passe só os humanos, ou id:null pra pular).
+   *   placar:    { nos, eles }  (do jogo.placar ao encerrar)
+   *   aposta:    entrada por jogador (0 = mesa sem aposta). Opcional.
+   * Retorna um resumo por jogador (deltas + se subiu de nível) — bom pra tela.
+   */
+  function registrarPartida({ jogadores = [], placar = { nos: 0, eles: 0 }, aposta = 0 } = {}) {
+    const humanos = jogadores.filter((j) => j && j.id);
+    const vencedora = placar.nos >= placar.eles ? "nos" : "eles";
+    aposta = Math.max(0, Math.round(aposta || 0));
+
+    // pote (mesa com aposta): só entra quem tem conta e está sentado; vencedores
+    // humanos dividem o pote. Cada um "pagou" a entrada ao começar — aqui a gente
+    // debita a entrada de todos e credita o pote a quem venceu.
+    const pagantes = humanos.length;
+    const pote = aposta * pagantes;
+    const vencedoresH = humanos.filter((j) => duplaDoAssento(j.assento) === vencedora);
+    const quinhao = (aposta > 0 && vencedoresH.length) ? Math.floor(pote / vencedoresH.length) : 0;
+
+    const resumo = { duplaVencedora: vencedora, aposta, pote, porJogador: [] };
+
+    for (const j of humanos) {
+      const c = dados.contas[j.id] || dados.contas[obterOuCriar(j.id, j.apelido).id];
+      const venceu = duplaDoAssento(j.assento) === vencedora;
+      const dupla = duplaDoAssento(j.assento);
+      const canastras = Math.max(0, j.canastras || 0);
+
+      const moedasAntes = c.moedas, nivelAntes = nivelDeXp(c.xp);
+
+      // XP: base por resultado + fração do placar da própria dupla + canastras
+      const xpGanho = (venceu ? ECON.XP_VITORIA : ECON.XP_DERROTA)
+        + Math.round((placar[dupla] || 0) * ECON.XP_FRACAO_PLACAR)
+        + canastras * ECON.XP_POR_CANASTRA;
+
+      // MOEDAS
+      let deltaMoedas;
+      if (aposta > 0) {
+        deltaMoedas = (venceu ? quinhao : 0) - aposta; // pagou a entrada; vencedor leva quinhão
+      } else {
+        deltaMoedas = ECON.MOEDAS_PARTICIPACAO + (venceu ? ECON.MOEDAS_VITORIA : 0);
+      }
+
+      c.xp += xpGanho;
+      c.moedas = Math.max(0, c.moedas + deltaMoedas);
+      c.partidas += 1;
+      if (venceu) c.vitorias += 1; else c.derrotas += 1;
+      c.canastras += canastras;
+      c.atualizadoEm = agora();
+
+      const nivelDepois = nivelDeXp(c.xp);
+      resumo.porJogador.push({
+        id: c.id, apelido: c.apelido, venceu,
+        deltaMoedas: c.moedas - moedasAntes, deltaXp: xpGanho,
+        moedas: c.moedas, xp: c.xp,
+        nivelAntes, nivelDepois, subiuNivel: nivelDepois > nivelAntes,
+      });
+    }
+    salvar();
+    return resumo;
+  }
+
+  /** Ranking dos jogadores. Critério padrão: XP (progresso do jogador). */
+  function ranking({ limite = 50, criterio = "xp" } = {}) {
+    const lista = Object.values(dados.contas).map(contaPublica);
+    const chave = criterio === "vitorias" ? "vitorias" : (criterio === "moedas" ? "moedas" : "xp");
+    lista.sort((a, b) => (b[chave] - a[chave]) || (b.xp - a.xp) || (b.vitorias - a.vitorias));
+    return lista.slice(0, limite).map((c, i) => Object.assign({ posicao: i + 1 }, c));
+  }
+
+  /** Posição de um jogador no ranking (1-based) por um critério. 0 se não achar. */
+  function posicaoNoRanking(id, criterio = "xp") {
+    const lista = ranking({ limite: Infinity, criterio });
+    const i = lista.findIndex((c) => c.id === id);
+    return i < 0 ? 0 : i + 1;
+  }
+
+  function totalDeContas() { return Object.keys(dados.contas).length; }
+
+  carregar();
+  return {
+    obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
+    ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
+    _dados: () => dados, ECON,
+  };
+}
+
+module.exports = {
+  criarContas, ECON, nivelDeXp, xpAcumuladoParaNivel, progressoDeXp, duplaDoAssento,
+};
+
+  };
+
   __fabricas["salas"] = function (module, exports, require) {
 // servidor/salas.js — GERENCIADOR DE SALAS (multiplayer M2)
 // Mesa privada por CÓDIGO, até 4 pessoas, assentos vazios viram BOT.
@@ -2364,28 +2596,34 @@ function gerarCodigoPadrao() {
  *  um gerador determinístico nos testes. */
 function criarGerenciador(opts = {}) {
   const salas = {};
+  // cofre de contas (servidor/contas.js). Opcional: sem ele, a mesa roda igual,
+  // só não persiste estatística nenhuma (útil pra testes puros de mesa).
+  const contas = opts.contas || null;
   const gerarCodigo = opts.gerarCodigo || gerarCodigoPadrao;
   const LIMITE_BOTS = opts.limiteAvanco || 5000; // trava anti-loop do avanço
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
   // controla o ritmo (jogarUmBot), pra dar o "respiro" entre jogadas na tela.
   const autoBots = opts.autoBots !== false;
 
-  function criarMesa({ apelido = "Jogador", modalidade = "sbtl", metaPontos = 3000 } = {}) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
     salas[codigo] = {
       codigo, modalidade, metaPontos,
+      aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
       criadorAssento: 0,
-      assentos: [{ apelido, tipo: "humano" }, null, null, null],
+      assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
       iniciada: false,
       jogo: null,
+      liquidada: false,   // já contabilizou o resultado no cofre?
+      resumoFinal: null,  // resumo por jogador (deltas de moedas/xp) pra tela de fim
       log: [],
     };
     return { codigo, assento: 0 };
   }
 
-  function entrarMesa({ codigo, apelido = "Jogador", assento } = {}) {
+  function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (sala.iniciada) return { erro: "a partida já começou" };
@@ -2402,7 +2640,7 @@ function criarGerenciador(opts = {}) {
       for (const s of ORDEM) { if (sala.assentos[s] === null) { alvo = s; break; } }
     }
     if (alvo === -1) return { erro: "mesa cheia" };
-    sala.assentos[alvo] = { apelido, tipo: "humano" };
+    sala.assentos[alvo] = { apelido, tipo: "humano", jogadorId };
     return { assento: alvo, codigo };
   }
 
@@ -2411,15 +2649,48 @@ function criarGerenciador(opts = {}) {
     if (!sala) return { erro: "mesa não encontrada" };
     if (assento !== sala.criadorAssento) return { erro: "só quem criou a mesa inicia a partida" };
     if (sala.iniciada) return { erro: "a partida já começou" };
+    // guarda os jogadorId por assento ANTES de reconstruir (o cofre precisa deles
+    // no fim da partida; criarJogo não carrega esse campo).
+    const idsPorAssento = sala.assentos.map((a) => (a && a.jogadorId) || null);
     // preenche os assentos vazios com bots
     const assentosJogo = sala.assentos.map((a, i) =>
       a ? { tipo: a.tipo, apelido: a.apelido } : { tipo: "bot", apelido: NOMES_BOT[i % NOMES_BOT.length] }
     );
-    sala.assentos = assentosJogo.map((a) => ({ tipo: a.tipo, apelido: a.apelido }));
+    sala.assentos = assentosJogo.map((a, i) => ({ tipo: a.tipo, apelido: a.apelido, jogadorId: idsPorAssento[i] }));
     sala.jogo = J.criarJogo({ assentos: assentosJogo, modalidade: sala.modalidade, metaPontos: sala.metaPontos });
     sala.iniciada = true;
+    sala.liquidada = false; sala.resumoFinal = null;
     if (autoBots) avancarBots(sala); // se a vez começar num bot, ele já joga
+    liquidar(sala); // caso raro: partida que já encerra de cara (meta minúscula em teste)
     return { ok: true, codigo };
+  }
+
+  /** Contabiliza UMA vez o resultado da partida encerrada no cofre de contas.
+   *  Idempotente (a trava sala.liquidada garante que roda só uma vez). Guarda o
+   *  resumo por jogador em sala.resumoFinal (o servidor manda pra tela de fim). */
+  function liquidar(sala) {
+    if (!sala || !sala.jogo || sala.liquidada) return null;
+    if (!sala.jogo.encerrada) return null;
+    sala.liquidada = true;
+    if (!contas) return null;
+    const jogo = sala.jogo;
+    const jogadores = [];
+    for (let i = 0; i < 4; i++) {
+      const aj = jogo.assentos[i], sj = sala.assentos[i];
+      // só credita quem TERMINOU a partida como humano E tem conta (jogadorId).
+      // Quem virou bot no meio (saiu/AFK) não pontua.
+      if (aj && aj.tipo === "humano" && sj && sj.jogadorId) {
+        jogadores.push({ assento: i, id: sj.jogadorId, apelido: aj.apelido });
+      }
+    }
+    try {
+      sala.resumoFinal = contas.registrarPartida({
+        jogadores, placar: jogo.placar, aposta: sala.aposta || 0,
+      });
+    } catch (e) {
+      console.error("[salas] liquidar falhou:", e.message);
+    }
+    return sala.resumoFinal;
   }
 
   function aplicarJogada({ codigo, assento, jogada } = {}) {
@@ -2432,6 +2703,7 @@ function criarGerenciador(opts = {}) {
     const r = executarJogada(jogo, assento, jogada);
     if (!r.ok) return r;
     if (autoBots) avancarBots(sala); // fecha a vez? bots jogam até voltar a um humano
+    liquidar(sala); // se essa jogada foi a batida que encerrou a partida
     return r;
   }
 
@@ -2465,6 +2737,7 @@ function criarGerenciador(opts = {}) {
       sala.log.push({ rodada: jogo.rodada, assento: jogo.vez, apelido: vez.apelido, acoes: r.log });
       if (!r.ok && !jogo.rodadaEncerrada) break; // erro inesperado: evita loop
     }
+    liquidar(sala); // partida pode ter encerrado numa batida de bot
   }
 
   /** Há trabalho de servidor a fazer? (a vez é de um bot, ou a rodada acabou e
@@ -2486,13 +2759,14 @@ function criarGerenciador(opts = {}) {
     const sala = salas[codigo];
     if (!sala || !sala.jogo) return { jogou: false };
     const j = sala.jogo;
-    if (j.encerrada) return { jogou: false };
+    if (j.encerrada) { liquidar(sala); return { jogou: false }; }
     if (j.rodadaEncerrada) { J.distribuirRodada(j); return { jogou: false, transicao: true }; }
     const v = j.assentos[j.vez];
     if (!v || v.tipo !== "bot") return { jogou: false };
     const assento = j.vez;
     const r = jogarTurnoBot(j, assento);
     sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: r.log });
+    liquidar(sala); // batida de bot pode ter encerrado a partida
     return { jogou: true, assento, resultado: r };
   }
 
@@ -2559,13 +2833,14 @@ function criarServidor(opts = {}) {
   // decide o tempo: padrão é IMEDIATO (síncrono, ótimo pros testes); no navegador
   // passa-se um setTimeout(~1100ms) pra dar pra acompanhar a jogada dos robôs.
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
+  const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
-  const conexoes = {}; // id -> { id, enviar, codigo, assento }
+  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
   let seq = 0;
 
   function conectar(enviar) {
     const id = "c" + ++seq;
-    conexoes[id] = { id, enviar, codigo: null, assento: null };
+    conexoes[id] = { id, enviar, codigo: null, assento: null, jogadorId: null };
     return id;
   }
 
@@ -2593,18 +2868,33 @@ function criarServidor(opts = {}) {
 
     switch (msg.tipo) {
       case "criarMesa": {
-        const r = ger.criarMesa({ apelido: msg.apelido, modalidade: msg.modalidade, metaPontos: msg.metaPontos });
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
         return broadcastSala(r.codigo);
       }
       case "entrarMesa": {
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido });
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
         return broadcastSala(c.codigo);
+      }
+      case "perfil": {
+        // dados REAIS da conta do jogador (pro Perfil/carteira do app)
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "perfil", conta: null });
+        const conta = contas.obterOuCriar(jid, msg.apelido);
+        return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
+      }
+      case "ranking": {
+        if (!contas) return enviarPara(id, { tipo: "ranking", lista: [] });
+        return enviarPara(id, { tipo: "ranking", lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio }) });
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
@@ -2665,11 +2955,28 @@ function criarServidor(opts = {}) {
    *  vira um laço síncrono (testes); com setTimeout, os bots jogam um a um na tela. */
   function avancarComRespiro(codigo) {
     broadcastSala(codigo);
+    emitirFimSeAcabou(codigo);
     if (ger.vezEhBot(codigo)) {
       agendar(function () {
         ger.jogarUmBot(codigo);
         avancarComRespiro(codigo);
       });
+    }
+  }
+
+  /** Quando a partida encerra, o cofre já liquidou (sala.resumoFinal). Aqui a
+   *  gente manda UMA vez pra todo mundo da mesa o "fim" com os ganhos — é o que
+   *  a tela usa pra mostrar "+X moedas / subiu de nível". */
+  function emitirFimSeAcabou(codigo) {
+    const sala = ger.salas[codigo];
+    if (!sala || !sala.resumoFinal || sala.fimEmitido) return;
+    sala.fimEmitido = true;
+    const placar = sala.jogo && sala.jogo.placar;
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (c.codigo === codigo && c.assento != null) {
+        c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar });
+      }
     }
   }
 
@@ -2709,6 +3016,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { criarServidor } = require("./servidor");
+const { criarContas } = require("./contas");
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const OP = { CONT: 0x0, TEXT: 0x1, BIN: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa };
@@ -2825,7 +3133,10 @@ function iniciar(porta) {
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
   const RESPIRO_MS = Number(process.env.RESPIRO_MS) || 1100; // ritmo dos bots na tela
-  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS) });
+  // COFRE de contas: persiste em DADOS_DIR (no Railway, um Volume montado; local,
+  // ./dados). Se não houver disco gravável, cai pra memória e o jogo roda igual.
+  const contas = criarContas();
+  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas });
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
