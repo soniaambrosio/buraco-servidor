@@ -3209,6 +3209,37 @@ const FRASES_RAPIDAS_MESA = {
 };
 const FRASES_RAPIDAS_VALIDAS = new Set(Object.values(FRASES_RAPIDAS_MESA).flat());
 
+// ---------------- CHAT GERAL (lobby) — v1 ----------------
+// Escopo diferente do chat de mesa: aqui é qualquer jogador IDENTIFICADO
+// (mandou pelo menos um "perfil" com jogadorId), sem precisar estar sentado
+// em mesa nenhuma — é o app inteiro (app.html), não o jogo em si. Mesmas
+// regras da v1 do chat de mesa: só frase pré-aprovada, sem texto livre ainda.
+// 7 categorias, ~51 frases, curadas com a Sônia a partir de ~90 frases dela
+// em 10 grupos temáticos, aprovadas em 22/07.
+const FRASES_LOBBY_GERAL = {
+  cumprimentos: ["Olá, pessoal!", "Quem está online?", "Cheguei para jogar!", "Bom dia, jogadores!", "Boa tarde, turma!", "Boa noite, pessoal!", "Como estão todos?"],
+  procurarPartida: ["Alguém disponível para jogar?", "Quem topa uma partida?", "Vamos montar uma mesa?", "Quero entrar na próxima mesa.", "Vou criar uma mesa!", "Partiu jogar?", "Vamos jogar uma partida rápida?", "Hoje quero uma partida disputada!"],
+  procurarDupla: ["Estou procurando uma dupla.", "Pode me convidar.", "Alguém quer formar dupla comigo?", "Preciso de parceiro para jogar.", "Quem aceita jogar comigo?", "Vamos formar uma dupla?", "Tenho uma vaga na dupla.", "Já tenho dupla."],
+  mesas: ["Minha mesa está aberta!", "Tem vaga na minha mesa.", "Falta um jogador!", "Falta uma dupla!", "Venham jogar com a gente!", "A mesa já vai começar.", "Última vaga disponível!"],
+  ranking: ["Parabéns aos líderes!", "O ranking está disputado!", "Hoje eu quero subir no ranking.", "Quem será o campeão do dia?", "Quero meu lugar no Hall!", "Boa sorte aos competidores!"],
+  diversao: ["Vamos nos divertir!", "Hoje o baralho vai me respeitar!", "Vim buscar minha vitória!", "Será que hoje sai uma canastra limpa?", "O morto está me esperando!", "Vamos manter o respeito.", "Jogo bom é jogo amigável.", "Vamos fazer novas amizades."],
+  despedidas: ["Boa partida para vocês!", "Vou jogar agora!", "Estou indo para uma mesa.", "Até mais, pessoal!", "Obrigado pela companhia!", "Até a próxima partida!", "Boa noite e bons jogos!"],
+};
+const FRASES_LOBBY_VALIDAS = new Set(Object.values(FRASES_LOBBY_GERAL).flat());
+
+// ---------------- EMOJIS no chat (mesa + geral) — v1 ----------------
+// Só o pacote GRÁTIS "Emojis Salas Públicas" (10) por enquanto, disponível
+// pra todo mundo nos dois chats. Os 30 do Emoji Realeza VIP (venda avulsa/
+// pacotes) ficam pra quando existir posse de compra salva na conta — só
+// quem comprou pode usar, então precisa desse controle antes. O Emoji Luxo
+// VIP (já existente) é liberado por status de conta VIP (`conta.vip`), não
+// por compra avulsa — também fica pra depois, quando ligarmos essa checagem
+// aqui. Combinado com a Sônia em 22/07.
+const EMOJIS_SALAS_PUBLICAS_VALIDOS = new Set([
+  "Feliz", "Rindo", "Piscadinha", "Beijinho", "Surpreso",
+  "Triste", "Pensativo", "Estiloso", "Aplausos", "Bravo",
+]);
+
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
   // decide o tempo: padrão é IMEDIATO (síncrono, ótimo pros testes); no navegador
@@ -3467,15 +3498,38 @@ function criarServidor(opts = {}) {
         return broadcastSala(c.codigo);
       }
       case "chat": {
-        // frase rápida do chat de mesa: só quem está sentado nessa mesa fala,
-        // e só as 30 frases pré-aprovadas passam (ignora qualquer outra coisa
-        // em silêncio — não é erro do jogador, é só a lista fechada da v1).
+        // frase rápida OU emoji do chat de mesa: só quem está sentado nessa
+        // mesa fala. Frase precisa estar nas 30 pré-aprovadas; emoji precisa
+        // estar no pacote grátis Salas Públicas (v1 — sem checar posse de
+        // compra ainda). Qualquer coisa fora disso é ignorada em silêncio.
         if (c.codigo == null || c.assento == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
-        const frase = String(msg.frase || "");
-        if (!FRASES_RAPIDAS_VALIDAS.has(frase)) return;
         const salaCh = ger.salas[c.codigo];
         const apelidoCh = (salaCh && salaCh.assentos[c.assento] && salaCh.assentos[c.assento].apelido) || "Jogador";
+        if (msg.emoji != null) {
+          const emojiCh = String(msg.emoji || "");
+          if (!EMOJIS_SALAS_PUBLICAS_VALIDOS.has(emojiCh)) return;
+          return broadcastChat(c.codigo, { tipo: "chat", assento: c.assento, apelido: apelidoCh, emoji: emojiCh });
+        }
+        const frase = String(msg.frase || "");
+        if (!FRASES_RAPIDAS_VALIDAS.has(frase)) return;
         return broadcastChat(c.codigo, { tipo: "chat", assento: c.assento, apelido: apelidoCh, frase });
+      }
+      case "chatLobby": {
+        // chat GERAL (fora da mesa, vive no app.html): qualquer jogador
+        // IDENTIFICADO fala — não precisa estar em mesa nenhuma. Mesma regra
+        // de frase/emoji do chat de mesa, ver comentário do case "chat".
+        const jidL = msg.jogadorId || c.jogadorId;
+        if (!jidL) return enviarPara(id, { tipo: "erro", motivo: "identifique-se antes de falar no chat" });
+        c.jogadorId = jidL; _registrarOnline(jidL, id);
+        const apelidoL = msg.apelido || (contas && contas.obter && (contas.obter(jidL) || {}).apelido) || "Jogador";
+        if (msg.emoji != null) {
+          const emojiL = String(msg.emoji || "");
+          if (!EMOJIS_SALAS_PUBLICAS_VALIDOS.has(emojiL)) return;
+          return broadcastLobby({ tipo: "chatLobby", jogadorId: jidL, apelido: apelidoL, emoji: emojiL });
+        }
+        const fraseL = String(msg.frase || "");
+        if (!FRASES_LOBBY_VALIDAS.has(fraseL)) return;
+        return broadcastLobby({ tipo: "chatLobby", jogadorId: jidL, apelido: apelidoL, frase: fraseL });
       }
       case "sair": {
         if (c.codigo != null) {
@@ -3541,6 +3595,15 @@ function criarServidor(opts = {}) {
       if (c.codigo === codigo && c.assento != null) {
         c.enviar(msgChat);
       }
+    }
+  }
+
+  /** Manda a frase do chat GERAL pra todo mundo conectado e identificado no
+   *  app (não filtra por mesa/assento — é o app.html inteiro, não o jogo). */
+  function broadcastLobby(msgChat) {
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (c.jogadorId) c.enviar(msgChat);
     }
   }
 
