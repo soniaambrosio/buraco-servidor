@@ -3240,6 +3240,40 @@ const EMOJIS_SALAS_PUBLICAS_VALIDOS = new Set([
   "Triste", "Pensativo", "Estiloso", "Aplausos", "Bravo",
 ]);
 
+// ---------------- MODO TORCIDA (chat de espectadores) — v1 ----------------
+// Ideia da Sônia, 22/07: espectador entra numa mesa em modo LEITURA (sem
+// ocupar cadeira, sem ver a mão de ninguém — reaproveita ger.visao(codigo,
+// null), que já vem "sem mão" pra assento nulo, de graça, sem precisar mudar
+// nada em salas.js). Ele fala num chat PRÓPRIO (chatTorcida), só entre
+// espectadores da MESMA mesa — os jogadores não veem esse chat.
+// Exceção: um punhado de REAÇÕES NEUTRAS (aplausos/coração/surpresa/coroa)
+// é agregado (várias pessoas reagindo igual em poucos segundos viram UMA
+// mensagem só, tipo "6 pessoas aplaudiram!") e repassado pros JOGADORES,
+// sem identificar quem mandou — o atraso da própria agregação já evita que
+// alguém use o timing de uma reação pra sinalizar informação de jogo.
+const FRASES_TORCIDA = {
+  entrada: ["Cheguei para assistir!", "Essa mesa promete!", "Boa sorte às duplas!", "Hoje tem jogão!", "Vamos ver quem domina a mesa!", "Preparem a pipoca!"],
+  reacoes: ["Que jogada!", "Essa foi bonita!", "Jogada de mestre!", "Que sequência!", "Agora ficou emocionante!", "Foi por pouco!", "Essa doeu!", "Que virada!", "A mesa pegou fogo!", "Essa partida está demais!"],
+  torcida: ["Vamos, dupla!", "Estou torcendo por vocês!", "Ainda dá para virar!", "Segurem a pressão!", "Confiança na dupla!", "Que parceria!", "Vocês estão jogando muito!", "Não desistam!"],
+  elogios: ["Que leitura de jogo!", "Dupla entrosada!", "Isso é experiência!", "Que partida equilibrada!", "Jogaram com categoria!", "Essa merece aplausos!", "Digna do Hall dos Imortais!", "Essa foi de campeão!"],
+  humor: ["Meu coração não aguenta!", "Cadê a pipoca?", "Estou só observando o caos. 😅", "Essa mesa virou final de campeonato!", "Tem emoção até no descarte!", "Essa partida merece replay!", "Ninguém quer entregar esse jogo!", "Eu vim assistir e já estou nervoso!"],
+  fairplay: ["Respeito às duas duplas!", "Que vença a melhor dupla!", "Jogo bonito é assim!", "Excelente clima na mesa!", "Parabéns pela esportividade!", "Grande partida para todos!"],
+  encerramento: ["Parabéns aos vencedores!", "Vocês deram um show!", "Que partida!", "Essa entrou para a história!", "Queremos revanche!", "Quero assistir à próxima!", "Parabéns às duas duplas!", "Até a próxima mesa!"],
+};
+const FRASES_TORCIDA_VALIDAS = new Set(Object.values(FRASES_TORCIDA).flat());
+
+// as 4 reações neutras que chegam (agregadas e anônimas) pros jogadores
+const REACOES_NEUTRAS_TORCIDA = { aplausos: "👏", coracao: "❤️", surpresa: "😮", coroa: "👑" };
+
+// anti-spam da torcida (v1, em memória por conexão): 1 msg a cada 6s, sem
+// repetir a mesma frase/reação duas vezes seguidas, no máximo 3 msgs em 30s.
+const TORCIDA_INTERVALO_MIN_MS = 6000;
+const TORCIDA_JANELA_MS = 30000;
+const TORCIDA_MAX_NA_JANELA = 3;
+// janela de agregação das reações neutras (por mesa+reação) antes de repassar
+// pros jogadores — é o que dá o "atraso" e o "várias pessoas reagiram junto".
+const TORCIDA_AGREGACAO_MS = 3000;
+
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
   // decide o tempo: padrão é IMEDIATO (síncrono, ótimo pros testes); no navegador
@@ -3247,7 +3281,13 @@ function criarServidor(opts = {}) {
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
   const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
-  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
+  // tempos da torcida são configuráveis (testes usam valores bem menores, pra
+  // não esperar segundos de verdade a cada asserção sobre agregação/rate-limit).
+  const torcidaIntervaloMs = opts.torcidaIntervaloMs || TORCIDA_INTERVALO_MIN_MS;
+  const torcidaJanelaMs = opts.torcidaJanelaMs || TORCIDA_JANELA_MS;
+  const torcidaAgregacaoMs = opts.torcidaAgregacaoMs || TORCIDA_AGREGACAO_MS;
+  const torcidaAgregacao = {}; // codigo -> { [reacao]: { contagem, timeout } }
+  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId, espectador }
   const porJogador = {}; // jogadorId -> Set(connId) — "quem está online agora" (Amigos)
   let seq = 0;
 
@@ -3531,6 +3571,53 @@ function criarServidor(opts = {}) {
         if (!FRASES_LOBBY_VALIDAS.has(fraseL)) return;
         return broadcastLobby({ tipo: "chatLobby", jogadorId: jidL, apelido: apelidoL, frase: fraseL });
       }
+      case "assistirMesa": {
+        // Modo Torcida — entra numa mesa em modo LEITURA (sem cadeira, sem ver
+        // mão de ninguém). Não exige a mesa estar em jogo: dá pra assistir
+        // mesmo na sala de espera (ger.visao já cobre os dois casos).
+        const salaAs = ger.salas[msg.codigo];
+        if (!salaAs) return enviarPara(id, { tipo: "erro", motivo: "mesa não encontrada" });
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        _registrarOnline(c.jogadorId, id);
+        c.codigo = msg.codigo; c.assento = null; c.espectador = true;
+        c.apelidoTorcida = String(msg.apelido || "Torcedor").slice(0, 30);
+        enviarPara(id, { tipo: "entrouAssistir", codigo: msg.codigo });
+        return broadcastSala(msg.codigo);
+      }
+      case "chatTorcida": {
+        // frase OU reação neutra da torcida: só quem está ASSISTINDO essa
+        // mesa fala, e só entre espectadores (jogadores não recebem esse
+        // chat — só a reação agregada, ver _agregarReacaoTorcida). Anti-spam
+        // em memória por conexão: intervalo mínimo, sem repetir a mesma
+        // mensagem seguida, e teto de mensagens numa janela de 30s.
+        if (c.codigo == null || !c.espectador) return enviarPara(id, { tipo: "erro", motivo: "você não está assistindo nenhuma mesa" });
+        const ehReacaoTr = msg.reacao != null;
+        const conteudoTr = ehReacaoTr ? String(msg.reacao) : String(msg.frase || "");
+        if (ehReacaoTr) { if (!REACOES_NEUTRAS_TORCIDA[conteudoTr]) return; }
+        else { if (!FRASES_TORCIDA_VALIDAS.has(conteudoTr)) return; }
+        const agoraTr = Date.now();
+        if (c._trUltimaMsg === conteudoTr) {
+          return enviarPara(id, { tipo: "erro", motivo: "escolha uma mensagem diferente da última que você mandou" });
+        }
+        if (c._trUltimoEnvio != null && agoraTr - c._trUltimoEnvio < torcidaIntervaloMs) {
+          return enviarPara(id, { tipo: "erro", motivo: "aguarde um instante antes de mandar outra mensagem" });
+        }
+        c._trJanela = (c._trJanela || []).filter((t) => agoraTr - t < torcidaJanelaMs);
+        if (c._trJanela.length >= TORCIDA_MAX_NA_JANELA) {
+          return enviarPara(id, { tipo: "erro", motivo: "calma! você já mandou várias mensagens — espere um pouco" });
+        }
+        c._trUltimoEnvio = agoraTr; c._trUltimaMsg = conteudoTr; c._trJanela.push(agoraTr);
+        const apelidoTr = c.apelidoTorcida || "Torcedor";
+        // jogadorId vai junto (além do apelido) pra dar pro cliente um jeito
+        // ESTÁVEL de "ocultar" um espectador específico — só por apelido dava
+        // pra colidir com outra pessoa de mesmo nome.
+        if (ehReacaoTr) {
+          broadcastTorcida(c.codigo, { tipo: "chatTorcida", apelido: apelidoTr, jogadorId: c.jogadorId, reacao: conteudoTr });
+          _agregarReacaoTorcida(c.codigo, conteudoTr);
+          return;
+        }
+        return broadcastTorcida(c.codigo, { tipo: "chatTorcida", apelido: apelidoTr, jogadorId: c.jogadorId, frase: conteudoTr });
+      }
       case "sair": {
         if (c.codigo != null) {
           const cod = c.codigo;
@@ -3575,15 +3662,18 @@ function criarServidor(opts = {}) {
     }
   }
 
-  /** Manda pra cada conexão da sala a SUA visão (por assento). É o "tempo real":
-   *  toda mudança (jogada humana, jogadas dos bots, entrada de gente) reflete em
-   *  todos. Cada um vê só a própria mão — a dos outros é só contagem. */
+  /** Manda pra cada conexão da sala a SUA visão. Jogador (assento != null) vê
+   *  sua própria mão — a dos outros é só contagem. Espectador (modo Torcida)
+   *  vê a visão "sem assento" (ger.visao(codigo, null)) — sem mão nenhuma à
+   *  vista, só o que já é público (jogos na mesa, placar, lixo, vez etc). É o
+   *  "tempo real": toda mudança (jogada humana, dos bots, entrada de gente)
+   *  reflete em todo mundo, jogador ou espectador. */
   function broadcastSala(codigo) {
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      if (c.codigo === codigo && c.assento != null) {
-        c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
-      }
+      if (c.codigo !== codigo) continue;
+      if (c.assento != null) c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
+      else if (c.espectador) c.enviar({ tipo: "estado", visao: ger.visao(codigo, null) });
     }
   }
 
@@ -3605,6 +3695,45 @@ function criarServidor(opts = {}) {
       const c = conexoes[cid];
       if (c.jogadorId) c.enviar(msgChat);
     }
+  }
+
+  /** Manda a mensagem do chat da Torcida só pros OUTROS espectadores da MESMA
+   *  mesa — jogadores nunca recebem isso direto (só a reação agregada). */
+  function broadcastTorcida(codigo, msgChat) {
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (c.codigo === codigo && c.espectador) c.enviar(msgChat);
+    }
+  }
+
+  /** Manda a reação agregada da torcida só pros JOGADORES sentados da mesa —
+   *  é o único jeito de algo da torcida chegar até quem está jogando. */
+  function broadcastReacaoTorcidaJogadores(codigo, msgReacao) {
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (c.codigo === codigo && c.assento != null) c.enviar(msgReacao);
+    }
+  }
+
+  /** Junta reações neutras iguais que chegam dentro de uma janela curta (a
+   *  partir da primeira) numa mensagem só pros jogadores — "6 pessoas
+   *  aplaudiram!" em vez de 6 mensagens soltas. O atraso da própria janela é
+   *  o que evita alguém usar o TIMING da reação pra sinalizar informação de
+   *  jogo (a reação só chega depois que a janela fecha, nunca na hora). */
+  function _agregarReacaoTorcida(codigo, reacao) {
+    if (!torcidaAgregacao[codigo]) torcidaAgregacao[codigo] = {};
+    const porMesa = torcidaAgregacao[codigo];
+    if (!porMesa[reacao]) porMesa[reacao] = { contagem: 0, timeout: null };
+    const bucket = porMesa[reacao];
+    bucket.contagem += 1;
+    if (bucket.timeout) return; // janela já aberta — só soma na contagem
+    bucket.timeout = setTimeout(() => {
+      const contagem = bucket.contagem;
+      delete porMesa[reacao];
+      broadcastReacaoTorcidaJogadores(codigo, {
+        tipo: "torcidaReacao", reacao, emoji: REACOES_NEUTRAS_TORCIDA[reacao], contagem,
+      });
+    }, torcidaAgregacaoMs);
   }
 
   return { conectar, desconectar, processar, broadcastSala, ger, conexoes };
@@ -3751,7 +3880,14 @@ function iniciar(porta) {
   // COFRE de contas: persiste em DADOS_DIR (no Railway, um Volume montado; local,
   // ./dados). Se não houver disco gravável, cai pra memória e o jogo roda igual.
   const contas = criarContas();
-  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas });
+  const servidor = criarServidor({
+    agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas,
+    // tempos do Modo Torcida configuráveis por env — só usado em teste, pra não
+    // esperar segundos de verdade a cada asserção de rate-limit/agregação.
+    torcidaIntervaloMs: Number(process.env.TORCIDA_INTERVALO_MS) || undefined,
+    torcidaJanelaMs: Number(process.env.TORCIDA_JANELA_MS) || undefined,
+    torcidaAgregacaoMs: Number(process.env.TORCIDA_AGREGACAO_MS) || undefined,
+  });
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
