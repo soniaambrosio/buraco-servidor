@@ -3193,6 +3193,22 @@ module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
 
 const { criarGerenciador } = require("./salas");
 
+// ---------------- CHAT DE MESA (frases rápidas) — v1 ----------------
+// Só quem está SENTADO numa cadeira da mesa fala (espectador não existe hoje
+// nesse client, mas a checagem já fica pronta caso apareça). v1 é só frases
+// PRÉ-DEFINIDAS (sem texto livre): a moderação vem "de graça" porque a lista
+// é fechada e aprovada — por isso não precisa de filtro anti-palavrão aqui
+// ainda (esse filtro entra quando a gente liberar texto livre, numa v2).
+// 5 categorias × 6 frases = 30, aprovadas com a Sônia em 22/07.
+const FRASES_RAPIDAS_MESA = {
+  cumprimentos: ["Boa sorte!", "Bom jogo!", "Vamos começar!", "Olá, pessoal!", "Sejam bem-vindos!", "Essa mesa promete!"],
+  elogios: ["Ótima jogada!", "Mandou bem!", "Que canastra!", "Bela sequência!", "Que virada!", "Parabéns!"],
+  reacoes: ["Que sorte!", "Foi por pouco!", "Essa doeu!", "Que jogo apertado!", "Cartas, colaborem!", "Estou de olho! 👀"],
+  dupla: ["Boa, parceiro!", "Confio na dupla!", "Vamos reagir!", "Dá para virar!", "Foi mal, parceiro!", "Sem problema!"],
+  despedidas: ["Boa partida!", "Parabéns pela vitória!", "Foi um ótimo jogo!", "Quero revanche!", "Valeu, pessoal!", "Obrigado pela partida!"],
+};
+const FRASES_RAPIDAS_VALIDAS = new Set(Object.values(FRASES_RAPIDAS_MESA).flat());
+
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
   // decide o tempo: padrão é IMEDIATO (síncrono, ótimo pros testes); no navegador
@@ -3450,6 +3466,17 @@ function criarServidor(opts = {}) {
         }
         return broadcastSala(c.codigo);
       }
+      case "chat": {
+        // frase rápida do chat de mesa: só quem está sentado nessa mesa fala,
+        // e só as 30 frases pré-aprovadas passam (ignora qualquer outra coisa
+        // em silêncio — não é erro do jogador, é só a lista fechada da v1).
+        if (c.codigo == null || c.assento == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
+        const frase = String(msg.frase || "");
+        if (!FRASES_RAPIDAS_VALIDAS.has(frase)) return;
+        const salaCh = ger.salas[c.codigo];
+        const apelidoCh = (salaCh && salaCh.assentos[c.assento] && salaCh.assentos[c.assento].apelido) || "Jogador";
+        return broadcastChat(c.codigo, { tipo: "chat", assento: c.assento, apelido: apelidoCh, frase });
+      }
       case "sair": {
         if (c.codigo != null) {
           const cod = c.codigo;
@@ -3502,6 +3529,17 @@ function criarServidor(opts = {}) {
       const c = conexoes[cid];
       if (c.codigo === codigo && c.assento != null) {
         c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
+      }
+    }
+  }
+
+  /** Manda a frase do chat de mesa pra todo mundo sentado nessa sala (igual
+   *  broadcastSala, mas manda a msg "chat" em vez de reenviar o estado). */
+  function broadcastChat(codigo, msgChat) {
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (c.codigo === codigo && c.assento != null) {
+        c.enviar(msgChat);
       }
     }
   }
