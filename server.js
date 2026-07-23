@@ -2764,6 +2764,80 @@ function criarContas(opts = {}) {
     return contaPublica(c);
   }
 
+  // ===== AMIGOS (buscar / pedir / responder / listar) =====
+  function _gerarCodigo(id) {
+    let h = 0; for (let i = 0; i < id.length; i++) { h = (h * 31 + id.charCodeAt(i)) >>> 0; }
+    const base = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let s = "", n = h;
+    for (let i = 0; i < 5; i++) { s += base[n % base.length]; n = Math.floor(n / base.length); }
+    return "BMV-" + s;
+  }
+  function codigoConta(id) {
+    const c = dados.contas[id]; if (!c) return null;
+    if (!c.codigo) { c.codigo = _gerarCodigo(id); salvar(); }
+    return c.codigo;
+  }
+  /** Cartão compacto de um jogador pra listas/busca. */
+  function _resumoAmigo(c) {
+    if (!c) return null;
+    const p = progressoDeXp(c.xp);
+    return { id: c.id, apelido: c.apelido, nivel: p.nivel,
+      avatarTipo: c.avatarTipo || null, avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0 };
+  }
+  /** Busca por apelido (trecho, sem diferenciar maiúsculas) OU pelo código exato. */
+  function buscarPorApelido(termo, excluirId, limite) {
+    termo = String(termo || "").trim(); if (!termo) return [];
+    const alvo = termo.toLowerCase(), cod = termo.toUpperCase(); const out = [];
+    for (const id in dados.contas) {
+      if (id === excluirId) continue;
+      const c = dados.contas[id];
+      const ap = (c.apelido || "").toLowerCase();
+      if (ap.indexOf(alvo) >= 0 || (c.codigo && c.codigo.toUpperCase() === cod)) {
+        out.push(_resumoAmigo(c));
+        if (out.length >= (limite || 20)) break;
+      }
+    }
+    return out;
+  }
+  /** Manda pedido de amizade. Se o outro já tinha pedido pra você, vira amizade na hora. */
+  function enviarPedido(deId, paraId) {
+    if (!deId || !paraId || deId === paraId) return { erro: "pedido inválido" };
+    const de = dados.contas[deId], para = dados.contas[paraId];
+    if (!de || !para) return { erro: "jogador não encontrado" };
+    de.amigos = de.amigos || []; de.pedidosEnviados = de.pedidosEnviados || []; de.pedidosRecebidos = de.pedidosRecebidos || [];
+    para.pedidosRecebidos = para.pedidosRecebidos || []; para.amigos = para.amigos || [];
+    if (de.amigos.indexOf(paraId) >= 0) return { erro: "vocês já são amigos" };
+    if (de.pedidosRecebidos.indexOf(paraId) >= 0) return responderPedido(deId, paraId, true); // aceita direto
+    if (de.pedidosEnviados.indexOf(paraId) < 0) de.pedidosEnviados.push(paraId);
+    if (para.pedidosRecebidos.indexOf(deId) < 0) para.pedidosRecebidos.push(deId);
+    de.atualizadoEm = agora(); para.atualizadoEm = agora(); salvar();
+    return { ok: true, paraApelido: para.apelido, paraId: paraId };
+  }
+  /** Aceita ou recusa um pedido recebido. */
+  function responderPedido(id, deId, aceitar) {
+    const eu = dados.contas[id], outro = dados.contas[deId];
+    if (!eu || !outro) return { erro: "jogador não encontrado" };
+    eu.pedidosRecebidos = (eu.pedidosRecebidos || []).filter((x) => x !== deId);
+    outro.pedidosEnviados = (outro.pedidosEnviados || []).filter((x) => x !== id);
+    if (aceitar) {
+      eu.amigos = eu.amigos || []; outro.amigos = outro.amigos || [];
+      if (eu.amigos.indexOf(deId) < 0) eu.amigos.push(deId);
+      if (outro.amigos.indexOf(id) < 0) outro.amigos.push(id);
+    }
+    eu.atualizadoEm = agora(); outro.atualizadoEm = agora(); salvar();
+    return { ok: true, aceitou: !!aceitar, amigoApelido: outro.apelido, amigoId: deId };
+  }
+  /** Estado completo de amizades pra pintar a tela (marca quem está online). */
+  function estadoAmigos(id, onlineSet) {
+    const c = dados.contas[id];
+    const mapa = (arr) => (arr || []).map((x) => { const r = _resumoAmigo(dados.contas[x]); if (r && onlineSet) r.online = onlineSet.has(x); return r; }).filter(Boolean);
+    return {
+      meuCodigo: codigoConta(id),
+      amigos: c ? mapa(c.amigos) : [],
+      pedidosRecebidos: c ? mapa(c.pedidosRecebidos) : [],
+      pedidosEnviados: c ? mapa(c.pedidosEnviados) : [],
+    };
+  }
+
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
@@ -2772,6 +2846,7 @@ function criarContas(opts = {}) {
     definirMascoteGaleria, removerMascote,
     definirMolduraGaleria, removerMoldura, definirTituloGaleria, removerTitulo,
     definirTratamento,
+    buscarPorApelido, enviarPedido, responderPedido, estadoAmigos, codigoConta,
     _dados: () => dados, ECON,
   };
 }
@@ -3094,6 +3169,19 @@ function criarServidor(opts = {}) {
     if (c && typeof c.enviar === "function") c.enviar(msg);
   }
 
+  // manda uma msg pra TODAS as conexões de um jogador (por jogadorId) — usado pra
+  // avisar amigos online (pedido chegou / amizade aceita etc.)
+  function enviarParaJogador(jid, msg) {
+    if (!jid) return;
+    for (const k in conexoes) { if (conexoes[k].jogadorId === jid) enviarPara(k, msg); }
+  }
+  // conjunto de jogadorIds online agora (pra marcar amigos online)
+  function jogadoresOnline() {
+    const s = new Set();
+    for (const k in conexoes) { if (conexoes[k].jogadorId) s.add(conexoes[k].jogadorId); }
+    return s;
+  }
+
   function processar(id, msg) {
     const c = conexoes[id];
     if (!c) return;
@@ -3134,6 +3222,7 @@ function criarServidor(opts = {}) {
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
         const jid = msg.jogadorId || c.jogadorId;
+        if (jid) c.jogadorId = jid; // associa a conexão ao jogador (pra ficar "online" p/ amigos)
         if (!contas || !jid) return enviarPara(id, { tipo: "perfil", conta: null });
         const conta = contas.obterOuCriar(jid, msg.apelido);
         return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
@@ -3203,6 +3292,44 @@ function criarServidor(opts = {}) {
         const r = contas.definirTratamento(jid, msg.valor);
         if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         return enviarPara(id, { tipo: "tratamento", conta: r });
+      }
+      // ===== AMIGOS =====
+      case "buscarJogador": {
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "resultadoBusca", lista: [] });
+        contas.obterOuCriar(c.jogadorId, msg.apelido);
+        const lista = contas.buscarPorApelido(msg.termo, c.jogadorId, 20);
+        const on = jogadoresOnline();
+        lista.forEach((a) => { a.online = on.has(a.id); });
+        return enviarPara(id, { tipo: "resultadoBusca", lista });
+      }
+      case "enviarPedidoAmizade": {
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login pra adicionar amigos" });
+        contas.obterOuCriar(c.jogadorId, msg.apelido);
+        const r = contas.enviarPedido(c.jogadorId, msg.alvo);
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        if (r.aceitou) enviarPara(id, { tipo: "pedidoAmizadeRespondido", aceitou: true, amigoApelido: r.amigoApelido });
+        else enviarPara(id, { tipo: "pedidoAmizadeEnviado", paraApelido: r.paraApelido });
+        enviarPara(id, { tipo: "amigosAtualizar" });        // atualiza a minha própria lista
+        enviarParaJogador(msg.alvo, { tipo: "amigosAtualizar" }); // e a do outro, se online
+        return;
+      }
+      case "responderPedidoAmizade": {
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login" });
+        const r = contas.responderPedido(c.jogadorId, msg.deId, msg.aceitar);
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        enviarPara(id, { tipo: "pedidoAmizadeRespondido", aceitou: r.aceitou, amigoApelido: r.amigoApelido });
+        enviarPara(id, { tipo: "amigosAtualizar" });
+        enviarParaJogador(msg.deId, { tipo: "amigosAtualizar" });
+        return;
+      }
+      case "listarAmigos": {
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "amigos", meuCodigo: null, amigos: [], pedidosRecebidos: [], pedidosEnviados: [] });
+        contas.obterOuCriar(c.jogadorId, msg.apelido);
+        return enviarPara(id, Object.assign({ tipo: "amigos" }, contas.estadoAmigos(c.jogadorId, jogadoresOnline())));
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
