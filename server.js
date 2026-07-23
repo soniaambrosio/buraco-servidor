@@ -1431,6 +1431,10 @@ function criarJogo({ assentos, modalidade = "sbtl", metaPontos = 3000 } = {}) {
     // só some numa partida nova.
     rodadasVulneravel: { nos: 0, eles: 0 },
     encerrada: false,        // partida encerrada (bateu a meta)
+    // STATS DA PARTIDA por assento (pros Cartões de Conquista — Sônia 23/jul): acumulam
+    // ao longo da partida (NÃO resetam por rodada). canastras/canastras1000 são da DUPLA
+    // (creditadas aos dois parceiros); batidas/batidasMorto são de QUEM bateu.
+    statsPartida: [0, 1, 2, 3].map(function () { return { canastras: 0, canastras1000: 0, batidas: 0, batidasMorto: 0 }; }),
     // campos por rodada (preenchidos em distribuirRodada):
     maos: null,
     monte: null,
@@ -2000,6 +2004,25 @@ function contarPontos(jogo) {
     }
   }
   jogo.pontosRodada = resultado;
+  // STATS DA PARTIDA (Cartões de Conquista): acumula por assento nesta rodada.
+  if (jogo.statsPartida) {
+    for (const dupla of ["nos", "eles"]) {
+      const assentos = dupla === "nos" ? [0, 2] : [1, 3];
+      const det = (resultado[dupla] && resultado[dupla].detalhe) || {};
+      const canas = (det.limpas || 0) + (det.sujas || 0) + (det.de500 || 0) + (det.asAas || 0);
+      for (const a of assentos) {
+        jogo.statsPartida[a].canastras += canas;            // dupla → creditado aos dois
+        jogo.statsPartida[a].canastras1000 += (det.asAas || 0);
+      }
+    }
+    // BATIDA (só quem bateu): +1; e +1 em batidasMorto se a dupla dele pegou o morto
+    if (jogo.assentoQueBateu != null && jogo.statsPartida[jogo.assentoQueBateu]) {
+      jogo.statsPartida[jogo.assentoQueBateu].batidas += 1;
+      if (jogo.duplaQueBateu && jogo.mortoPego[jogo.duplaQueBateu]) {
+        jogo.statsPartida[jogo.assentoQueBateu].batidasMorto += 1;
+      }
+    }
+  }
   if (jogo.placar.nos >= jogo.metaPontos || jogo.placar.eles >= jogo.metaPontos) {
     jogo.encerrada = true; // partida acabou (bateu a meta)
   }
@@ -2486,6 +2509,12 @@ function criarContas(opts = {}) {
       xpNoNivel: p.xpNoNivel, xpProxNivel: p.xpProxNivel, faltamXp: p.faltam,
       partidas: c.partidas, vitorias: c.vitorias, derrotas: c.derrotas,
       canastras: c.canastras,
+      // contadores dos Cartões de Conquista (Sônia 23/jul) — default 0 em contas antigas
+      canastras1000: c.canastras1000 || 0,
+      batidas: c.batidas || 0,
+      batidasMorto: c.batidasMorto || 0,
+      vitoriasDupla: c.vitoriasDupla || 0,
+      itensVIP: c.itensVIP || 0, // placeholder (precisa de inventário — Colecionador VIP fica pra depois)
       aproveitamento: c.partidas ? Math.round((c.vitorias / c.partidas) * 100) : 0,
       // avatar: tipo "foto" (upload, servido em /avatar/<id>), "galeria" (avatarId
       // = índice do avatar pronto) ou null (padrão). avatarVer serve de "cache-bust".
@@ -2513,6 +2542,7 @@ function criarContas(opts = {}) {
         id, apelido: (apelido || "Jogador").slice(0, 24),
         moedas: ECON.BONUS_BOAS_VINDAS, xp: 0,
         partidas: 0, vitorias: 0, derrotas: 0, canastras: 0,
+        canastras1000: 0, batidas: 0, batidasMorto: 0, vitoriasDupla: 0, // Cartões de Conquista
         criadoEm: agora(), atualizadoEm: agora(),
       };
       salvar();
@@ -2589,6 +2619,11 @@ function criarContas(opts = {}) {
       c.partidas += 1;
       if (venceu) c.vitorias += 1; else c.derrotas += 1;
       c.canastras += canastras;
+      // CONTADORES DOS CARTÕES DE CONQUISTA (Sônia 23/jul)
+      c.canastras1000 = (c.canastras1000 || 0) + Math.max(0, j.canastras1000 || 0);
+      c.batidas = (c.batidas || 0) + Math.max(0, j.batidas || 0);
+      c.batidasMorto = (c.batidasMorto || 0) + Math.max(0, j.batidasMorto || 0);
+      if (venceu && j.parceiroHumano) c.vitoriasDupla = (c.vitoriasDupla || 0) + 1;
       c.atualizadoEm = agora();
 
       const nivelDepois = nivelDeXp(c.xp);
@@ -2982,12 +3017,23 @@ function criarGerenciador(opts = {}) {
     if (!contas) return null;
     const jogo = sala.jogo;
     const jogadores = [];
+    const parceiro = (i) => (i % 2 === 0 ? (i === 0 ? 2 : 0) : (i === 1 ? 3 : 1));
     for (let i = 0; i < 4; i++) {
       const aj = jogo.assentos[i], sj = sala.assentos[i];
       // só credita quem TERMINOU a partida como humano E tem conta (jogadorId).
       // Quem virou bot no meio (saiu/AFK) não pontua.
       if (aj && aj.tipo === "humano" && sj && sj.jogadorId) {
-        jogadores.push({ assento: i, id: sj.jogadorId, apelido: aj.apelido });
+        const st = (jogo.statsPartida && jogo.statsPartida[i]) || {};
+        const pj = jogo.assentos[parceiro(i)];
+        jogadores.push({
+          assento: i, id: sj.jogadorId, apelido: aj.apelido,
+          // stats da partida pros Cartões de Conquista
+          canastras: st.canastras || 0,
+          canastras1000: st.canastras1000 || 0,
+          batidas: st.batidas || 0,
+          batidasMorto: st.batidasMorto || 0,
+          parceiroHumano: !!(pj && pj.tipo === "humano"), // pra "Dupla Imbatível"
+        });
       }
     }
     try {
