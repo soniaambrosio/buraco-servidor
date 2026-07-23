@@ -261,9 +261,9 @@ function validarTrinca(cartas) {
  */
 function validarJogo(cartas, opts = {}) {
   // O GRUPO DE ASES ("canastra de ás") é da família TRINCA — mesmo VALOR, não é
-  // sequência de verdade. Só vale onde trinca vale (Fechado). No SBTL/Aberto, ás
+  // sequência de verdade. Só vale onde trinca vale (Fechado). No STBL/Aberto, ás
   // só entra em SEQUÊNCIA (A-2-3 ou Q-K-A). Bug pego pela Sônia (20/jul): o robô
-  // descia AAA no SBTL porque essa exceção furava a trava de trinca.
+  // descia AAA no STBL porque essa exceção furava a trava de trinca.
   const soAses = !!(cartas && cartas.length && cartas.every((c) => c && c.valor === "A" && !c.eh_coringa));
   const rSeq = validarSequencia(cartas);
   if (rSeq.valido && !(soAses && !opts.permiteTrinca)) return rSeq;
@@ -272,7 +272,7 @@ function validarJogo(cartas, opts = {}) {
     if (rTri.valido) return rTri;
     return { valido: false, motivo: "não forma uma sequência nem uma trinca válida" };
   }
-  if (soAses) return { valido: false, motivo: "no SBTL/Aberto o ás só entra em sequência (trinca de ases é só no Fechado)" };
+  if (soAses) return { valido: false, motivo: "no STBL/Aberto o ás só entra em sequência (trinca de ases é só no Fechado)" };
   return rSeq;
 }
 
@@ -320,7 +320,7 @@ module.exports = {
 
   __fabricas["bot"] = function (module, exports, require) {
 // motor/bot.js
-// Cérebro de decisão de um bot "intermediário" de Buraco (variante SBTL/Jogatina).
+// Cérebro de decisão de um bot "intermediário" de Buraco (variante STBL/Jogatina).
 // Reutiliza a validação de sequência/canastra já testada em motor/canastra.js —
 // o bot NUNCA reimplementa regra de jogo; ele só decide ENTRE jogadas válidas.
 //
@@ -668,7 +668,7 @@ function decidirCompra({ mao, topoLixo, jogosMesaDupla = [], tamanhoLixo = 1, mo
     };
   }
 
-  // ===== FECHADO / SBTL: compra JUSTIFICADA =====
+  // ===== FECHADO / STBL: compra JUSTIFICADA =====
   // TRAVA "CARTA NÃO TEM MOLA": só compra o lixo se houver PROVA concreta de
   // uso imediato do topo. A prova é o plano que será executado — impossível
   // comprar e não usar. Sem prova → monte.
@@ -811,7 +811,7 @@ function provarUsoDoTopo({ topo, mao, jogosMesaDupla, tamanhoLixo = 1, permiteTr
  *                       curingão SUJA EM DEFINITIVO — nunca há como limpar,
  *                       porque ele não tem naipe pra "voltar" ao lugar.
  *
- * SBTL = "Sem Trinca e Bate com Limpa" — é o Fechado com as duas regras mais
+ * STBL = "Sem Trinca e Batida Limpa" — é o Fechado com as duas regras mais
  * duras. Daí ser a modalidade dos jogadores experientes.
  */
 const MODALIDADES = {
@@ -953,7 +953,7 @@ function vizinhos(mao, carta) {
 }
 
 /**
- * Decide se o bot deve pegar o morto AGORA. No SBTL, basta a mão estar vazia
+ * Decide se o bot deve pegar o morto AGORA. No STBL, basta a mão estar vazia
  * (não exige canastra). Retorna true se a mão ficou vazia após as baixadas.
  */
 function decidirPegarMorto({ maoAposBaixar, mortoDisponivel }) {
@@ -1442,6 +1442,7 @@ function distribuirRodada(jogo) {
   jogo.turnosRodada = 0;          // válvula de segurança anti-livelock (ver passarVez)
   jogo.rodadaEncerrada = false;
   jogo.duplaQueBateu = null;
+  jogo.assentoQueBateu = null;    // qual assento deu a batida (pro mascote comemorar) — null se esgotamento
   jogo.pontosRodada = null;
   return jogo;
 }
@@ -1472,6 +1473,7 @@ function visaoDoAssento(jogo, assento) {
     // quando rodadaEncerrada vira true, estes dois vêm preenchidos (até a próxima
     // distribuirRodada, que os zera de novo) — é o detalhe pra tela de contagem
     duplaQueBateu: jogo.duplaQueBateu,
+    assentoQueBateu: jogo.assentoQueBateu,
     pontosRodada: jogo.pontosRodada,
     rodadasVulneravel: jogo.rodadasVulneravel, // pra tela mostrar o selo "vulnerável · precisa N+"
     vez: jogo.vez,
@@ -1603,7 +1605,7 @@ function aoZerarMaoBaixando(jogo, assento) {
     return { pegouMorto: true };
   }
   if (duplaPodeBater(jogo, dupla)) {
-    encerrarRodada(jogo, dupla);
+    encerrarRodada(jogo, dupla, assento);
     return { bateu: true };
   }
   return null;
@@ -1676,7 +1678,7 @@ function topoTemUsoLegal(jogo, assento, topo) {
   return false;
 }
 
-/** COMPRAR O LIXO INTEIRO. No SBTL/Fechado (compra justificada) o TOPO precisa
+/** COMPRAR O LIXO INTEIRO. No STBL/Fechado (compra justificada) o TOPO precisa
  *  ter uso imediato — "carta não tem mola" (legalidade via topoTemUsoLegal).
  *  Leva o lixo todo pra mão e liga a trava deveUsarTopo (só solta quando o topo
  *  for baixado/estendido; até lá não pode descartar). */
@@ -1789,7 +1791,7 @@ function descartar(jogo, assento, idCarta) {
       return { ok: true, descarte: carta, pegouMorto: true };
     }
     // BATIDA FINAL (tem limpa, garantido pela checagem acima) — encerra a rodada
-    encerrarRodada(jogo, dupla);
+    encerrarRodada(jogo, dupla, assento);
     return { ok: true, descarte: carta, bateu: true };
   }
   passarVez(jogo);
@@ -1885,11 +1887,13 @@ function encerrarRodadaPorEsgotamento(jogo) {
 
 /** Encerra a rodada, conta os pontos das duas duplas e soma no placar. Se
  *  alguma dupla bateu a meta, a PARTIDA encerra. `duplaQueBateu` = "nos"|"eles"
- *  (bônus de batida) ou null (esgotamento). */
-function encerrarRodada(jogo, duplaQueBateu) {
+ *  (bônus de batida) ou null (esgotamento). `assentoQueBateu` = o assento que deu
+ *  a batida (pra tela comemorar com o mascote DELE especificamente) ou null. */
+function encerrarRodada(jogo, duplaQueBateu, assentoQueBateu) {
   if (jogo.rodadaEncerrada) return; // idempotente
   jogo.rodadaEncerrada = true;
   jogo.duplaQueBateu = duplaQueBateu;
+  jogo.assentoQueBateu = (assentoQueBateu === undefined ? null : assentoQueBateu);
   contarPontos(jogo);
 }
 
@@ -2082,7 +2086,7 @@ function jogarTurnoBot(jogo, assento) {
 
   let comprouLixo = false;
   // SEGURANÇA anti-trava (bug do lixo vazio, Sônia 18/jul): pegar o lixo OBRIGA a
-  // baixar o topo (deveUsarTopo) no SBTL/Fechado. Se, depois de baixar o topo, não
+  // baixar o topo (deveUsarTopo) no STBL/Fechado. Se, depois de baixar o topo, não
   // sobrar carta pra DESCARTAR, o bot fica com 1 carta impossível de largar e passa
   // a vez SEM descartar — o lixo chega vazio pro próximo. Então: só pega o lixo se
   // sobrar reserva pro descarte DEPOIS do custo mínimo de baixar o topo. Senão,
@@ -2092,7 +2096,7 @@ function jogarTurnoBot(jogo, assento) {
     (jogo.maos[assento].length + jogo.lixo.length) - custoMinimoTopo(jogo, assento, topo) < reservaMinima(jogo, assento);
   // VULNERABILIDADE (bug do bot adversário abrindo 15 pts vulnerável, Sônia 19/jul):
   // com a dupla vulnerável e a mesa AINDA vazia (abertura) numa modalidade que obriga
-  // usar o topo (SBTL/Fechado), pegar o lixo forçaria ABRIR um jogo com o topo — e a
+  // usar o topo (STBL/Fechado), pegar o lixo forçaria ABRIR um jogo com o topo — e a
   // abertura precisa somar 75/90. Um jogo do topo (3 cartas) quase nunca alcança isso,
   // e o forcarTopoNaMesa acabava ABRINDO fraco na marra. Então o bot NÃO pega o lixo
   // nesse caso: compra do monte e abre da mão quando puder (o cérebro respeita o
@@ -2132,7 +2136,7 @@ function jogarTurnoBot(jogo, assento) {
     modalidade: jogo.modalidade,
   });
 
-  // 2.5) DESCE O TOPO OBRIGATÓRIO PRIMEIRO. Se comprou o lixo (SBTL/Fechado), o
+  // 2.5) DESCE O TOPO OBRIGATÓRIO PRIMEIRO. Se comprou o lixo (STBL/Fechado), o
   //    topo TEM que ir pra mesa antes de qualquer outra jogada — senão uma extensão
   //    de uma carta DUPLICADA (mesmo valor/naipe, id diferente) pode roubar o exato
   //    encaixe do topo e deixá-lo órfão na mão, travando o descarte (bug raro do
@@ -2376,41 +2380,6 @@ const ECON = {
   XP_FRACAO_PLACAR: 0.02,  // + 2% dos pontos da dupla viram XP (recompensa jogar bem)
 };
 
-// Recompensa por convidar um amigo que vira conta nova (creditada ao PADRINHO
-// quando o pedido de amizade é aceito pela 1ª vez entre os dois — ver enviarPedidoAmizade).
-const RECOMPENSA_CONVITE = 500;
-
-// Presentes: catálogo igual ao da telinha "Enviar presente" do app (temáticos —
-// ver KIT-NATAL.md/KIT-CARNAVAL.md). Os "seus" (custoRemetente:0) são de graça pro
-// remetente — um gesto social; os "da loja" custam moedas de quem manda. Em
-// qualquer caso o destinatário ganha uma alegrinha em moedas (valor MODESTO e
-// desacoplado do custo — de propósito, pra não virar lavagem de moeda entre 2
-// contas se revezando). Limite diário de presentes que RENDEM moeda pro
-// destinatário (PRESENTES_QUE_RENDEM_POR_DIA) — depois do limite ainda dá pra
-// mandar/receber o gesto, só não credita mais moeda nesse dia.
-const CATALOGO_PRESENTES = {
-  caixaNatal:  { nome: "Caixa de Natal",  emoji: "🎁", custoRemetente: 0,   moedasDestinatario: 15 },
-  trofeuFolia: { nome: "Troféu de Folia", emoji: "🏆", custoRemetente: 0,   moedasDestinatario: 15 },
-  panetone:    { nome: "Panetone",        emoji: "🍞", custoRemetente: 0,   moedasDestinatario: 15 },
-  mascara:     { nome: "Máscara",         emoji: "🎭", custoRemetente: 0,   moedasDestinatario: 15 },
-  estrela:     { nome: "Estrela",         emoji: "⭐", custoRemetente: 0,   moedasDestinatario: 15 },
-  confeteVip:  { nome: "Confete VIP",     emoji: "🎊", custoRemetente: 0,   moedasDestinatario: 15 },
-  miniArvore:  { nome: "Mini Árvore",     emoji: "🎄", custoRemetente: 150, moedasDestinatario: 25 },
-  penaDourada: { nome: "Pena Dourada",    emoji: "🪶", custoRemetente: 200, moedasDestinatario: 30 },
-};
-const PRESENTES_QUE_RENDEM_POR_DIA = 3; // a partir do 4º presente recebido no dia, só o gesto (sem moeda)
-
-// Missões diárias (mesmas do mock da tela Recompensas) — resetam a cada dia novo.
-const CATALOGO_MISSOES = {
-  jogar3:     { nome: "Jogar 3 partidas",   meta: 3, campo: "partidas",  moedas: 150, xp: 0  },
-  canastra2:  { nome: "Fazer 2 canastras",  meta: 2, campo: "canastras", moedas: 200, xp: 0  },
-  vencer1:    { nome: "Vencer 1 partida",   meta: 1, campo: "vitorias",  moedas: 100, xp: 50 },
-};
-
-// Login diário: recompensa cresce ao longo de 7 dias corridos; quebrar a sequência
-// volta pro dia 1. Dia 7 = "Baú Real".
-const LOGIN_DIARIO_RECOMPENSAS = [100, 200, 300, 500, 700, 1000, 2000];
-
 /** XP acumulado necessário pra ATINGIR o nível n. Curva suave e sempre crescente:
  *  nível 1 = 0 · 2 = 100 · 3 = 300 · 4 = 600 · 5 = 1.000 · 6 = 1.500 … */
 function xpAcumuladoParaNivel(n) { return 50 * (n - 1) * n; }
@@ -2484,59 +2453,11 @@ function criarContas(opts = {}) {
       // avatar: tipo "foto" (upload, servido em /avatar/<id>), "galeria" (avatarId
       // = índice do avatar pronto) ou null (padrão). avatarVer serve de "cache-bust".
       avatarTipo: c.avatarTipo || null, avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0,
-      // código de convite (curto, único) — pra amigos te acharem sem trocar id técnico
-      codigo: c.codigo || null,
-      // progresso do dia (missões + login) — já vem com o reset diário aplicado
-      // (ver obterOuCriar/obter, que chamam _resetDiarioSeNecessario antes daqui)
-      missoesHoje: c.missoes ? { partidas: c.missoes.partidas, canastras: c.missoes.canastras, vitorias: c.missoes.vitorias, resgatadas: c.missoes.resgatadas.slice() } : null,
-      loginStreak: c.login ? c.login.streak : 0,
-      loginUltimoDia: c.login ? c.login.ultimoDia : null,
-      // campos genéricos de selo/status da conta — se existirem no registro, só
-      // repassa pro cliente (mesmo padrão de qualquer outro campo aqui em cima;
-      // nada aqui altera quem é quem, só exibe o que já está salvo na conta)
-      fundadora: !!c.fundadora,
-      vip: !!c.vip,
-      titulo: c.titulo || null,
+      // mascote da vitrine (colecionável, item VIP): só galeria (sem upload de foto),
+      // mascoteId = índice em __MASCOTES (cliente/galeria_mascotes.js) ou null (nenhum
+      // equipado — a mesa não mostra o companheiro espiando nem a comemoração).
+      mascoteId: c.mascoteId || null, mascoteVer: c.mascoteVer || 0,
     };
-  }
-
-  // ------------------- amigos / presentes / missões / login (novo) -------------------
-  const CODIGO_ALFABETO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sem 0/O/1/I (confunde)
-  function _gerarCodigoBruto() {
-    let s = "";
-    for (let i = 0; i < 6; i++) s += CODIGO_ALFABETO[Math.floor(Math.random() * CODIGO_ALFABETO.length)];
-    return s.slice(0, 3) + "-" + s.slice(3);
-  }
-  function gerarCodigoUnico() {
-    let tentativa;
-    do { tentativa = _gerarCodigoBruto(); }
-    while (Object.values(dados.contas).some((c) => c.codigo === tentativa));
-    return tentativa;
-  }
-  function _hojeISO() { return new Date(agora()).toISOString().slice(0, 10); }
-  /** Preenche campos que contas ANTIGAS (de antes desta versão) ainda não têm —
-   *  não quebra quem já estava jogando quando essas features chegaram. */
-  function _garantirCamposNovos(c) {
-    if (!c) return c;
-    let mudou = false;
-    if (!c.codigo) { c.codigo = gerarCodigoUnico(); mudou = true; }
-    if (!Array.isArray(c.amigos)) { c.amigos = []; mudou = true; }
-    if (!Array.isArray(c.pedidosRecebidos)) { c.pedidosRecebidos = []; mudou = true; }
-    if (!Array.isArray(c.pedidosEnviados)) { c.pedidosEnviados = []; mudou = true; }
-    if (!c.presentes) { c.presentes = { dia: null, recebidosHoje: 0, historico: [] }; mudou = true; }
-    if (!c.missoes) { c.missoes = { dia: null, partidas: 0, canastras: 0, vitorias: 0, resgatadas: [] }; mudou = true; }
-    if (!c.login) { c.login = { ultimoDia: null, streak: 0, resgatadoHoje: false }; mudou = true; }
-    if (mudou) { c.atualizadoEm = agora(); salvar(); }
-    return c;
-  }
-
-  /** Zera os contadores DIÁRIOS (missões/presentes) quando o dia virou. */
-  function _resetDiarioSeNecessario(c) {
-    const hoje = _hojeISO();
-    let mudou = false;
-    if (c.missoes.dia !== hoje) { c.missoes = { dia: hoje, partidas: 0, canastras: 0, vitorias: 0, resgatadas: [] }; mudou = true; }
-    if (c.presentes.dia !== hoje) { c.presentes.dia = hoje; c.presentes.recebidosHoje = 0; mudou = true; }
-    if (mudou) { c.atualizadoEm = agora(); salvar(); }
   }
 
   /** Pega a conta do jogador; cria (com bônus de boas-vindas) se for a 1ª vez. */
@@ -2548,27 +2469,16 @@ function criarContas(opts = {}) {
         id, apelido: (apelido || "Jogador").slice(0, 24),
         moedas: ECON.BONUS_BOAS_VINDAS, xp: 0,
         partidas: 0, vitorias: 0, derrotas: 0, canastras: 0,
-        codigo: gerarCodigoUnico(),
-        amigos: [], pedidosRecebidos: [], pedidosEnviados: [],
-        presentes: { dia: null, recebidosHoje: 0, historico: [] },
-        missoes: { dia: null, partidas: 0, canastras: 0, vitorias: 0, resgatadas: [] },
-        login: { ultimoDia: null, streak: 0, resgatadoHoje: false },
         criadoEm: agora(), atualizadoEm: agora(),
       };
       salvar();
-    } else {
-      _garantirCamposNovos(c);
-      _resetDiarioSeNecessario(c);
-      if (apelido && apelido !== c.apelido) { c.apelido = apelido.slice(0, 24); c.atualizadoEm = agora(); salvar(); }
+    } else if (apelido && apelido !== c.apelido) {
+      c.apelido = apelido.slice(0, 24); c.atualizadoEm = agora(); salvar();
     }
     return contaPublica(c);
   }
 
-  function obter(id) {
-    const c = dados.contas[id];
-    if (c) { _garantirCamposNovos(c); _resetDiarioSeNecessario(c); }
-    return contaPublica(c);
-  }
+  function obter(id) { return contaPublica(dados.contas[id]); }
 
   function atualizarApelido(id, apelido) {
     const c = dados.contas[id];
@@ -2611,7 +2521,6 @@ function criarContas(opts = {}) {
 
     for (const j of humanos) {
       const c = dados.contas[j.id] || dados.contas[obterOuCriar(j.id, j.apelido).id];
-      _garantirCamposNovos(c); _resetDiarioSeNecessario(c);
       const venceu = duplaDoAssento(j.assento) === vencedora;
       const dupla = duplaDoAssento(j.assento);
       const canastras = Math.max(0, j.canastras || 0);
@@ -2637,10 +2546,6 @@ function criarContas(opts = {}) {
       if (venceu) c.vitorias += 1; else c.derrotas += 1;
       c.canastras += canastras;
       c.atualizadoEm = agora();
-      // missões diárias (contador do dia — já resetado acima se o dia virou)
-      c.missoes.partidas += 1;
-      c.missoes.canastras += canastras;
-      if (venceu) c.missoes.vitorias += 1;
 
       const nivelDepois = nivelDeXp(c.xp);
       resumo.porJogador.push({
@@ -2652,162 +2557,6 @@ function criarContas(opts = {}) {
     }
     salvar();
     return resumo;
-  }
-
-  // ------------------------- AMIGOS / PRESENTES / MISSÕES / LOGIN (novo) -------------------------
-  /** Um "retrato" pequeno de conta pra listas de busca/amigos (não expõe tudo). */
-  function _retratoAmigo(c) {
-    if (!c) return null;
-    return {
-      id: c.id, apelido: c.apelido, codigo: c.codigo,
-      nivel: nivelDeXp(c.xp), avatarTipo: c.avatarTipo || null,
-      avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0,
-    };
-  }
-
-  /** Busca jogadores por código exato (ex.: ABC-123) ou por apelido (contém,
-   *  case-insensitive). Não retorna o próprio buscador. Limite de 15 resultados. */
-  function buscarJogadores(termo, idBuscador) {
-    termo = String(termo || "").trim();
-    if (!termo) return [];
-    const porCodigo = termo.toUpperCase();
-    const porNome = termo.toLowerCase();
-    const todos = Object.values(dados.contas).filter((c) => c.id !== idBuscador);
-    const exato = todos.filter((c) => c.codigo === porCodigo);
-    if (exato.length) return exato.map(_retratoAmigo);
-    return todos.filter((c) => (c.apelido || "").toLowerCase().includes(porNome)).slice(0, 15).map(_retratoAmigo);
-  }
-
-  function _saoAmigos(a, b) { return !!(a && b && Array.isArray(a.amigos) && a.amigos.includes(b.id)); }
-
-  /** Envia pedido de amizade. alvo = código (ex.: ABC-123) OU id direto. Se o
-   *  alvo já tinha mandado um pedido pra mim, vira amizade na hora (match). */
-  function enviarPedidoAmizade(deId, alvo) {
-    const de = dados.contas[deId];
-    if (!de) return { erro: "conta não encontrada" };
-    _garantirCamposNovos(de);
-    alvo = String(alvo || "").trim();
-    let para = dados.contas[alvo];
-    if (!para) para = Object.values(dados.contas).find((c) => c.codigo === alvo.toUpperCase());
-    if (!para) return { erro: "jogador não encontrado — confira o código" };
-    _garantirCamposNovos(para);
-    if (para.id === de.id) return { erro: "você não pode adicionar a si mesmo 😉" };
-    if (_saoAmigos(de, para)) return { erro: "vocês já são amigos" };
-    if (de.pedidosEnviados.includes(para.id)) return { erro: "pedido já enviado — aguarde a resposta" };
-    if (de.pedidosRecebidos.includes(para.id)) return responderPedidoAmizade(de.id, para.id, true);
-    de.pedidosEnviados.push(para.id);
-    para.pedidosRecebidos.push(de.id);
-    de.atualizadoEm = agora(); para.atualizadoEm = agora();
-    salvar();
-    return { ok: true, paraId: para.id, paraApelido: para.apelido };
-  }
-
-  /** Aceita/recusa um pedido recebido de `deId`. Ao aceitar, credita a recompensa
-   *  de convite pra quem MANDOU o pedido (o "padrinho" que trouxe o amigo). */
-  function responderPedidoAmizade(id, deId, aceitar) {
-    const eu = dados.contas[id], de = dados.contas[deId];
-    if (!eu || !de) return { erro: "conta não encontrada" };
-    _garantirCamposNovos(eu); _garantirCamposNovos(de);
-    eu.pedidosRecebidos = eu.pedidosRecebidos.filter((x) => x !== deId);
-    de.pedidosEnviados = de.pedidosEnviados.filter((x) => x !== id);
-    if (aceitar) {
-      if (!eu.amigos.includes(deId)) eu.amigos.push(deId);
-      if (!de.amigos.includes(id)) de.amigos.push(id);
-      de.moedas += RECOMPENSA_CONVITE; // quem convidou ganha o bônus
-    }
-    eu.atualizadoEm = agora(); de.atualizadoEm = agora();
-    salvar();
-    return { ok: true, aceitou: !!aceitar, amigoId: deId, amigoApelido: de.apelido };
-  }
-
-  /** Lista amigos (retrato) + pedidos pendentes. Status ONLINE é responsabilidade
-   *  da camada de servidor (aqui dentro não sabemos de conexões). */
-  function listarAmigosBase(id) {
-    const c = dados.contas[id];
-    if (!c) return { meuCodigo: null, amigos: [], pedidosRecebidos: [], pedidosEnviados: [] };
-    _garantirCamposNovos(c);
-    return {
-      meuCodigo: c.codigo,
-      amigos: c.amigos.map((aid) => _retratoAmigo(dados.contas[aid])).filter(Boolean),
-      pedidosRecebidos: c.pedidosRecebidos.map((aid) => _retratoAmigo(dados.contas[aid])).filter(Boolean),
-      pedidosEnviados: c.pedidosEnviados.map((aid) => _retratoAmigo(dados.contas[aid])).filter(Boolean),
-    };
-  }
-
-  /** Envia um presente pra um AMIGO. Presentes "da loja" (custoRemetente>0) debitam
-   *  quem manda (erro se não tiver moedas); os "seus" são de graça. O destinatário
-   *  sempre ganha uma alegrinha em moedas (valor fixo do item, com teto diário
-   *  anti-abuso — PRESENTES_QUE_RENDEM_POR_DIA). */
-  function enviarPresente(deId, paraId, presenteId, mensagem) {
-    const de = dados.contas[deId], para = dados.contas[paraId];
-    if (!de || !para) return { erro: "conta não encontrada" };
-    _garantirCamposNovos(de); _garantirCamposNovos(para);
-    if (de.id === para.id) return { erro: "não dá pra presentear a si mesmo 😉" };
-    if (!_saoAmigos(de, para)) return { erro: "só dá pra presentear quem já é seu amigo" };
-    const presente = CATALOGO_PRESENTES[presenteId];
-    if (!presente) return { erro: "presente inválido" };
-    const custo = presente.custoRemetente || 0;
-    if (custo > 0 && de.moedas < custo) return { erro: "moedas insuficientes pra esse presente (custa 🪙" + custo + ")" };
-    if (custo > 0) { de.moedas -= custo; de.atualizadoEm = agora(); }
-    _resetDiarioSeNecessario(para);
-    const rendeu = para.presentes.recebidosHoje < PRESENTES_QUE_RENDEM_POR_DIA;
-    const moedasRecebidas = rendeu ? (presente.moedasDestinatario || 0) : 0;
-    if (rendeu) { para.moedas += moedasRecebidas; para.presentes.recebidosHoje += 1; }
-    const registro = {
-      de: de.id, deApelido: de.apelido, presenteId, emoji: presente.emoji, nome: presente.nome,
-      moedas: moedasRecebidas, mensagem: String(mensagem || "").slice(0, 120), ts: agora(),
-    };
-    para.presentes.historico.unshift(registro);
-    para.presentes.historico = para.presentes.historico.slice(0, 30);
-    para.atualizadoEm = agora();
-    salvar();
-    return { ok: true, rendeu, custoPago: custo, presente: registro };
-  }
-
-  /** "Pedir presente" é só um aviso social (a camada de servidor notifica os
-   *  amigos online); aqui só confirma que a conta existe. */
-  function podePedirPresente(id) { return !!dados.contas[id]; }
-
-  /** Resgata a recompensa de UMA missão diária (se já bateu a meta e ainda não resgatou hoje). */
-  function resgatarMissao(id, chave) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    _garantirCamposNovos(c); _resetDiarioSeNecessario(c);
-    const missao = CATALOGO_MISSOES[chave];
-    if (!missao) return { erro: "missão inválida" };
-    if (c.missoes.resgatadas.includes(chave)) return { erro: "você já resgatou essa missão hoje" };
-    const progresso = c.missoes[missao.campo] || 0;
-    if (progresso < missao.meta) return { erro: "ainda não bateu a meta (" + progresso + "/" + missao.meta + ")" };
-    c.moedas += missao.moedas; c.xp += missao.xp;
-    c.missoes.resgatadas.push(chave);
-    c.atualizadoEm = agora();
-    salvar();
-    return { ok: true, chave, moedas: missao.moedas, xp: missao.xp };
-  }
-
-  function _hojeISOMenos(dias) {
-    const d = new Date(agora()); d.setUTCDate(d.getUTCDate() - dias);
-    return d.toISOString().slice(0, 10);
-  }
-  /** Login diário: chame 1x por sessão. Incrementa streak (reseta se pulou um
-   *  dia) e credita a recompensa do dia (só a 1ª vez no dia). */
-  function registrarLoginDiario(id) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    _garantirCamposNovos(c);
-    const hoje = _hojeISO();
-    if (c.login.ultimoDia === hoje) {
-      return { ok: true, jaResgatadoHoje: true, streak: c.login.streak, dia: ((c.login.streak - 1) % 7) + 1 };
-    }
-    const ontem = _hojeISOMenos(1);
-    c.login.streak = (c.login.ultimoDia === ontem) ? (c.login.streak + 1) : 1;
-    c.login.ultimoDia = hoje;
-    const diaCiclo = (c.login.streak - 1) % 7;
-    const recompensa = LOGIN_DIARIO_RECOMPENSAS[diaCiclo];
-    c.moedas += recompensa;
-    c.atualizadoEm = agora();
-    salvar();
-    return { ok: true, jaResgatadoHoje: false, streak: c.login.streak, dia: diaCiclo + 1, moedas: recompensa };
   }
 
   /** Ranking dos jogadores. Critério padrão: XP (progresso do jogador). */
@@ -2900,20 +2649,39 @@ function criarContas(opts = {}) {
     return { ok: true, reports: c.reportsAvatar, ocultado };
   }
 
+  /** Escolhe o MASCOTE da vitrine (galeria, item VIP). mascoteId = índice (1..N)
+   *  em __MASCOTES no cliente. Espelha definirAvatarGaleria — só que sem variante
+   *  de foto (mascote é sempre arte pronta do acervo). */
+  function definirMascoteGaleria(id, mascoteId) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.mascoteId = Math.max(1, parseInt(mascoteId, 10) || 1);
+    c.mascoteVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Desequipa o mascote (mesa/perfil voltam a não mostrar nenhum). */
+  function removerMascote(id) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.mascoteId = null; c.mascoteVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
     ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
     definirAvatarFoto, definirAvatarGaleria, removerAvatar, avatarBuffer, denunciarAvatar,
-    buscarJogadores, enviarPedidoAmizade, responderPedidoAmizade, listarAmigosBase,
-    enviarPresente, podePedirPresente, resgatarMissao, registrarLoginDiario,
+    definirMascoteGaleria, removerMascote,
     _dados: () => dados, ECON,
   };
 }
 
 module.exports = {
   criarContas, ECON, nivelDeXp, xpAcumuladoParaNivel, progressoDeXp, duplaDoAssento,
-  CATALOGO_PRESENTES, CATALOGO_MISSOES, LOGIN_DIARIO_RECOMPENSAS,
 };
 
   };
@@ -3144,6 +2912,8 @@ function criarGerenciador(opts = {}) {
             v.assentos[i].avatarTipo = c.avatarTipo || null;
             v.assentos[i].avatarId = c.avatarId || null;
             v.assentos[i].avatarVer = c.avatarVer || 0;
+            // mascote equipado (vitrine) — cliente desenha espiando do lado do avatar
+            v.assentos[i].mascoteId = c.mascoteId || null;
           }
         }
       }
@@ -3193,87 +2963,6 @@ module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
 
 const { criarGerenciador } = require("./salas");
 
-// ---------------- CHAT DE MESA (frases rápidas) — v1 ----------------
-// Só quem está SENTADO numa cadeira da mesa fala (espectador não existe hoje
-// nesse client, mas a checagem já fica pronta caso apareça). v1 é só frases
-// PRÉ-DEFINIDAS (sem texto livre): a moderação vem "de graça" porque a lista
-// é fechada e aprovada — por isso não precisa de filtro anti-palavrão aqui
-// ainda (esse filtro entra quando a gente liberar texto livre, numa v2).
-// 5 categorias × 6 frases = 30, aprovadas com a Sônia em 22/07.
-const FRASES_RAPIDAS_MESA = {
-  cumprimentos: ["Boa sorte!", "Bom jogo!", "Vamos começar!", "Olá, pessoal!", "Sejam bem-vindos!", "Essa mesa promete!"],
-  elogios: ["Ótima jogada!", "Mandou bem!", "Que canastra!", "Bela sequência!", "Que virada!", "Parabéns!"],
-  reacoes: ["Que sorte!", "Foi por pouco!", "Essa doeu!", "Que jogo apertado!", "Cartas, colaborem!", "Estou de olho! 👀"],
-  dupla: ["Boa, parceiro!", "Confio na dupla!", "Vamos reagir!", "Dá para virar!", "Foi mal, parceiro!", "Sem problema!"],
-  despedidas: ["Boa partida!", "Parabéns pela vitória!", "Foi um ótimo jogo!", "Quero revanche!", "Valeu, pessoal!", "Obrigado pela partida!"],
-};
-const FRASES_RAPIDAS_VALIDAS = new Set(Object.values(FRASES_RAPIDAS_MESA).flat());
-
-// ---------------- CHAT GERAL (lobby) — v1 ----------------
-// Escopo diferente do chat de mesa: aqui é qualquer jogador IDENTIFICADO
-// (mandou pelo menos um "perfil" com jogadorId), sem precisar estar sentado
-// em mesa nenhuma — é o app inteiro (app.html), não o jogo em si. Mesmas
-// regras da v1 do chat de mesa: só frase pré-aprovada, sem texto livre ainda.
-// 7 categorias, ~51 frases, curadas com a Sônia a partir de ~90 frases dela
-// em 10 grupos temáticos, aprovadas em 22/07.
-const FRASES_LOBBY_GERAL = {
-  cumprimentos: ["Olá, pessoal!", "Quem está online?", "Cheguei para jogar!", "Bom dia, jogadores!", "Boa tarde, turma!", "Boa noite, pessoal!", "Como estão todos?"],
-  procurarPartida: ["Alguém disponível para jogar?", "Quem topa uma partida?", "Vamos montar uma mesa?", "Quero entrar na próxima mesa.", "Vou criar uma mesa!", "Partiu jogar?", "Vamos jogar uma partida rápida?", "Hoje quero uma partida disputada!"],
-  procurarDupla: ["Estou procurando uma dupla.", "Pode me convidar.", "Alguém quer formar dupla comigo?", "Preciso de parceiro para jogar.", "Quem aceita jogar comigo?", "Vamos formar uma dupla?", "Tenho uma vaga na dupla.", "Já tenho dupla."],
-  mesas: ["Minha mesa está aberta!", "Tem vaga na minha mesa.", "Falta um jogador!", "Falta uma dupla!", "Venham jogar com a gente!", "A mesa já vai começar.", "Última vaga disponível!"],
-  ranking: ["Parabéns aos líderes!", "O ranking está disputado!", "Hoje eu quero subir no ranking.", "Quem será o campeão do dia?", "Quero meu lugar no Hall!", "Boa sorte aos competidores!"],
-  diversao: ["Vamos nos divertir!", "Hoje o baralho vai me respeitar!", "Vim buscar minha vitória!", "Será que hoje sai uma canastra limpa?", "O morto está me esperando!", "Vamos manter o respeito.", "Jogo bom é jogo amigável.", "Vamos fazer novas amizades."],
-  despedidas: ["Boa partida para vocês!", "Vou jogar agora!", "Estou indo para uma mesa.", "Até mais, pessoal!", "Obrigado pela companhia!", "Até a próxima partida!", "Boa noite e bons jogos!"],
-};
-const FRASES_LOBBY_VALIDAS = new Set(Object.values(FRASES_LOBBY_GERAL).flat());
-
-// ---------------- EMOJIS no chat (mesa + geral) — v1 ----------------
-// Só o pacote GRÁTIS "Emojis Salas Públicas" (10) por enquanto, disponível
-// pra todo mundo nos dois chats. Os 30 do Emoji Realeza VIP (venda avulsa/
-// pacotes) ficam pra quando existir posse de compra salva na conta — só
-// quem comprou pode usar, então precisa desse controle antes. O Emoji Luxo
-// VIP (já existente) é liberado por status de conta VIP (`conta.vip`), não
-// por compra avulsa — também fica pra depois, quando ligarmos essa checagem
-// aqui. Combinado com a Sônia em 22/07.
-const EMOJIS_SALAS_PUBLICAS_VALIDOS = new Set([
-  "Feliz", "Rindo", "Piscadinha", "Beijinho", "Surpreso",
-  "Triste", "Pensativo", "Estiloso", "Aplausos", "Bravo",
-]);
-
-// ---------------- MODO TORCIDA (chat de espectadores) — v1 ----------------
-// Ideia da Sônia, 22/07: espectador entra numa mesa em modo LEITURA (sem
-// ocupar cadeira, sem ver a mão de ninguém — reaproveita ger.visao(codigo,
-// null), que já vem "sem mão" pra assento nulo, de graça, sem precisar mudar
-// nada em salas.js). Ele fala num chat PRÓPRIO (chatTorcida), só entre
-// espectadores da MESMA mesa — os jogadores não veem esse chat.
-// Exceção: um punhado de REAÇÕES NEUTRAS (aplausos/coração/surpresa/coroa)
-// é agregado (várias pessoas reagindo igual em poucos segundos viram UMA
-// mensagem só, tipo "6 pessoas aplaudiram!") e repassado pros JOGADORES,
-// sem identificar quem mandou — o atraso da própria agregação já evita que
-// alguém use o timing de uma reação pra sinalizar informação de jogo.
-const FRASES_TORCIDA = {
-  entrada: ["Cheguei para assistir!", "Essa mesa promete!", "Boa sorte às duplas!", "Hoje tem jogão!", "Vamos ver quem domina a mesa!", "Preparem a pipoca!"],
-  reacoes: ["Que jogada!", "Essa foi bonita!", "Jogada de mestre!", "Que sequência!", "Agora ficou emocionante!", "Foi por pouco!", "Essa doeu!", "Que virada!", "A mesa pegou fogo!", "Essa partida está demais!"],
-  torcida: ["Vamos, dupla!", "Estou torcendo por vocês!", "Ainda dá para virar!", "Segurem a pressão!", "Confiança na dupla!", "Que parceria!", "Vocês estão jogando muito!", "Não desistam!"],
-  elogios: ["Que leitura de jogo!", "Dupla entrosada!", "Isso é experiência!", "Que partida equilibrada!", "Jogaram com categoria!", "Essa merece aplausos!", "Digna do Hall dos Imortais!", "Essa foi de campeão!"],
-  humor: ["Meu coração não aguenta!", "Cadê a pipoca?", "Estou só observando o caos. 😅", "Essa mesa virou final de campeonato!", "Tem emoção até no descarte!", "Essa partida merece replay!", "Ninguém quer entregar esse jogo!", "Eu vim assistir e já estou nervoso!"],
-  fairplay: ["Respeito às duas duplas!", "Que vença a melhor dupla!", "Jogo bonito é assim!", "Excelente clima na mesa!", "Parabéns pela esportividade!", "Grande partida para todos!"],
-  encerramento: ["Parabéns aos vencedores!", "Vocês deram um show!", "Que partida!", "Essa entrou para a história!", "Queremos revanche!", "Quero assistir à próxima!", "Parabéns às duas duplas!", "Até a próxima mesa!"],
-};
-const FRASES_TORCIDA_VALIDAS = new Set(Object.values(FRASES_TORCIDA).flat());
-
-// as 4 reações neutras que chegam (agregadas e anônimas) pros jogadores
-const REACOES_NEUTRAS_TORCIDA = { aplausos: "👏", coracao: "❤️", surpresa: "😮", coroa: "👑" };
-
-// anti-spam da torcida (v1, em memória por conexão): 1 msg a cada 6s, sem
-// repetir a mesma frase/reação duas vezes seguidas, no máximo 3 msgs em 30s.
-const TORCIDA_INTERVALO_MIN_MS = 6000;
-const TORCIDA_JANELA_MS = 30000;
-const TORCIDA_MAX_NA_JANELA = 3;
-// janela de agregação das reações neutras (por mesa+reação) antes de repassar
-// pros jogadores — é o que dá o "atraso" e o "várias pessoas reagiram junto".
-const TORCIDA_AGREGACAO_MS = 3000;
-
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
   // decide o tempo: padrão é IMEDIATO (síncrono, ótimo pros testes); no navegador
@@ -3281,42 +2970,13 @@ function criarServidor(opts = {}) {
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
   const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
-  // tempos da torcida são configuráveis (testes usam valores bem menores, pra
-  // não esperar segundos de verdade a cada asserção sobre agregação/rate-limit).
-  const torcidaIntervaloMs = opts.torcidaIntervaloMs || TORCIDA_INTERVALO_MIN_MS;
-  const torcidaJanelaMs = opts.torcidaJanelaMs || TORCIDA_JANELA_MS;
-  const torcidaAgregacaoMs = opts.torcidaAgregacaoMs || TORCIDA_AGREGACAO_MS;
-  const torcidaAgregacao = {}; // codigo -> { [reacao]: { contagem, timeout } }
-  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId, espectador }
-  const porJogador = {}; // jogadorId -> Set(connId) — "quem está online agora" (Amigos)
+  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
   let seq = 0;
 
   function conectar(enviar) {
     const id = "c" + ++seq;
     conexoes[id] = { id, enviar, codigo: null, assento: null, jogadorId: null };
     return id;
-  }
-
-  /** Associa esta conexão a um jogadorId (chamado em criarMesa/entrarMesa/perfil/
-   *  definirAvatar — qualquer mensagem que identifique quem está do outro lado). */
-  function _registrarOnline(jogadorId, connId) {
-    if (!jogadorId) return;
-    if (!porJogador[jogadorId]) porJogador[jogadorId] = new Set();
-    porJogador[jogadorId].add(connId);
-  }
-  function _desregistrarOnline(jogadorId, connId) {
-    if (!jogadorId || !porJogador[jogadorId]) return;
-    porJogador[jogadorId].delete(connId);
-    if (!porJogador[jogadorId].size) delete porJogador[jogadorId];
-  }
-  function estaOnline(jogadorId) { return !!(jogadorId && porJogador[jogadorId] && porJogador[jogadorId].size); }
-  /** Manda uma msg pra TODAS as conexões abertas desse jogador (normalmente 1).
-   *  Retorna true se alguém recebeu (estava online). */
-  function enviarParaJogador(jogadorId, msg) {
-    const set = porJogador[jogadorId];
-    if (!set || !set.size) return false;
-    set.forEach((connId) => enviarPara(connId, msg));
-    return true;
   }
 
   function desconectar(id) {
@@ -3328,7 +2988,6 @@ function criarServidor(opts = {}) {
       c.codigo = null; c.assento = null;
       broadcastSala(cod);
     }
-    _desregistrarOnline(c.jogadorId, id);
     delete conexoes[id];
   }
 
@@ -3345,7 +3004,6 @@ function criarServidor(opts = {}) {
     switch (msg.tipo) {
       case "criarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        _registrarOnline(c.jogadorId, id);
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
@@ -3355,7 +3013,6 @@ function criarServidor(opts = {}) {
       }
       case "entrarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        _registrarOnline(c.jogadorId, id);
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
@@ -3366,7 +3023,6 @@ function criarServidor(opts = {}) {
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
         const jid = msg.jogadorId || c.jogadorId;
-        c.jogadorId = jid || null; _registrarOnline(jid, id);
         if (!contas || !jid) return enviarPara(id, { tipo: "perfil", conta: null });
         const conta = contas.obterOuCriar(jid, msg.apelido);
         return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
@@ -3378,7 +3034,6 @@ function criarServidor(opts = {}) {
       case "definirAvatar": {
         // foto própria (upload), avatar da galeria, ou remover (voltar ao padrão)
         const jid = msg.jogadorId || c.jogadorId;
-        c.jogadorId = jid || null; _registrarOnline(jid, id);
         if (!contas || !jid) return enviarPara(id, { tipo: "avatar", conta: null });
         contas.obterOuCriar(jid, msg.apelido);
         let r;
@@ -3393,109 +3048,17 @@ function criarServidor(opts = {}) {
         if (!contas || !msg.alvo) return;
         return enviarPara(id, Object.assign({ tipo: "denuncia" }, contas.denunciarAvatar(msg.alvo)));
       }
-
-      // ---------------- AMIGOS / DESAFIOS / PRESENTES / MISSÕES (novo) ----------------
-      case "buscarJogador": {
-        const jidB = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidB) return enviarPara(id, { tipo: "resultadoBusca", lista: [] });
-        return enviarPara(id, { tipo: "resultadoBusca", lista: contas.buscarJogadores(msg.termo, jidB) });
-      }
-      case "enviarPedidoAmizade": {
-        const jidP = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidP) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const r = contas.enviarPedidoAmizade(jidP, msg.alvo);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        enviarPara(id, { tipo: "pedidoAmizadeEnviado", paraId: r.paraId, paraApelido: r.paraApelido });
-        // avisa o alvo em tempo real se ele estiver online
-        if (r.paraId) enviarParaJogador(r.paraId, { tipo: "amigosAtualizar", motivo: "novoPedido" });
-        return;
-      }
-      case "responderPedidoAmizade": {
-        const jidR = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidR) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const r = contas.responderPedidoAmizade(jidR, msg.deId, !!msg.aceitar);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        enviarPara(id, { tipo: "pedidoAmizadeRespondido", aceitou: r.aceitou, amigoId: r.amigoId, amigoApelido: r.amigoApelido });
-        enviarParaJogador(msg.deId, { tipo: "amigosAtualizar", motivo: r.aceitou ? "pedidoAceito" : "pedidoRecusado" });
-        return;
-      }
-      case "listarAmigos": {
-        const jidL = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidL) return enviarPara(id, { tipo: "amigos", meuCodigo: null, amigos: [], pedidosRecebidos: [], pedidosEnviados: [] });
-        const base = contas.listarAmigosBase(jidL);
-        base.amigos = base.amigos.map((a) => Object.assign({}, a, { online: estaOnline(a.id) }));
-        return enviarPara(id, Object.assign({ tipo: "amigos" }, base));
-      }
-      case "enviarPresente": {
-        const jidPr = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidPr) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const r = contas.enviarPresente(jidPr, msg.paraId, msg.presenteId, msg.mensagem);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        enviarPara(id, { tipo: "presenteEnviado", presente: r.presente, rendeu: r.rendeu });
-        enviarParaJogador(msg.paraId, { tipo: "presenteRecebido", presente: r.presente });
-        return;
-      }
-      case "pedirPresente": {
-        const jidPe = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidPe || !contas.podePedirPresente(jidPe)) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const base = contas.listarAmigosBase(jidPe);
-        const apelidoPe = (contas.obter(jidPe) || {}).apelido || "Um amigo";
-        let avisados = 0;
-        base.amigos.forEach((a) => { if (enviarParaJogador(a.id, { tipo: "pedidoDePresente", deId: jidPe, deApelido: apelidoPe })) avisados++; });
-        return enviarPara(id, { tipo: "pedidoDePresenteEnviado", avisados });
-      }
-      case "resgatarMissao": {
-        const jidM = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidM) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const r = contas.resgatarMissao(jidM, msg.chave);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        const conta = contas.obterOuCriar(jidM);
-        return enviarPara(id, { tipo: "missaoResgatada", chave: r.chave, moedas: r.moedas, xp: r.xp, conta });
-      }
-      case "loginDiario": {
-        const jidD = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidD) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const r = contas.registrarLoginDiario(jidD);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        const conta = contas.obterOuCriar(jidD);
-        return enviarPara(id, Object.assign({ tipo: "loginDiario", conta }, r));
-      }
-      case "criarDesafio": {
-        // Desafiar um AMIGO específico: cria uma mesa privada nova e convida o
-        // amigo em tempo real (se estiver online). Aposta opcional (mesmo pote
-        // de sempre — ver registrarPartida). Precisa ser amigo (ver contas.js).
-        const jidCD = msg.jogadorId || c.jogadorId;
-        if (!contas || !jidCD) return enviarPara(id, { tipo: "erro", motivo: "sem conta" });
-        const base = contas.listarAmigosBase(jidCD);
-        if (!base.amigos.some((a) => a.id === msg.paraId)) return enviarPara(id, { tipo: "erro", motivo: "só dá pra desafiar quem já é seu amigo" });
-        c.jogadorId = jidCD; _registrarOnline(jidCD, id);
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: jidCD, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        c.codigo = r.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
-        broadcastSala(r.codigo);
-        const apelidoCD = (contas.obter(jidCD) || {}).apelido || "Um amigo";
-        const avisado = enviarParaJogador(msg.paraId, {
-          tipo: "desafioRecebido", deId: jidCD, deApelido: apelidoCD,
-          codigo: r.codigo, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta || 0,
-        });
-        return enviarPara(id, { tipo: "desafioEnviado", paraId: msg.paraId, avisadoNaHora: avisado });
-      }
-      case "responderDesafio": {
-        // Aceitar = entra na mesa normalmente (mesmo fluxo de entrarMesa).
-        // Recusar = só avisa quem desafiou; a mesa continua aberta pro código.
-        if (!msg.aceitar) {
-          if (msg.deId) enviarParaJogador(msg.deId, { tipo: "desafioRecusado", codigo: msg.codigo });
-          return enviarPara(id, { tipo: "ok" });
-        }
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        _registrarOnline(c.jogadorId, id);
-        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
-        return broadcastSala(c.codigo);
+      case "definirMascote": {
+        // mascote da vitrine: só galeria (item VIP pronto) ou remover (desequipar)
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "mascote", conta: null });
+        contas.obterOuCriar(jid, msg.apelido);
+        let r;
+        if (msg.galeria != null) r = contas.definirMascoteGaleria(jid, msg.galeria);
+        else if (msg.remover) r = contas.removerMascote(jid);
+        else r = { erro: "mascote: informe galeria ou remover" };
+        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        return enviarPara(id, { tipo: "mascote", conta: r });
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
@@ -3536,87 +3099,6 @@ function criarServidor(opts = {}) {
           salaV.jogo.assentos[c.assento].tipo = "humano";
         }
         return broadcastSala(c.codigo);
-      }
-      case "chat": {
-        // frase rápida OU emoji do chat de mesa: só quem está sentado nessa
-        // mesa fala. Frase precisa estar nas 30 pré-aprovadas; emoji precisa
-        // estar no pacote grátis Salas Públicas (v1 — sem checar posse de
-        // compra ainda). Qualquer coisa fora disso é ignorada em silêncio.
-        if (c.codigo == null || c.assento == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
-        const salaCh = ger.salas[c.codigo];
-        const apelidoCh = (salaCh && salaCh.assentos[c.assento] && salaCh.assentos[c.assento].apelido) || "Jogador";
-        if (msg.emoji != null) {
-          const emojiCh = String(msg.emoji || "");
-          if (!EMOJIS_SALAS_PUBLICAS_VALIDOS.has(emojiCh)) return;
-          return broadcastChat(c.codigo, { tipo: "chat", assento: c.assento, apelido: apelidoCh, emoji: emojiCh });
-        }
-        const frase = String(msg.frase || "");
-        if (!FRASES_RAPIDAS_VALIDAS.has(frase)) return;
-        return broadcastChat(c.codigo, { tipo: "chat", assento: c.assento, apelido: apelidoCh, frase });
-      }
-      case "chatLobby": {
-        // chat GERAL (fora da mesa, vive no app.html): qualquer jogador
-        // IDENTIFICADO fala — não precisa estar em mesa nenhuma. Mesma regra
-        // de frase/emoji do chat de mesa, ver comentário do case "chat".
-        const jidL = msg.jogadorId || c.jogadorId;
-        if (!jidL) return enviarPara(id, { tipo: "erro", motivo: "identifique-se antes de falar no chat" });
-        c.jogadorId = jidL; _registrarOnline(jidL, id);
-        const apelidoL = msg.apelido || (contas && contas.obter && (contas.obter(jidL) || {}).apelido) || "Jogador";
-        if (msg.emoji != null) {
-          const emojiL = String(msg.emoji || "");
-          if (!EMOJIS_SALAS_PUBLICAS_VALIDOS.has(emojiL)) return;
-          return broadcastLobby({ tipo: "chatLobby", jogadorId: jidL, apelido: apelidoL, emoji: emojiL });
-        }
-        const fraseL = String(msg.frase || "");
-        if (!FRASES_LOBBY_VALIDAS.has(fraseL)) return;
-        return broadcastLobby({ tipo: "chatLobby", jogadorId: jidL, apelido: apelidoL, frase: fraseL });
-      }
-      case "assistirMesa": {
-        // Modo Torcida — entra numa mesa em modo LEITURA (sem cadeira, sem ver
-        // mão de ninguém). Não exige a mesa estar em jogo: dá pra assistir
-        // mesmo na sala de espera (ger.visao já cobre os dois casos).
-        const salaAs = ger.salas[msg.codigo];
-        if (!salaAs) return enviarPara(id, { tipo: "erro", motivo: "mesa não encontrada" });
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        _registrarOnline(c.jogadorId, id);
-        c.codigo = msg.codigo; c.assento = null; c.espectador = true;
-        c.apelidoTorcida = String(msg.apelido || "Torcedor").slice(0, 30);
-        enviarPara(id, { tipo: "entrouAssistir", codigo: msg.codigo });
-        return broadcastSala(msg.codigo);
-      }
-      case "chatTorcida": {
-        // frase OU reação neutra da torcida: só quem está ASSISTINDO essa
-        // mesa fala, e só entre espectadores (jogadores não recebem esse
-        // chat — só a reação agregada, ver _agregarReacaoTorcida). Anti-spam
-        // em memória por conexão: intervalo mínimo, sem repetir a mesma
-        // mensagem seguida, e teto de mensagens numa janela de 30s.
-        if (c.codigo == null || !c.espectador) return enviarPara(id, { tipo: "erro", motivo: "você não está assistindo nenhuma mesa" });
-        const ehReacaoTr = msg.reacao != null;
-        const conteudoTr = ehReacaoTr ? String(msg.reacao) : String(msg.frase || "");
-        if (ehReacaoTr) { if (!REACOES_NEUTRAS_TORCIDA[conteudoTr]) return; }
-        else { if (!FRASES_TORCIDA_VALIDAS.has(conteudoTr)) return; }
-        const agoraTr = Date.now();
-        if (c._trUltimaMsg === conteudoTr) {
-          return enviarPara(id, { tipo: "erro", motivo: "escolha uma mensagem diferente da última que você mandou" });
-        }
-        if (c._trUltimoEnvio != null && agoraTr - c._trUltimoEnvio < torcidaIntervaloMs) {
-          return enviarPara(id, { tipo: "erro", motivo: "aguarde um instante antes de mandar outra mensagem" });
-        }
-        c._trJanela = (c._trJanela || []).filter((t) => agoraTr - t < torcidaJanelaMs);
-        if (c._trJanela.length >= TORCIDA_MAX_NA_JANELA) {
-          return enviarPara(id, { tipo: "erro", motivo: "calma! você já mandou várias mensagens — espere um pouco" });
-        }
-        c._trUltimoEnvio = agoraTr; c._trUltimaMsg = conteudoTr; c._trJanela.push(agoraTr);
-        const apelidoTr = c.apelidoTorcida || "Torcedor";
-        // jogadorId vai junto (além do apelido) pra dar pro cliente um jeito
-        // ESTÁVEL de "ocultar" um espectador específico — só por apelido dava
-        // pra colidir com outra pessoa de mesmo nome.
-        if (ehReacaoTr) {
-          broadcastTorcida(c.codigo, { tipo: "chatTorcida", apelido: apelidoTr, jogadorId: c.jogadorId, reacao: conteudoTr });
-          _agregarReacaoTorcida(c.codigo, conteudoTr);
-          return;
-        }
-        return broadcastTorcida(c.codigo, { tipo: "chatTorcida", apelido: apelidoTr, jogadorId: c.jogadorId, frase: conteudoTr });
       }
       case "sair": {
         if (c.codigo != null) {
@@ -3662,78 +3144,16 @@ function criarServidor(opts = {}) {
     }
   }
 
-  /** Manda pra cada conexão da sala a SUA visão. Jogador (assento != null) vê
-   *  sua própria mão — a dos outros é só contagem. Espectador (modo Torcida)
-   *  vê a visão "sem assento" (ger.visao(codigo, null)) — sem mão nenhuma à
-   *  vista, só o que já é público (jogos na mesa, placar, lixo, vez etc). É o
-   *  "tempo real": toda mudança (jogada humana, dos bots, entrada de gente)
-   *  reflete em todo mundo, jogador ou espectador. */
+  /** Manda pra cada conexão da sala a SUA visão (por assento). É o "tempo real":
+   *  toda mudança (jogada humana, jogadas dos bots, entrada de gente) reflete em
+   *  todos. Cada um vê só a própria mão — a dos outros é só contagem. */
   function broadcastSala(codigo) {
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      if (c.codigo !== codigo) continue;
-      if (c.assento != null) c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
-      else if (c.espectador) c.enviar({ tipo: "estado", visao: ger.visao(codigo, null) });
-    }
-  }
-
-  /** Manda a frase do chat de mesa pra todo mundo sentado nessa sala (igual
-   *  broadcastSala, mas manda a msg "chat" em vez de reenviar o estado). */
-  function broadcastChat(codigo, msgChat) {
-    for (const cid in conexoes) {
-      const c = conexoes[cid];
       if (c.codigo === codigo && c.assento != null) {
-        c.enviar(msgChat);
+        c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
       }
     }
-  }
-
-  /** Manda a frase do chat GERAL pra todo mundo conectado e identificado no
-   *  app (não filtra por mesa/assento — é o app.html inteiro, não o jogo). */
-  function broadcastLobby(msgChat) {
-    for (const cid in conexoes) {
-      const c = conexoes[cid];
-      if (c.jogadorId) c.enviar(msgChat);
-    }
-  }
-
-  /** Manda a mensagem do chat da Torcida só pros OUTROS espectadores da MESMA
-   *  mesa — jogadores nunca recebem isso direto (só a reação agregada). */
-  function broadcastTorcida(codigo, msgChat) {
-    for (const cid in conexoes) {
-      const c = conexoes[cid];
-      if (c.codigo === codigo && c.espectador) c.enviar(msgChat);
-    }
-  }
-
-  /** Manda a reação agregada da torcida só pros JOGADORES sentados da mesa —
-   *  é o único jeito de algo da torcida chegar até quem está jogando. */
-  function broadcastReacaoTorcidaJogadores(codigo, msgReacao) {
-    for (const cid in conexoes) {
-      const c = conexoes[cid];
-      if (c.codigo === codigo && c.assento != null) c.enviar(msgReacao);
-    }
-  }
-
-  /** Junta reações neutras iguais que chegam dentro de uma janela curta (a
-   *  partir da primeira) numa mensagem só pros jogadores — "6 pessoas
-   *  aplaudiram!" em vez de 6 mensagens soltas. O atraso da própria janela é
-   *  o que evita alguém usar o TIMING da reação pra sinalizar informação de
-   *  jogo (a reação só chega depois que a janela fecha, nunca na hora). */
-  function _agregarReacaoTorcida(codigo, reacao) {
-    if (!torcidaAgregacao[codigo]) torcidaAgregacao[codigo] = {};
-    const porMesa = torcidaAgregacao[codigo];
-    if (!porMesa[reacao]) porMesa[reacao] = { contagem: 0, timeout: null };
-    const bucket = porMesa[reacao];
-    bucket.contagem += 1;
-    if (bucket.timeout) return; // janela já aberta — só soma na contagem
-    bucket.timeout = setTimeout(() => {
-      const contagem = bucket.contagem;
-      delete porMesa[reacao];
-      broadcastReacaoTorcidaJogadores(codigo, {
-        tipo: "torcidaReacao", reacao, emoji: REACOES_NEUTRAS_TORCIDA[reacao], contagem,
-      });
-    }, torcidaAgregacaoMs);
   }
 
   return { conectar, desconectar, processar, broadcastSala, ger, conexoes };
@@ -3880,14 +3300,7 @@ function iniciar(porta) {
   // COFRE de contas: persiste em DADOS_DIR (no Railway, um Volume montado; local,
   // ./dados). Se não houver disco gravável, cai pra memória e o jogo roda igual.
   const contas = criarContas();
-  const servidor = criarServidor({
-    agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas,
-    // tempos do Modo Torcida configuráveis por env — só usado em teste, pra não
-    // esperar segundos de verdade a cada asserção de rate-limit/agregação.
-    torcidaIntervaloMs: Number(process.env.TORCIDA_INTERVALO_MS) || undefined,
-    torcidaJanelaMs: Number(process.env.TORCIDA_JANELA_MS) || undefined,
-    torcidaAgregacaoMs: Number(process.env.TORCIDA_AGREGACAO_MS) || undefined,
-  });
+  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas });
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
