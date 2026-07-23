@@ -180,24 +180,43 @@ function validarSequencia(cartas) {
   }
   interpretacoes.sort((a, b) => a.comoCuringa.length - b.comoCuringa.length);
 
-  const idxBaixo = (v) => ORDEM_SEQUENCIA.indexOf(v);
-  const idxAlto = (v) => (v === "A" ? ORDEM_SEQUENCIA.length : ORDEM_SEQUENCIA.indexOf(v));
-  const encaixa = (naturais, qtdCuringas, mapa, teto) => {
-    const valores = naturais.map((c) => c.valor);
-    if (new Set(valores).size !== valores.length) return false; // valor repetido
-    const indices = naturais.map((c) => mapa(c.valor)).sort((a, b) => a - b);
-    const minIdx = indices[0];
-    const maxIdx = indices[indices.length - 1];
-    const span = maxIdx - minIdx + 1;
-    const lacunasInternas = span - naturais.length;
-    if (lacunasInternas > qtdCuringas) return false;
-    const curingasSobrando = qtdCuringas - lacunasInternas;
-    if (curingasSobrando > 0) {
-      const cabeNoInicio = minIdx - curingasSobrando >= 0;
-      const cabeNoFim = maxIdx + curingasSobrando <= teto;
-      if (!cabeNoInicio && !cabeNoFim) return false;
+  const N = ORDEM_SEQUENCIA.length; // 13 — o Ás alto entra como índice N (depois do K)
+  // Encaixa os naturais numa faixa contígua. O Ás é especial: pode entrar BAIXO
+  // (índice 0, antes do 2) ou ALTO (índice N, depois do K). Até 2 ases (um de cada
+  // lado) — é o que permite a ESCADA A-K-A ("Ás a Ás", 14 cartas). Retorna a faixa
+  // {minIdx,maxIdx,qtdNaturais} da melhor leitura, ou null se não couber nos curingas.
+  const encaixa = (naturais, qtdCuringas, teto) => {
+    const ases = naturais.filter((c) => c.valor === "A");
+    const outros = naturais.filter((c) => c.valor !== "A");
+    const idxOutros = outros.map((c) => ORDEM_SEQUENCIA.indexOf(c.valor));
+    if (new Set(idxOutros).size !== idxOutros.length) return null; // valor comum repetido
+    if (ases.length > 2) return null;                              // no máx. 2 ases (baixo+alto)
+    // todas as combinações de baixo(0)/alto(N) pros ases
+    let combos = [[]];
+    for (let k = 0; k < ases.length; k++) {
+      const prox = [];
+      for (const cb of combos) { prox.push(cb.concat(0)); prox.push(cb.concat(N)); }
+      combos = prox;
     }
-    return true;
+    let melhor = null;
+    for (const asIdx of combos) {
+      const indices = idxOutros.concat(asIdx).sort((a, b) => a - b);
+      if (new Set(indices).size !== indices.length) continue; // dois ases no mesmo lado, ou colisão
+      const minIdx = indices[0], maxIdx = indices[indices.length - 1];
+      const span = maxIdx - minIdx + 1;
+      const lacunas = span - indices.length;
+      if (lacunas > qtdCuringas) continue;
+      const sobra = qtdCuringas - lacunas;
+      if (sobra > 0) {
+        const cabeNoInicio = minIdx - sobra >= 0;
+        const cabeNoFim = maxIdx + sobra <= teto;
+        if (!cabeNoInicio && !cabeNoFim) continue;
+      }
+      const faixa = { minIdx, maxIdx, qtdNaturais: indices.length };
+      // guarda a leitura de maior maxIdx (favorece o ás alto, revelando A-K e A-K-A completos)
+      if (!melhor || maxIdx > melhor.maxIdx) melhor = faixa;
+    }
+    return melhor;
   };
 
   let motivoFalha = "Lacuna na sequência maior que o número de curingas disponíveis";
@@ -209,14 +228,27 @@ function validarSequencia(cartas) {
     }
     const naturais = comuns.concat(interp.comoNatural);
     if (naturais.length === 0) continue; // só curinga: já tratado no Caso 1
-    let ok = encaixa(naturais, qtdCuringas, idxBaixo, ORDEM_SEQUENCIA.length - 1);
-    if (!ok && naturais.some((c) => c.valor === "A")) {
-      ok = encaixa(naturais, qtdCuringas, idxAlto, ORDEM_SEQUENCIA.length);
-    }
+    const faixa = encaixa(naturais, qtdCuringas, N);
     // fica na PRIMEIRA que validar — como estão ordenadas da mais limpa pra
     // mais suja, essa é a melhor leitura possível daquelas cartas
-    if (ok) {
-      return finalizar({ tipoBase: "sequencia", qtdCuringas, tamanho: cartas.length });
+    if (faixa) {
+      // Classificação ESPECIAL, só quando 100% LIMPA (regra Sônia, sem curinga).
+      // Detecta pela COMPOSIÇÃO (todos os 13 valores A..K presentes), não pela
+      // leitura baixa/alta do ás — porque um ás sozinho cabe nas duas pontas:
+      //   - ESCADA REAL (de_500, 500 pts): A,2,…,K = 13 cartas, 1 ás.
+      //   - ÁS A ÁS (as_a_as, 1000 pts): A,A,2,…,K = 14 cartas, 2 ases.
+      // Com qualquer curinga, cai na regra normal (limpa/suja) — sem o bônus.
+      let tipoBase = "sequencia";
+      if (qtdCuringas === 0) {
+        const vals = naturais.map((c) => c.valor);
+        const nAses = vals.filter((v) => v === "A").length;
+        const outrosDistintos = new Set(vals.filter((v) => v !== "A"));
+        const temDois2aoK = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+          .every((r) => outrosDistintos.has(r)) && outrosDistintos.size === 12;
+        if (temDois2aoK && nAses === 2 && naturais.length === 14) tipoBase = "as_a_as";
+        else if (temDois2aoK && nAses === 1 && naturais.length === 13) tipoBase = "de_500";
+      }
+      return finalizar({ tipoBase, qtdCuringas, tamanho: cartas.length });
     }
   }
   return { valido: false, motivo: motivoFalha };
@@ -284,6 +316,10 @@ function finalizar({ tipoBase, qtdCuringas, tamanho }) {
     tipo = "de_curinga";
   } else if (tipoBase === "de_as") {
     tipo = "de_as";
+  } else if (tipoBase === "as_a_as") {
+    tipo = "as_a_as"; // ESCADA Ás-a-Ás (A-2-…-K-A, 14 cartas limpas) — 1000 pts
+  } else if (tipoBase === "de_500") {
+    tipo = "de_500";  // ESCADA REAL (A-2-…-K, 13 cartas limpas) — 500 pts
   } else {
     tipo = qtdCuringas > 0 ? "suja" : "limpa";
   }
@@ -1808,7 +1844,7 @@ function duplaTemCanastraLimpa(jogo, dupla) {
     const res = validarSequencia(meld);
     // Ás NÃO forma canastra de ás na casa da Sônia (vale só valor de carta) — só
     // canastra de SEQUÊNCIA limpa (ou a de 500/1000) libera a batida.
-    return res.valido && (res.tipo === "limpa" || res.tipo === "de_500");
+    return res.valido && (res.tipo === "limpa" || res.tipo === "de_500" || res.tipo === "as_a_as");
   });
 }
 
@@ -1826,7 +1862,7 @@ function duplaPodeBater(jogo, dupla) {
     if (meld.length < 7) return false;
     const res = validarSequencia(meld); // trinca de valor igual é RECUSADA aqui de propósito
     if (!res.valido) return false;
-    if (res.tipo === "limpa" || res.tipo === "de_500") return true; // ás não conta (só valor de carta)
+    if (res.tipo === "limpa" || res.tipo === "de_500" || res.tipo === "as_a_as") return true; // ás não conta (só valor de carta)
     return aceitaSuja && res.tipo === "suja";
   });
 }
@@ -1841,7 +1877,7 @@ function baixadaTravaria(jogo, dupla, maoRestante, meldsFuturos) {
   const temLimpa = meldsFuturos.some((m) => {
     if (m.length < 7) return false;
     const r = validarSequencia(m);
-    return r.valido && (r.tipo === "limpa" || r.tipo === "de_500");
+    return r.valido && (r.tipo === "limpa" || r.tipo === "de_500" || r.tipo === "as_a_as");
   });
   const mortoDisp = !jogo.mortoPego[dupla] && jogo.mortos.length > 0;
   return !(temLimpa || mortoDisp);
@@ -1911,7 +1947,7 @@ function valorCarta(c) {
  *  batida (+100) − cartas na mão − morto não pego (−100). */
 function pontuarDuplaJogo(jogo, dupla, { bateu, mortoPego, cartasNaMao, algumPegouMorto }) {
   let pontosCanastras = 0, pontosCartas = 0;
-  const detalhe = { de500: 0, limpas: 0, sujas: 0, baixadas: 0 };
+  const detalhe = { asAas: 0, de500: 0, limpas: 0, sujas: 0, baixadas: 0 };
   for (const meld of jogo.jogosDupla[dupla]) {
     if (meld.length >= 7) {
       // TRINCA não forma canastra (regra Sônia 19/jul): usa validarSequencia, que RECUSA
@@ -1919,7 +1955,8 @@ function pontuarDuplaJogo(jogo, dupla, { bateu, mortoPego, cartasNaMao, algumPeg
       // pontos das cartas (contados no laço abaixo) entram. Canastra de sequência normal.
       const res = validarSequencia(meld);
       if (res.valido) {
-        if (res.tipo === "de_500") { pontosCanastras += 500; detalhe.de500++; }
+        if (res.tipo === "as_a_as") { pontosCanastras += 1000; detalhe.asAas = (detalhe.asAas || 0) + 1; }
+        else if (res.tipo === "de_500") { pontosCanastras += 500; detalhe.de500++; }
         else if (res.tipo === "limpa") { pontosCanastras += 200; detalhe.limpas++; }
         else if (res.tipo === "suja") { pontosCanastras += 100; detalhe.sujas++; }
       }
