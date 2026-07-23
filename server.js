@@ -2494,6 +2494,13 @@ function criarContas(opts = {}) {
       // mascoteId = índice em __MASCOTES (cliente/galeria_mascotes.js) ou null (nenhum
       // equipado — a mesa não mostra o companheiro espiando nem a comemoração).
       mascoteId: c.mascoteId || null, mascoteVer: c.mascoteVer || 0,
+      // moldura da vitrine (item VIP): molduraId = índice em __MOLDURAS ou null
+      // (moldura padrão do app). tituloId = índice em __TITULOS ou null (sem título).
+      molduraId: c.molduraId || null, molduraVer: c.molduraVer || 0,
+      tituloId: c.tituloId || null, tituloVer: c.tituloVer || 0,
+      // tratamento: como o jogador quer ser chamado nos títulos gendrados
+      // ('rei' | 'rainha' | 'neutro'). Decide qual arte do título/card mostrar.
+      tratamento: c.tratamento || 'neutro',
     };
   }
 
@@ -2707,12 +2714,64 @@ function criarContas(opts = {}) {
     return contaPublica(c);
   }
 
+  /** Escolhe a MOLDURA da vitrine (galeria, item VIP). molduraId = índice (1..N)
+   *  em __MOLDURAS no cliente. Espelha definirMascoteGaleria. */
+  function definirMolduraGaleria(id, molduraId) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.molduraId = Math.max(1, parseInt(molduraId, 10) || 1);
+    c.molduraVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Desequipa a moldura (volta pra moldura padrão do app). */
+  function removerMoldura(id) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.molduraId = null; c.molduraVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Escolhe o TÍTULO da vitrine (placa de nome). tituloId = índice (1..N)
+   *  em __TITULOS no cliente. Espelha definirMascoteGaleria. */
+  function definirTituloGaleria(id, tituloId) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.tituloId = Math.max(1, parseInt(tituloId, 10) || 1);
+    c.tituloVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Desequipa o título (perfil volta a mostrar "sem título"). */
+  function removerTitulo(id) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    c.tituloId = null; c.tituloVer = agora(); c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
+  /** Define como o jogador quer ser tratado nos títulos gendrados. */
+  function definirTratamento(id, t) {
+    const c = dados.contas[id];
+    if (!c) return { erro: "conta não encontrada" };
+    const ok = (t === "rei" || t === "rainha" || t === "neutro") ? t : "neutro";
+    c.tratamento = ok; c.atualizadoEm = agora();
+    salvar();
+    return contaPublica(c);
+  }
+
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
     ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
     definirAvatarFoto, definirAvatarGaleria, removerAvatar, avatarBuffer, denunciarAvatar,
     definirMascoteGaleria, removerMascote,
+    definirMolduraGaleria, removerMoldura, definirTituloGaleria, removerTitulo,
+    definirTratamento,
     _dados: () => dados, ECON,
   };
 }
@@ -2951,6 +3010,8 @@ function criarGerenciador(opts = {}) {
             v.assentos[i].avatarVer = c.avatarVer || 0;
             // mascote equipado (vitrine) — cliente desenha espiando do lado do avatar
             v.assentos[i].mascoteId = c.mascoteId || null;
+            // moldura equipada (vitrine) — cliente desenha a borda em volta do avatar
+            v.assentos[i].molduraId = c.molduraId || null;
           }
         }
       }
@@ -3042,10 +3103,23 @@ function criarServidor(opts = {}) {
       case "criarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        // MESA PRIVADA: o dono paga uma taxa pra abrir (recurso VIP). Cobra ANTES de
+        // criar e RECUSA se não tiver saldo. Se a criação falhar depois, devolve.
+        const custoPriv = (msg.privada && msg.custo) ? Math.max(0, Math.round(msg.custo)) : 0;
+        if (custoPriv > 0) {
+          if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login pra abrir mesa privada" });
+          const conta = contas.obter(c.jogadorId);
+          const saldo = (conta && conta.moedas) || 0;
+          if (saldo < custoPriv) return enviarPara(id, { tipo: "saldoInsuficiente", motivo: "Você tem 🪙 " + saldo + " — abrir uma mesa privada custa 🪙 " + custoPriv + ".", saldo: saldo, custo: custoPriv });
+          contas.ajustarMoedas(c.jogadorId, -custoPriv);
+        }
         const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        if (r.erro) {
+          if (custoPriv > 0 && contas && c.jogadorId) contas.ajustarMoedas(c.jogadorId, custoPriv); // devolve a taxa
+          return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        }
         c.codigo = r.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
+        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento, privada: !!custoPriv, custoPago: custoPriv });
         return broadcastSala(r.codigo);
       }
       case "entrarMesa": {
@@ -3096,6 +3170,39 @@ function criarServidor(opts = {}) {
         else r = { erro: "mascote: informe galeria ou remover" };
         if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         return enviarPara(id, { tipo: "mascote", conta: r });
+      }
+      case "definirMoldura": {
+        // moldura da vitrine: galeria (item VIP) ou remover (volta pro padrão)
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "moldura", conta: null });
+        contas.obterOuCriar(jid, msg.apelido);
+        let r;
+        if (msg.galeria != null) r = contas.definirMolduraGaleria(jid, msg.galeria);
+        else if (msg.remover) r = contas.removerMoldura(jid);
+        else r = { erro: "moldura: informe galeria ou remover" };
+        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        return enviarPara(id, { tipo: "moldura", conta: r });
+      }
+      case "definirTitulo": {
+        // título da vitrine (placa de nome): galeria ou remover (desequipar)
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "titulo", conta: null });
+        contas.obterOuCriar(jid, msg.apelido);
+        let r;
+        if (msg.galeria != null) r = contas.definirTituloGaleria(jid, msg.galeria);
+        else if (msg.remover) r = contas.removerTitulo(jid);
+        else r = { erro: "titulo: informe galeria ou remover" };
+        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        return enviarPara(id, { tipo: "titulo", conta: r });
+      }
+      case "definirTratamento": {
+        // como o jogador quer ser chamado (rei/rainha/neutro) nos títulos gendrados
+        const jid = msg.jogadorId || c.jogadorId;
+        if (!contas || !jid) return enviarPara(id, { tipo: "tratamento", conta: null });
+        contas.obterOuCriar(jid, msg.apelido);
+        const r = contas.definirTratamento(jid, msg.valor);
+        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        return enviarPara(id, { tipo: "tratamento", conta: r });
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
