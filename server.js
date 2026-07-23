@@ -2892,13 +2892,16 @@ function criarGerenciador(opts = {}) {
   // controla o ritmo (jogarUmBot), pra dar o "respiro" entre jogadas na tela.
   const autoBots = opts.autoBots !== false;
 
-  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0, privada = false } = {}) {
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
     salas[codigo] = {
       codigo, modalidade, metaPontos,
       aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
+      // PRIVADA (recurso VIP): mesa por convite (código). Fica FORA do matchmaking
+      // público — só entra quem tem o código. Público nunca cai numa privada.
+      privada: !!privada,
       criadorAssento: 0,
       assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
       iniciada: false,
@@ -2908,6 +2911,23 @@ function criarGerenciador(opts = {}) {
       log: [],
     };
     return { codigo, assento: 0 };
+  }
+
+  /** MATCHMAKING PÚBLICO (pedido Sônia — bug: público entrava na privada). Junta o
+   *  jogador numa mesa PÚBLICA aberta (não privada, não iniciada, com assento livre);
+   *  se não houver, cria uma nova pública. NUNCA entra numa mesa privada. */
+  function entrarPublica({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000 } = {}) {
+    for (const codigo in salas) {
+      const s = salas[codigo];
+      if (!s || s.privada || s.iniciada) continue;      // pula privada e mesa já começada
+      if (!s.assentos.some((a) => a === null)) continue; // sem assento livre
+      const r = entrarMesa({ codigo, apelido, jogadorId });
+      if (!r.erro) return { codigo, assento: r.assento, criador: false };
+    }
+    // nenhuma mesa pública aberta → cria uma nova (o jogador vira o anfitrião)
+    const r = criarMesa({ apelido, jogadorId, modalidade, metaPontos, privada: false });
+    if (r.erro) return r;
+    return { codigo: r.codigo, assento: r.assento, criador: true };
   }
 
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
@@ -3161,7 +3181,7 @@ function criarGerenciador(opts = {}) {
     return { ok: true, codigo };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
+  return { salas, criarMesa, entrarMesa, entrarPublica, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -3261,7 +3281,7 @@ function criarServidor(opts = {}) {
           if (saldo < custoPriv) return enviarPara(id, { tipo: "saldoInsuficiente", motivo: "Você tem 🪙 " + saldo + " — abrir uma mesa privada custa 🪙 " + custoPriv + ".", saldo: saldo, custo: custoPriv });
           contas.ajustarMoedas(c.jogadorId, -custoPriv);
         }
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta, privada: !!msg.privada });
         if (r.erro) {
           if (custoPriv > 0 && contas && c.jogadorId) contas.ajustarMoedas(c.jogadorId, custoPriv); // devolve a taxa
           return enviarPara(id, { tipo: "erro", motivo: r.erro });
@@ -3278,6 +3298,17 @@ function criarServidor(opts = {}) {
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
         return broadcastSala(c.codigo);
+      }
+      case "entrarPublica": {
+        // MATCHMAKING público: junta numa mesa pública aberta ou cria uma. NUNCA cai
+        // numa mesa privada (corrige o bug do público entrando na privada).
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        const r = ger.entrarPublica({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos });
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        c.codigo = r.codigo; c.assento = r.assento;
+        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento, publica: true });
+        return broadcastSala(r.codigo);
       }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
