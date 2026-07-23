@@ -3111,7 +3111,57 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair };
+  // ===== REVANCHE ("Vamos outra?") — pedido Sônia 23/jul =====
+  // No fim da partida, se a mesa for 100% HUMANA (nenhum robô, nenhum AFK), dá pra
+  // recomeçar na MESMA mesa com a MESMA galera. Se tiver 1 robô, não vale (regra
+  // dela: "se tiver 1 robô já não dá").
+  function podeRevanche(codigo) {
+    const sala = salas[codigo];
+    if (!sala || !sala.jogo || !sala.jogo.encerrada) return false;
+    for (let i = 0; i < 4; i++) {
+      const a = sala.jogo.assentos[i], sj = sala.assentos[i];
+      if (!a || a.tipo !== "humano" || !sj || !sj.jogadorId) return false;
+    }
+    return true;
+  }
+
+  /** Perfil de cada assento pra tela "Vamos outra?" (avatar + apelido + dupla).
+   *  Reaproveita o cofre pra puxar avatar/moldura de quem está sentado. */
+  function perfilAssentos(codigo) {
+    const sala = salas[codigo];
+    if (!sala || !sala.jogo) return null;
+    return sala.jogo.assentos.map((a, i) => {
+      const sj = sala.assentos[i];
+      const p = { assento: i, apelido: (a && a.apelido) || "", tipo: (a && a.tipo) || "bot", dupla: (i % 2 === 0) ? "nos" : "eles" };
+      if (contas && sj && sj.jogadorId) {
+        const c = contas.obter(sj.jogadorId);
+        if (c) {
+          p.jogadorId = sj.jogadorId;
+          p.avatarTipo = c.avatarTipo || null;
+          p.avatarId = c.avatarId || null;
+          p.avatarVer = c.avatarVer || 0;
+          p.molduraId = c.molduraId || null;
+        }
+      }
+      return p;
+    });
+  }
+
+  /** REVANCHE aceita por todos: redistribui uma partida NOVA na mesma mesa, com a
+   *  mesma galera e a mesma config (modalidade/meta). Zera o placar (jogo novo). */
+  function reiniciarMesa(codigo) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    const assentosJogo = sala.assentos.map((a) => ({ tipo: a.tipo, apelido: a.apelido }));
+    sala.jogo = J.criarJogo({ assentos: assentosJogo, modalidade: sala.modalidade, metaPontos: sala.metaPontos });
+    sala.liquidada = false;
+    sala.resumoFinal = null;
+    if (autoBots) avancarBots(sala);
+    liquidar(sala);
+    return { ok: true, codigo };
+  }
+
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -3143,6 +3193,11 @@ function criarServidor(opts = {}) {
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
   const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
+  // REVANCHE ("Vamos outra?"): janela de 3 min pra todo mundo topar (dá tempo do
+  // anúncio rodar — pedido Sônia). Injetável pra teste (revancheMs curto + timers fake).
+  const revancheMs = opts.revancheMs || 180000;
+  const agendarTempo = opts.agendarTempo || ((fn, ms) => setTimeout(fn, ms));
+  const cancelarTempo = opts.cancelarTempo || ((h) => clearTimeout(h));
   const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
   let seq = 0;
 
@@ -3157,9 +3212,14 @@ function criarServidor(opts = {}) {
     if (!c) return;
     if (c.codigo != null && c.assento != null) {
       const cod = c.codigo;
+      const sala = ger.salas[cod];
+      const apel = (sala && sala.jogo && sala.jogo.assentos[c.assento]) ? sala.jogo.assentos[c.assento].apelido : "Um jogador";
+      const tinhaRevanche = !!(sala && sala.revanche && sala.revanche.ativa);
       ger.sair({ codigo: cod, assento: c.assento });
       c.codigo = null; c.assento = null;
-      broadcastSala(cod);
+      // caiu durante a revanche = a mesa não continua (os outros "vão atrás")
+      if (tinhaRevanche) cancelarRevanche(cod, "saiu", apel);
+      else broadcastSala(cod);
     }
     delete conexoes[id];
   }
@@ -3374,10 +3434,40 @@ function criarServidor(opts = {}) {
       case "sair": {
         if (c.codigo != null) {
           const cod = c.codigo;
+          const salaS = ger.salas[cod];
+          const tinhaRev = !!(salaS && salaS.revanche && salaS.revanche.ativa);
+          const apelS = (salaS && salaS.jogo && salaS.jogo.assentos[c.assento]) ? salaS.jogo.assentos[c.assento].apelido : "Um jogador";
           ger.sair({ codigo: cod, assento: c.assento });
           c.codigo = null; c.assento = null;
-          broadcastSala(cod);
+          if (tinhaRev) cancelarRevanche(cod, "saiu", apelS);
+          else broadcastSala(cod);
         }
+        return;
+      }
+      // ===== REVANCHE ("Vamos outra?") =====
+      case "revancheVoto": {
+        // o jogador topou jogar de novo. Marca o voto do assento dele e avisa a mesa;
+        // quando os 4 assentos toparem, redistribui uma partida nova na mesma mesa.
+        if (c.codigo == null) return;
+        const sala = ger.salas[c.codigo];
+        if (!sala || !sala.revanche || !sala.revanche.ativa) return;
+        sala.revanche.votos[c.assento] = true;
+        broadcastRevanche(c.codigo);
+        if ([0, 1, 2, 3].every((i) => sala.revanche.votos[i])) reiniciarRevanche(c.codigo);
+        return;
+      }
+      case "revancheSair": {
+        // o jogador não topou: sai da mesa e, com isso, a mesa não continua pra ninguém
+        // (os outros "vão atrás" — pedido Sônia).
+        if (c.codigo == null) return;
+        const cod = c.codigo;
+        const sala = ger.salas[cod];
+        const apel = (sala && sala.jogo && sala.jogo.assentos[c.assento]) ? sala.jogo.assentos[c.assento].apelido : "Um jogador";
+        // tira o jogador da mesa ANTES de avisar — assim quem saiu não recebe o
+        // aviso "fulano saiu" (foi ele mesmo; no cliente já vai pro menu na hora).
+        ger.sair({ codigo: cod, assento: c.assento });
+        c.codigo = null; c.assento = null;
+        cancelarRevanche(cod, "saiu", apel);
         return;
       }
       default:
@@ -3407,12 +3497,70 @@ function criarServidor(opts = {}) {
     if (!sala || !sala.resumoFinal || sala.fimEmitido) return;
     sala.fimEmitido = true;
     const placar = sala.jogo && sala.jogo.placar;
+    // REVANCHE: só rola se a mesa for 100% humana (nenhum robô). Abre a janela de
+    // 3 min e manda os perfis dos 4 pra tela "Vamos outra?".
+    const revanchePossivel = ger.podeRevanche(codigo);
+    if (revanchePossivel) iniciarRevanche(codigo);
+    const perfis = revanchePossivel ? ger.perfilAssentos(codigo) : null;
     for (const cid in conexoes) {
       const c = conexoes[cid];
       if (c.codigo === codigo && c.assento != null) {
-        c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar });
+        const rev = revanchePossivel
+          ? { possivel: true, ms: revancheMs, assentos: perfis, meuAssento: c.assento }
+          : { possivel: false };
+        c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar, revanche: rev });
       }
     }
+    if (revanchePossivel) broadcastRevanche(codigo);
+  }
+
+  // ---- REVANCHE: coordenação dos votos + timer de 3 min + reinício/cancelamento ----
+  function conexoesDaSala(codigo) {
+    const arr = [];
+    for (const cid in conexoes) { const c = conexoes[cid]; if (c.codigo === codigo && c.assento != null) arr.push(c); }
+    return arr;
+  }
+  function iniciarRevanche(codigo) {
+    const sala = ger.salas[codigo];
+    if (!sala || !ger.podeRevanche(codigo)) return;
+    const deadline = Date.now() + revancheMs;
+    const rev = { ativa: true, votos: {}, deadline, timer: null };
+    rev.timer = agendarTempo(function () { cancelarRevanche(codigo, "tempo"); }, revancheMs);
+    sala.revanche = rev;
+  }
+  function limparRevanche(sala) {
+    if (sala && sala.revanche) {
+      if (sala.revanche.timer != null) { try { cancelarTempo(sala.revanche.timer); } catch (e) {} }
+      sala.revanche.ativa = false;
+      sala.revanche = null;
+    }
+  }
+  function broadcastRevanche(codigo) {
+    const sala = ger.salas[codigo];
+    if (!sala || !sala.revanche || !sala.revanche.ativa) return;
+    const rev = sala.revanche;
+    const votos = [0, 1, 2, 3].map((i) => !!rev.votos[i]);
+    const restanteMs = Math.max(0, rev.deadline - Date.now());
+    for (const c of conexoesDaSala(codigo)) {
+      c.enviar({ tipo: "revancheEstado", votos, restanteMs, deadline: rev.deadline, meuAssento: c.assento });
+    }
+  }
+  function cancelarRevanche(codigo, motivo, apelidoQuemSaiu) {
+    const sala = ger.salas[codigo];
+    if (!sala || !sala.revanche || !sala.revanche.ativa) return;
+    limparRevanche(sala);
+    for (const c of conexoesDaSala(codigo)) {
+      c.enviar({ tipo: "revancheCancelada", motivo: motivo, apelido: apelidoQuemSaiu || null });
+    }
+  }
+  function reiniciarRevanche(codigo) {
+    const sala = ger.salas[codigo];
+    if (!sala) return;
+    limparRevanche(sala);
+    sala.fimEmitido = false; // a próxima partida pode emitir "fim" de novo
+    const r = ger.reiniciarMesa(codigo);
+    if (r && r.erro) return;
+    avancarComRespiro(codigo); // desenha o estado NOVO (o cliente fecha o overlay e joga)
   }
 
   /** Manda pra cada conexão da sala a SUA visão (por assento). É o "tempo real":
@@ -3427,7 +3575,9 @@ function criarServidor(opts = {}) {
     }
   }
 
-  return { conectar, desconectar, processar, broadcastSala, ger, conexoes };
+  // _teste: ganchos internos usados só pelos testes (forçar o fim pra exercitar a
+  // revanche sem precisar jogar uma partida inteira). Não muda o comportamento.
+  return { conectar, desconectar, processar, broadcastSala, ger, conexoes, _teste: { emitirFimSeAcabou } };
 }
 
 module.exports = { criarServidor };
