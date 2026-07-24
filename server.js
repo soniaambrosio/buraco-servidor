@@ -2640,12 +2640,15 @@ function criarContas(opts = {}) {
   }
 
   /** Ranking dos jogadores. Critério padrão: XP (progresso do jogador). */
-  function ranking({ limite = 50, criterio = "xp" } = {}) {
-    const lista = Object.values(dados.contas).map(contaPublica);
+  function ranking({ limite = 50, criterio = "xp", ids = null } = {}) {
+    let lista = Object.values(dados.contas).map(contaPublica);
+    if (ids) { const set = ids instanceof Set ? ids : new Set(ids); lista = lista.filter((c) => set.has(c.id)); } // aba Amigos
     const chave = criterio === "vitorias" ? "vitorias" : (criterio === "moedas" ? "moedas" : "xp");
     lista.sort((a, b) => (b[chave] - a[chave]) || (b.xp - a.xp) || (b.vitorias - a.vitorias));
     return lista.slice(0, limite).map((c, i) => Object.assign({ posicao: i + 1 }, c));
   }
+  /** IDs dos amigos de um jogador (pra aba "Amigos" do ranking). */
+  function amigosIds(id) { const c = dados.contas[id]; return c && c.amigos ? c.amigos.slice() : []; }
 
   /** Posição de um jogador no ranking (1-based) por um critério. 0 se não achar. */
   function posicaoNoRanking(id, criterio = "xp") {
@@ -2877,7 +2880,7 @@ function criarContas(opts = {}) {
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
-    ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
+    ranking, amigosIds, posicaoNoRanking, totalDeContas, salvar, carregar,
     definirAvatarFoto, definirAvatarGaleria, removerAvatar, avatarBuffer, denunciarAvatar,
     definirMascoteGaleria, removerMascote,
     definirMolduraGaleria, removerMoldura, definirTituloGaleria, removerTitulo,
@@ -2963,6 +2966,7 @@ function criarGerenciador(opts = {}) {
       criadorAssento: 0,
       assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
       iniciada: false,
+      divulgada: null,    // {por, apelido} quando o anfitrião "chama a galera" pro saguão
       jogo: null,
       liquidada: false,   // já contabilizou o resultado no cofre?
       resumoFinal: null,  // resumo por jogador (deltas de moedas/xp) pra tela de fim
@@ -3250,7 +3254,29 @@ function criarGerenciador(opts = {}) {
     return { ok: true, codigo };
   }
 
-  return { salas, criarMesa, entrarMesa, entrarPublica, reservarCodigo, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
+  // DIVULGAR NO SAGUÃO ("estou na minha mesa, venham"): o anfitrião marca a mesa como
+  // divulgada; o saguão passa a listá-la com um botão "Entrar" enquanto tiver vaga.
+  function divulgar(codigo, jogadorId, apelido, on) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    sala.divulgada = on ? { por: jogadorId || null, apelido: apelido || "Jogador" } : null;
+    return { ok: true, divulgada: !!sala.divulgada };
+  }
+  // mesas divulgadas que ainda têm VAGA (assento humano livre) e não acabaram — viram
+  // "cartões" na lista do saguão público.
+  function mesasDivulgadas() {
+    const out = [];
+    for (const codigo in salas) {
+      const s = salas[codigo];
+      if (!s || !s.divulgada || s.liquidada) continue;
+      const temVaga = s.assentos.some((a) => a === null);
+      const temHumano = s.assentos.some((a) => a && a.tipo === "humano");
+      if (!temVaga || !temHumano) continue;
+      out.push({ codigo, apelido: s.divulgada.apelido, modalidade: s.modalidade, privada: !!s.privada });
+    }
+    return out;
+  }
+  return { salas, criarMesa, entrarMesa, entrarPublica, reservarCodigo, divulgar, mesasDivulgadas, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -3318,6 +3344,16 @@ const EMOJI_PUB_SET = new Set(EMOJIS_PUBLICO);
 const EMOJI_VIP_SET = new Set(EMOJIS_VIP);
 function emojiPermitido(id, vip) { return EMOJI_PUB_SET.has(id) || (!!vip && EMOJI_VIP_SET.has(id)); }
 
+// PRESENTES (Salão VIP) — gesto social: quem ENVIA paga em moedas; aparece no feed.
+// Quem recebe ganha o carinho + destaque (SEM moedas — decisão Sônia 24/jul).
+const PRESENTES = [
+  { id: "rosa", emoji: "🌹", nome: "Rosa", custo: 50 },
+  { id: "bombom", emoji: "🍫", nome: "Bombom", custo: 100 },
+  { id: "champanhe", emoji: "🍾", nome: "Champanhe", custo: 200 },
+  { id: "diamante", emoji: "💎", nome: "Diamante", custo: 500 },
+];
+const PRESENTE_POR_ID = {}; PRESENTES.forEach((p) => { PRESENTE_POR_ID[p.id] = p; });
+
 // status de presença (spec 11.1 presence_status)
 const STATUS = new Set(["disponivel", "procurando", "em_partida", "observando", "ausente"]);
 // modalidade preferida (preferência de jogo, mostrada na presença)
@@ -3335,6 +3371,7 @@ function criarSaguao(opts = {}) {
   function frases() { return FRASES; }
   function reacoesCatalogo() { return REACOES; }
   function emojisCatalogo() { return { publico: EMOJIS_PUBLICO, vip: EMOJIS_VIP }; }
+  function presentesCatalogo() { return PRESENTES; }
 
   function _bloqueado(a, b) { // A não vê/interage com B se qualquer um bloqueou o outro
     return !!((bloqueios[a] && bloqueios[a].has(b)) || (bloqueios[b] && bloqueios[b].has(a)));
@@ -3440,6 +3477,27 @@ function criarSaguao(opts = {}) {
     return { ok: true, msg };
   }
 
+  // PRESENTE (Salão VIP): entra no feed como "fulano presenteou beltrano com 🌹". A
+  // cobrança das moedas do remetente é feita no servidor.js (tem o cofre).
+  function enviarPresente(remetente, alvoId, alvoApelido, presenteId) {
+    if (!estaNoSaguao(remetente.jogadorId)) return { erro: "entre no saguão primeiro" };
+    const pr = PRESENTE_POR_ID[presenteId];
+    if (!pr) return { erro: "presente inválido" };
+    const lim = podeEnviar(remetente.jogadorId, "pres:" + presenteId);
+    if (!lim.ok) return { erro: lim.motivo, esperaMs: lim.esperaMs };
+    _registraEnvio(remetente.jogadorId, "pres:" + presenteId);
+    const p = presenca[remetente.jogadorId] || remetente;
+    const msg = {
+      id: "m" + (++seq), jogadorId: remetente.jogadorId, apelido: p.apelido,
+      avatarTipo: p.avatarTipo, avatarId: p.avatarId, avatarVer: p.avatarVer, molduraId: p.molduraId,
+      nivel: p.nivel, cla: p.cla, vip: p.vip,
+      presente: { id: pr.id, emoji: pr.emoji, nome: pr.nome, custo: pr.custo, de: p.apelido, para: alvoApelido, paraId: alvoId },
+      ts: agora(), reacoes: {},
+    };
+    feed.push(msg); while (feed.length > MAX_FEED) feed.shift();
+    return { ok: true, msg, custo: pr.custo };
+  }
+
   function reagir(jid, messageId, reacaoId) {
     if (!REACAO_IDS.has(reacaoId)) return { erro: "reação inválida" };
     const msg = feed.find((m) => m.id === messageId);
@@ -3454,7 +3512,7 @@ function criarSaguao(opts = {}) {
 
   function estado(paraJid) { // o que o cliente precisa ao entrar
     return {
-      frases: FRASES, reacoes: REACOES, emojis: emojisCatalogo(),
+      frases: FRASES, reacoes: REACOES, emojis: emojisCatalogo(), presentes: PRESENTES,
       online: online(paraJid),
       feed: feed.filter((m) => !paraJid || !_bloqueado(paraJid, m.jogadorId))
         .map((m) => Object.assign({}, m, { reacoes: _contarReacoes(m) })),
@@ -3509,10 +3567,10 @@ function criarSaguao(opts = {}) {
     return { ok: true, aceitou: !!aceitar, interacao: it };
   }
 
-  return { frases, reacoesCatalogo, emojisCatalogo, entrar, sair, definirStatus, definirModalidade, definirMesa, estaNoSaguao, online, enviarFrase, enviarEmote, reagir, bloquear, desbloquear, estado, presenca, _bloqueado, criarEspera, responderEspera, criarConvite, responderConvite, interacao };
+  return { frases, reacoesCatalogo, emojisCatalogo, presentesCatalogo, entrar, sair, definirStatus, definirModalidade, definirMesa, estaNoSaguao, online, enviarFrase, enviarEmote, enviarPresente, reagir, bloquear, desbloquear, estado, presenca, _bloqueado, criarEspera, responderEspera, criarConvite, responderConvite, interacao };
 }
 
-module.exports = { criarSaguao, FRASES, REACOES, EMOJIS_PUBLICO, EMOJIS_VIP };
+module.exports = { criarSaguao, FRASES, REACOES, EMOJIS_PUBLICO, EMOJIS_VIP, PRESENTES };
 
   };
 
@@ -3575,6 +3633,7 @@ function criarServidor(opts = {}) {
       // caiu durante a revanche = a mesa não continua (os outros "vão atrás")
       if (tinhaRevanche) cancelarRevanche(cod, "saiu", apel);
       else broadcastSala(cod);
+      atualizarSaguaoMesas(); // saiu da mesa (desconexão) → atualiza o saguão
     }
     // saiu do saguão ao cair (presença sempre reflete quem está conectado)
     if (c.jogadorId && c.sgSala) { const sg = salaSaguao(c); if (sg.estaNoSaguao(c.jogadorId)) sg.sair(c.jogadorId); const s = c.sgSala; c.sgSala = null; broadcastSaguao({ tipo: "saguaoPresenca" }, true, s); }
@@ -3634,7 +3693,7 @@ function criarServidor(opts = {}) {
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
-        return broadcastSala(c.codigo);
+        broadcastSala(c.codigo); return atualizarSaguaoMesas();
       }
       case "entrarPublica": {
         // MATCHMAKING público: junta numa mesa pública aberta ou cria uma. NUNCA cai
@@ -3645,7 +3704,14 @@ function criarServidor(opts = {}) {
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento, publica: true });
-        return broadcastSala(r.codigo);
+        broadcastSala(r.codigo); return atualizarSaguaoMesas();
+      }
+      case "divulgarMesa": { // anfitrião "chama a galera pro salão" (ou tira)
+        if (!c.jogadorId || !c.codigo) return;
+        const apel = perfilSaguao(c.jogadorId, msg.apelido).apelido;
+        ger.divulgar(c.codigo, c.jogadorId, apel, !!msg.divulgar);
+        enviarPara(id, { tipo: "mesaDivulgada", divulgada: !!msg.divulgar, codigo: c.codigo });
+        return atualizarSaguaoMesas();
       }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
@@ -3656,8 +3722,14 @@ function criarServidor(opts = {}) {
         return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
       }
       case "ranking": {
-        if (!contas) return enviarPara(id, { tipo: "ranking", lista: [] });
-        return enviarPara(id, { tipo: "ranking", lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio }) });
+        if (!contas) return enviarPara(id, { tipo: "ranking", aba: msg.aba || null, lista: [] });
+        let ids = null;
+        if (msg.aba === "amigos") { // aba Amigos: só eu + meus amigos
+          const jid = msg.jogadorId || c.jogadorId;
+          if (jid) ids = new Set([jid].concat(contas.amigosIds(jid)));
+          else ids = new Set(); // sem login → lista vazia
+        }
+        return enviarPara(id, { tipo: "ranking", aba: msg.aba || null, lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio, ids: ids }) });
       }
       case "definirAvatar": {
         // foto própria (upload), avatar da galeria, ou remover (voltar ao padrão)
@@ -3809,6 +3881,7 @@ function criarServidor(opts = {}) {
           c.codigo = null; c.assento = null;
           if (tinhaRev) cancelarRevanche(cod, "saiu", apelS);
           else broadcastSala(cod);
+          atualizarSaguaoMesas(); // abriu vaga / mesa mudou → atualiza o saguão
         }
         return;
       }
@@ -3858,7 +3931,9 @@ function criarServidor(opts = {}) {
         const sg = salaSaguao(c);
         sg.entrar(perfilSaguao(c.jogadorId, msg.apelido, novaSala));
         if (msg.modalidade) sg.definirModalidade(c.jogadorId, msg.modalidade);
-        enviarPara(id, Object.assign({ tipo: "saguaoEstado", sala: novaSala }, sg.estado(c.jogadorId)));
+        const est = sg.estado(c.jogadorId);
+        est.online = listaSaguao(sg, c.jogadorId, novaSala); // inclui mesas divulgadas (público)
+        enviarPara(id, Object.assign({ tipo: "saguaoEstado", sala: novaSala }, est));
         return broadcastSaguao({ tipo: "saguaoPresenca", online: null }, true, novaSala);
       }
       case "sairSaguao": {
@@ -3887,6 +3962,26 @@ function criarServidor(opts = {}) {
         const r = salaSaguao(c).enviarEmote(perfilSaguao(c.jogadorId, msg.apelido, c.sgSala), msg.emojiId);
         if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro, esperaMs: r.esperaMs || 0 });
         return broadcastSaguao({ tipo: "saguaoMensagem", msg: Object.assign({}, r.msg, { reacoes: {} }) }, false, c.sgSala);
+      }
+      case "saguaoPresente": { // 🎁 presentear (só no Salão VIP) — quem envia paga em moedas
+        if (!c.jogadorId || !msg.alvo) return;
+        if (c.sgSala !== "vip") return enviarPara(id, { tipo: "saguaoErro", motivo: "Presentes são exclusivos do Salão VIP 👑" });
+        const sg = salaSaguao(c);
+        if (!sg.estaNoSaguao(msg.alvo)) return enviarPara(id, { tipo: "saguaoErro", motivo: "essa pessoa saiu do salão." });
+        const pr = sg.presentesCatalogo().find((x) => x.id === msg.presenteId);
+        if (!pr) return enviarPara(id, { tipo: "saguaoErro", motivo: "presente inválido" });
+        if (!contas) return;
+        const conta = contas.obter(c.jogadorId);
+        const saldo = (conta && conta.moedas) || 0;
+        if (saldo < pr.custo) return enviarPara(id, { tipo: "saldoInsuficiente", motivo: "Você tem 🪙 " + saldo + " — esse presente custa 🪙 " + pr.custo + ".", saldo: saldo, custo: pr.custo });
+        contas.ajustarMoedas(c.jogadorId, -pr.custo);
+        const alvoApel = perfilSaguao(msg.alvo, null, "vip").apelido;
+        const r = sg.enviarPresente(perfilSaguao(c.jogadorId, msg.apelido, "vip"), msg.alvo, alvoApel, msg.presenteId);
+        if (r.erro) { contas.ajustarMoedas(c.jogadorId, pr.custo); return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro, esperaMs: r.esperaMs || 0 }); }
+        broadcastSaguao({ tipo: "saguaoMensagem", msg: Object.assign({}, r.msg, { reacoes: {} }) }, false, "vip");
+        enviarPara(id, { tipo: "saguaoPresenteEnviado", alvoApelido: alvoApel, presente: r.msg.presente, saldo: saldo - pr.custo });
+        enviarParaJogador(msg.alvo, { tipo: "saguaoPresenteRecebido", de: r.msg.apelido, presente: r.msg.presente });
+        return;
       }
       case "saguaoModalidade": { // preferência de jogo (Aberto/Fechado/Sbtl)
         if (!c.jogadorId) return;
@@ -4071,6 +4166,21 @@ function criarServidor(opts = {}) {
       vip: sala === "vip" ? true : !!(conta && conta.vip),
     };
   }
+  // MESAS DIVULGADAS ("estou na minha mesa, venham") viram cartões na lista do saguão
+  // PÚBLICO — mesmo que o anfitrião esteja na mesa (outra página), não no saguão.
+  function mesasPresenca() {
+    return ger.mesasDivulgadas().map((m) => ({
+      jogadorId: "mesa:" + m.codigo, apelido: m.apelido, vip: false, cla: null, nivel: 1,
+      status: "em_partida", modalidade: m.modalidade, mesa: { codigo: m.codigo, vaga: true },
+      soEntrar: true, // cliente mostra SÓ o botão Entrar (sem menu de convite)
+    }));
+  }
+  function listaSaguao(sg, paraJid, sala) {
+    let lista = sg.online(paraJid);
+    if (sala === "publico") lista = lista.concat(mesasPresenca());
+    return lista;
+  }
+  function atualizarSaguaoMesas() { broadcastSaguao({ tipo: "saguaoPresenca" }, true, "publico"); }
   // broadcast SÓ pra quem está na MESMA sala (público ou VIP não se misturam)
   function broadcastSaguao(msg, presencaPorJogador, sala) {
     const remetente = msg && msg.msg && msg.msg.jogadorId; // saguaoMensagem
@@ -4079,7 +4189,7 @@ function criarServidor(opts = {}) {
       if (!c.jogadorId || !c.sgSala || (sala && c.sgSala !== sala)) continue;
       const sg = salaSaguao(c);
       if (!sg.estaNoSaguao(c.jogadorId)) continue;
-      if (presencaPorJogador) { c.enviar({ tipo: "saguaoPresenca", online: sg.online(c.jogadorId) }); continue; }
+      if (presencaPorJogador) { c.enviar({ tipo: "saguaoPresenca", online: listaSaguao(sg, c.jogadorId, c.sgSala) }); continue; }
       if (remetente && sg._bloqueado(c.jogadorId, remetente)) continue; // não entrega msg de quem foi bloqueado
       c.enviar(msg);
     }
