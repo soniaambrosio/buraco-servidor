@@ -1589,7 +1589,8 @@ function comprarMonte(jogo, assento) {
 function baixar(jogo, assento, idsCartas) {
   const v = validarVez(jogo, assento, { precisaTerComprado: true });
   if (!v.ok) return v;
-  if (!idsCartas || idsCartas.length < 3) return { ok: false, erro: "um jogo tem no mínimo 3 cartas" };
+  if (!Array.isArray(idsCartas) || idsCartas.length < 3) return { ok: false, erro: "um jogo tem no mínimo 3 cartas" };
+  if (new Set(idsCartas).size !== idsCartas.length) return { ok: false, erro: "carta repetida no jogo" };
   const cartas = [];
   for (const id of idsCartas) {
     const idx = idxNaMao(jogo, assento, id);
@@ -1659,7 +1660,8 @@ function estender(jogo, assento, indiceJogo, idsCartas) {
   const jogos = jogo.jogosDupla[dupla];
   const alvo = jogos[indiceJogo];
   if (!alvo) return { ok: false, erro: "jogo " + indiceJogo + " não existe na sua mesa" };
-  if (!idsCartas || !idsCartas.length) return { ok: false, erro: "nenhuma carta pra estender" };
+  if (!Array.isArray(idsCartas) || !idsCartas.length) return { ok: false, erro: "nenhuma carta pra estender" };
+  if (new Set(idsCartas).size !== idsCartas.length) return { ok: false, erro: "carta repetida na extensão" };
   const cartas = [];
   for (const id of idsCartas) {
     const idx = idxNaMao(jogo, assento, id);
@@ -2566,7 +2568,7 @@ function criarContas(opts = {}) {
   function ajustarMoedas(id, n) {
     const c = dados.contas[id];
     if (!c) return null;
-    c.moedas = Math.max(0, c.moedas + Math.round(n)); c.atualizadoEm = agora();
+    c.moedas = Math.max(0, c.moedas + Math.round(n)); c.atualizadoEm = agora(); salvar();
     return c.moedas;
   }
 
@@ -2584,11 +2586,19 @@ function criarContas(opts = {}) {
     const vencedora = placar.nos >= placar.eles ? "nos" : "eles";
     aposta = Math.max(0, Math.round(aposta || 0));
 
-    // pote (mesa com aposta): só entra quem tem conta e está sentado; vencedores
-    // humanos dividem o pote. Cada um "pagou" a entrada ao começar — aqui a gente
-    // debita a entrada de todos e credita o pote a quem venceu.
-    const pagantes = humanos.length;
-    const pote = aposta * pagantes;
+    // pote (mesa com aposta): CONSERVAÇÃO — ninguém paga mais do que tem (piso 0).
+    // A contribuição real de cada um é min(aposta, saldo); o pote é a soma dessas
+    // contribuições e os vencedores dividem exatamente esse pote. Assim o total de
+    // moedas se conserva mesmo se um perdedor estava quebrado (antes: cunhava moeda).
+    const contribPorId = {};
+    let pote = 0;
+    if (aposta > 0) {
+      for (const j of humanos) {
+        const cc = dados.contas[j.id] || dados.contas[obterOuCriar(j.id, j.apelido).id];
+        const contrib = Math.min(aposta, Math.max(0, cc.moedas));
+        contribPorId[j.id] = contrib; pote += contrib;
+      }
+    }
     const vencedoresH = humanos.filter((j) => duplaDoAssento(j.assento) === vencedora);
     const quinhao = (aposta > 0 && vencedoresH.length) ? Math.floor(pote / vencedoresH.length) : 0;
 
@@ -2610,7 +2620,7 @@ function criarContas(opts = {}) {
       // MOEDAS
       let deltaMoedas;
       if (aposta > 0) {
-        deltaMoedas = (venceu ? quinhao : 0) - aposta; // pagou a entrada; vencedor leva quinhão
+        deltaMoedas = (venceu ? quinhao : 0) - (contribPorId[j.id] || 0); // paga só o que pode; vencedor leva quinhão
       } else {
         deltaMoedas = ECON.MOEDAS_PARTICIPACAO + (venceu ? ECON.MOEDAS_VITORIA : 0);
       }
@@ -2996,6 +3006,16 @@ function criarGerenciador(opts = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (sala.iniciada) return { erro: "a partida já começou" };
+    // IDEMPOTÊNCIA: se este jogador JÁ está sentado nesta mesa, devolve a MESMA cadeira
+    // (não abre uma segunda). Corrige o "1 jogador em 2 cadeiras" causado por reenvio do
+    // convite (retry), toque duplo ou reconexão. Sem jogadorId (anônimo) segue o fluxo normal.
+    if (jogadorId) {
+      const jaSentado = sala.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
+      if (jaSentado !== -1) {
+        if (apelido) sala.assentos[jaSentado].apelido = apelido;
+        return { assento: jaSentado, codigo };
+      }
+    }
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
     // caso comum (casal/dupla que quer jogar JUNTA). Só depois enche os adversários
@@ -3146,8 +3166,29 @@ function criarGerenciador(opts = {}) {
     const assento = j.vez;
     const r = jogarTurnoBot(j, assento);
     sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: r.log });
+    // ANTI-TRAVA (mesa congelada): a vez NUNCA pode ficar presa num bot. Se depois do
+    // turno a vez continua neste assento e a rodada não encerrou, o bot não conseguiu
+    // jogar (ex.: o humano já tinha COMPRADO e saiu/AFK no meio → o assento-bot não pode
+    // comprar de novo). Força passar a vez pra mesa seguir em vez de reagendar pra sempre.
+    if (!j.encerrada && !j.rodadaEncerrada && j.vez === assento) {
+      J.passarVez(j);
+      sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: ["turno preso — vez passada à força (anti-trava)"] });
+    }
     liquidar(sala); // batida de bot pode ter encerrado a partida
     return { jogou: true, assento, resultado: r };
+  }
+
+  /** ANTI-TRAVA: se a vez está presa num BOT (rodada em andamento), força passar a vez.
+   *  Usado pela rede de segurança do servidor quando um passo de bot lança exceção —
+   *  a mesa nunca pode congelar num turno preso. Retorna true se destravou. */
+  function destravarBotPreso(codigo) {
+    const sala = salas[codigo];
+    if (!sala || !sala.jogo) return false;
+    const j = sala.jogo;
+    if (j.encerrada || j.rodadaEncerrada) return false;
+    const v = j.assentos[j.vez];
+    if (v && v.tipo === "bot") { J.passarVez(j); return true; }
+    return false;
   }
 
   /** O que um assento PODE ver (lobby antes de iniciar, ou a visão do jogo). */
@@ -3193,7 +3234,12 @@ function criarGerenciador(opts = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (!sala.iniciada) {
-      if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
+      sala.assentos[assento] = null; // libera o assento (inclusive o do criador)
+      if (assento === sala.criadorAssento) {
+        // criador saiu do lobby: promove o próximo humano sentado a anfitrião, pra
+        // mesa não ficar órfã (ninguém conseguindo iniciar). -1 = ninguém (mesa vazia).
+        sala.criadorAssento = sala.assentos.findIndex((a) => a && a.tipo === "humano");
+      }
       return { ok: true };
     }
     if (sala.jogo && sala.jogo.assentos[assento]) {
@@ -3276,7 +3322,7 @@ function criarGerenciador(opts = {}) {
     }
     return out;
   }
-  return { salas, criarMesa, entrarMesa, entrarPublica, reservarCodigo, divulgar, mesasDivulgadas, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
+  return { salas, criarMesa, entrarMesa, entrarPublica, reservarCodigo, divulgar, mesasDivulgadas, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, destravarBotPreso, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -3443,6 +3489,7 @@ function criarSaguao(opts = {}) {
     if (!estaNoSaguao(remetente.jogadorId)) return { erro: "entre no saguão primeiro" };
     const fr = FRASE_POR_ID[phraseId];
     if (!fr || !fr.ativa) return { erro: "frase inválida" };
+    if (fr.categoria === "vip" && !((presenca[remetente.jogadorId] || remetente).vip)) return { erro: "frase exclusiva do Salão VIP 👑" };
     const lim = podeEnviar(remetente.jogadorId, phraseId);
     if (!lim.ok) return { erro: lim.motivo, esperaMs: lim.esperaMs };
     _registraEnvio(remetente.jogadorId, phraseId);
@@ -3633,11 +3680,46 @@ function criarServidor(opts = {}) {
       // caiu durante a revanche = a mesa não continua (os outros "vão atrás")
       if (tinhaRevanche) cancelarRevanche(cod, "saiu", apel);
       else broadcastSala(cod);
+      removerSalaSeSemConexao(cod); // mesa abandonada (ninguém mais conectado) sai da memória
       atualizarSaguaoMesas(); // saiu da mesa (desconexão) → atualiza o saguão
     }
-    // saiu do saguão ao cair (presença sempre reflete quem está conectado)
-    if (c.jogadorId && c.sgSala) { const sg = salaSaguao(c); if (sg.estaNoSaguao(c.jogadorId)) sg.sair(c.jogadorId); const s = c.sgSala; c.sgSala = null; broadcastSaguao({ tipo: "saguaoPresenca" }, true, s); }
+    // saiu do saguão ao cair (presença sempre reflete quem está conectado). Só
+    // remove a presença se NÃO houver outra aba/conexão do mesmo jogador na mesma sala.
+    if (c.jogadorId && c.sgSala) {
+      const s = c.sgSala; const sg = salaSaguao(c);
+      let outraAba = false;
+      for (const k in conexoes) { if (k !== id && conexoes[k].jogadorId === c.jogadorId && conexoes[k].sgSala === s) { outraAba = true; break; } }
+      if (!outraAba && sg.estaNoSaguao(c.jogadorId)) sg.sair(c.jogadorId);
+      c.sgSala = null; broadcastSaguao({ tipo: "saguaoPresenca" }, true, s);
+    }
     delete conexoes[id];
+  }
+
+  // libera o assento da mesa atual da conexão (evita "assento fantasma" quando o
+  // jogador troca de mesa sem sair da anterior — a mesa velha não trava mais).
+  function liberarAssentoAtual(c) {
+    if (!c || c.codigo == null) return;
+    const cod = c.codigo;
+    const salaAnt = ger.salas[cod];
+    const apel = (salaAnt && salaAnt.jogo && salaAnt.jogo.assentos[c.assento]) ? salaAnt.jogo.assentos[c.assento].apelido : "Um jogador";
+    const tinhaRevanche = !!(salaAnt && salaAnt.revanche && salaAnt.revanche.ativa);
+    try { ger.sair({ codigo: cod, assento: c.assento }); } catch (_) {}
+    c.codigo = null; c.assento = null;
+    // saiu no meio da revanche → a mesa não continua pros outros (mesmo tratamento da queda)
+    if (tinhaRevanche) { try { cancelarRevanche(cod, "saiu", apel); } catch (_) {} }
+    else { try { broadcastSala(cod); } catch (_) {} }
+    removerSalaSeSemConexao(cod);
+    try { atualizarSaguaoMesas(); } catch (_) {}
+  }
+
+  // remove a sala da memória quando NENHUMA conexão a referencia mais. Evita o
+  // vazamento (mesas abandonadas acumulando) e a mesa-fantasma do lobby.
+  function removerSalaSeSemConexao(cod) {
+    if (cod == null || !ger.salas[cod]) return;
+    for (const k in conexoes) { if (conexoes[k].codigo === cod) return; } // ainda tem gente conectada
+    const sala = ger.salas[cod];
+    if (sala && sala.revanche && sala.revanche.timer != null) { try { cancelarTempo(sala.revanche.timer); } catch (_) {} }
+    delete ger.salas[cod];
   }
 
   function enviarPara(id, msg) {
@@ -3658,15 +3740,34 @@ function criarServidor(opts = {}) {
     return s;
   }
 
+  // rede de proteção: NENHUMA mensagem malformada pode derrubar o processo. Qualquer
+  // exceção vira um "erro" pro cliente e a mesa/servidor seguem vivos (todas as outras
+  // mesas continuam). Foi o bug crítico #1 da auditoria de 24/jul.
   function processar(id, msg) {
+    try { return _processarInterno(id, msg); }
+    catch (e) {
+      try { console.error("[processar] falhou em", (msg && msg.tipo), "-", (e && e.message) || e); } catch (_) {}
+      try { enviarPara(id, { tipo: "erro", motivo: "erro interno — a jogada foi ignorada" }); } catch (_) {}
+    }
+  }
+  function _processarInterno(id, msg) {
     const c = conexoes[id];
     if (!c) return;
     if (!msg || !msg.tipo) return enviarPara(id, { tipo: "erro", motivo: "mensagem sem tipo" });
+
+    // trava anti-DoS: um socket não pode criar um monte de contas "fantasma" (jogadorId
+    // forjado, cada uma persiste e reescreve o disco). Cliente legítimo usa 1 id por
+    // sessão; 30 identidades NOVAS na mesma conexão = abuso → recusa criar mais.
+    if (msg.jogadorId && contas && !contas.obter(msg.jogadorId)) {
+      c._novasIdent = (c._novasIdent || 0) + 1;
+      if (c._novasIdent > 30) return enviarPara(id, { tipo: "erro", motivo: "muitas identidades novas nesta sessão" });
+    }
 
     switch (msg.tipo) {
       case "criarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        liberarAssentoAtual(c);
         // MESA PRIVADA: o dono paga uma taxa pra abrir (recurso VIP). Cobra ANTES de
         // criar e RECUSA se não tiver saldo. Se a criação falhar depois, devolve.
         const custoPriv = (msg.privada && msg.custo) ? Math.max(0, Math.round(msg.custo)) : 0;
@@ -3689,6 +3790,7 @@ function criarServidor(opts = {}) {
       case "entrarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        liberarAssentoAtual(c);
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, assento: Number.isInteger(msg.assento) ? msg.assento : undefined });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
@@ -3700,6 +3802,7 @@ function criarServidor(opts = {}) {
         // numa mesa privada (corrige o bug do público entrando na privada).
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        liberarAssentoAtual(c);
         const r = ger.entrarPublica({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo; c.assento = r.assento;
@@ -3708,6 +3811,8 @@ function criarServidor(opts = {}) {
       }
       case "divulgarMesa": { // anfitrião "chama a galera pro salão" (ou tira)
         if (!c.jogadorId || !c.codigo) return;
+        const salaDiv = ger.salas[c.codigo];
+        if (salaDiv && salaDiv.criadorAssento != null && c.assento !== salaDiv.criadorAssento) return enviarPara(id, { tipo: "erro", motivo: "só o anfitrião divulga a mesa" });
         const apel = perfilSaguao(c.jogadorId, msg.apelido).apelido;
         ger.divulgar(c.codigo, c.jogadorId, apel, !!msg.divulgar);
         enviarPara(id, { tipo: "mesaDivulgada", divulgada: !!msg.divulgar, codigo: c.codigo });
@@ -3856,20 +3961,24 @@ function criarServidor(opts = {}) {
         // alguém dorme com o celular (pedido Sônia). Só marca o tipo e destrava o ritmo.
         if (c.codigo == null) return;
         const salaB = ger.salas[c.codigo];
-        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento]) {
+        // só age se o assento é HUMANO agora (idempotente: evita re-disparar o ritmo à toa)
+        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento] && salaB.jogo.assentos[c.assento].tipo === "humano") {
           salaB.jogo.assentos[c.assento].tipo = "bot";
+          return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
         }
-        return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
+        return;
       }
       case "afkVoltar": {
         // o jogador voltou: o assento volta a ser HUMANO. O servidor para na vez dele
         // (vezEhBot=false) e espera — ele reassume no próximo turno dele.
         if (c.codigo == null) return;
         const salaV = ger.salas[c.codigo];
-        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento]) {
+        // só reassume se o assento está como BOT (não pode "reclamar" um assento já humano)
+        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento] && salaV.jogo.assentos[c.assento].tipo === "bot") {
           salaV.jogo.assentos[c.assento].tipo = "humano";
+          return broadcastSala(c.codigo);
         }
-        return broadcastSala(c.codigo);
+        return;
       }
       case "sair": {
         if (c.codigo != null) {
@@ -3881,6 +3990,7 @@ function criarServidor(opts = {}) {
           c.codigo = null; c.assento = null;
           if (tinhaRev) cancelarRevanche(cod, "saiu", apelS);
           else broadcastSala(cod);
+          removerSalaSeSemConexao(cod); // não deixa mesa órfã (criadorAssento=-1) joinável no público
           atualizarSaguaoMesas(); // abriu vaga / mesa mudou → atualiza o saguão
         }
         return;
@@ -4061,8 +4171,18 @@ function criarServidor(opts = {}) {
     emitirFimSeAcabou(codigo);
     if (ger.vezEhBot(codigo)) {
       agendar(function () {
-        ger.jogarUmBot(codigo);
-        avancarComRespiro(codigo);
+        // o passo do bot roda num timer (fora do try/catch do processar). Se um bot
+        // lançar, a rede aqui segura: a mesa recebe um broadcast e o processo NÃO cai.
+        try {
+          ger.jogarUmBot(codigo);
+          avancarComRespiro(codigo);
+        } catch (e) {
+          try { console.error("[bot] falhou na mesa", codigo, "-", (e && e.message) || e); } catch (_) {}
+          // ANTI-TRAVA: bot que lançou no meio do turno não pode prender a vez —
+          // destrava (passa a vez) e SEGUE a mesa em vez de congelar.
+          try { ger.destravarBotPreso(codigo); } catch (_) {}
+          try { avancarComRespiro(codigo); } catch (_) {}
+        }
       });
     }
   }
@@ -4305,6 +4425,9 @@ function criarConexao(socket, handlers) {
         const hi = buf.readUInt32BE(off), lo = buf.readUInt32BE(off + 4);
         len = hi * 4294967296 + lo; off += 8;
       }
+      // trava anti-OOM: frame gigante (crafted) não aloca memória absurda. 12MB
+      // é folgado até pra upload de avatar em base64.
+      if (len > 12582912) { fechar(1009); return; }
       // cliente DEVE mascarar (RFC 6455). Se não veio máscara, encerra.
       if (!masked) { fechar(1002); return; }
       if (buf.length < off + 4 + len) return; // frame ainda incompleto
@@ -4335,6 +4458,11 @@ function criarConexao(socket, handlers) {
 }
 
 function iniciar(porta) {
+  // REDE DE SEGURANÇA FINAL: nada — nem um timer solto, nem um bug de bot — pode
+  // matar o processo e derrubar TODAS as mesas. Loga e segue vivo (servidor de jogo:
+  // manter as outras mesas no ar é melhor que cair inteiro).
+  process.on("uncaughtException", (e) => { try { console.error("[uncaughtException]", (e && e.stack) || e); } catch (_) {} });
+  process.on("unhandledRejection", (e) => { try { console.error("[unhandledRejection]", e); } catch (_) {} });
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
   const RESPIRO_MS = Number(process.env.RESPIRO_MS) || 1100; // ritmo dos bots na tela
