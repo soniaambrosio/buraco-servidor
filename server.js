@@ -2958,6 +2958,14 @@ function criarGerenciador(opts = {}) {
   }
 
   function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0, privada = false, codigo: codigoPedido = null } = {}) {
+    // RECONEXÃO do anfitrião: se o código pedido JÁ existe e este jogador já é dono de uma
+    // cadeira nele (caiu e recarregou), re-atribui a MESMA mesa em vez de criar OUTRA com
+    // código diferente. Corrige "duas mesas com o mesmo código / jogadores não se encontram".
+    if (codigoPedido && jogadorId && salas[codigoPedido] && !salas[codigoPedido].iniciada) {
+      const sx = salas[codigoPedido];
+      const meu = sx.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
+      if (meu !== -1) { if (apelido) sx.assentos[meu].apelido = apelido; return { codigo: codigoPedido, assento: meu, reatou: true }; }
+    }
     let codigo, tentativas = 0;
     // Código PEDIDO (convite do Saguão): usa se estiver livre; senão gera um novo.
     if (codigoPedido && !salas[codigoPedido]) {
@@ -3005,7 +3013,20 @@ function criarGerenciador(opts = {}) {
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
-    if (sala.iniciada) return { erro: "a partida já começou" };
+    if (sala.iniciada) {
+      // RECONEXÃO numa partida EM ANDAMENTO: se este jogador era um assento (caiu → virou
+      // bot), deixa ele REASSUMIR a própria cadeira (volta a ser humano). Senão, a partida
+      // já começou de fato e ele não entra.
+      if (jogadorId) {
+        const meu = sala.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
+        if (meu !== -1) {
+          if (sala.jogo && sala.jogo.assentos[meu]) { sala.jogo.assentos[meu].tipo = "humano"; if (apelido) sala.jogo.assentos[meu].apelido = apelido; }
+          if (apelido) sala.assentos[meu].apelido = apelido;
+          return { assento: meu, codigo, reatou: true };
+        }
+      }
+      return { erro: "a partida já começou" };
+    }
     // IDEMPOTÊNCIA: se este jogador JÁ está sentado nesta mesa, devolve a MESMA cadeira
     // (não abre uma segunda). Corrige o "1 jogador em 2 cadeiras" causado por reenvio do
     // convite (retry), toque duplo ou reconexão. Sem jogadorId (anônimo) segue o fluxo normal.
@@ -3234,12 +3255,10 @@ function criarGerenciador(opts = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (!sala.iniciada) {
-      sala.assentos[assento] = null; // libera o assento (inclusive o do criador)
-      if (assento === sala.criadorAssento) {
-        // criador saiu do lobby: promove o próximo humano sentado a anfitrião, pra
-        // mesa não ficar órfã (ninguém conseguindo iniciar). -1 = ninguém (mesa vazia).
-        sala.criadorAssento = sala.assentos.findIndex((a) => a && a.tipo === "humano");
-      }
+      // no lobby, libera o assento — MENOS o do criador (preserva a mesa e a cadeira do
+      // anfitrião, pra ele poder recarregar e reassumir; não desmancha o convite por uma
+      // queda de conexão temporária).
+      if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
       return { ok: true };
     }
     if (sala.jogo && sala.jogo.assentos[assento]) {
@@ -3680,7 +3699,8 @@ function criarServidor(opts = {}) {
       // caiu durante a revanche = a mesa não continua (os outros "vão atrás")
       if (tinhaRevanche) cancelarRevanche(cod, "saiu", apel);
       else broadcastSala(cod);
-      removerSalaSeSemConexao(cod); // mesa abandonada (ninguém mais conectado) sai da memória
+      // NÃO apaga a mesa numa queda de conexão (temporária): a pessoa pode voltar e
+      // reassumir a cadeira. Apagar aqui separava os jogadores (mesas duplicadas).
       atualizarSaguaoMesas(); // saiu da mesa (desconexão) → atualiza o saguão
     }
     // saiu do saguão ao cair (presença sempre reflete quem está conectado). Só
@@ -3708,7 +3728,6 @@ function criarServidor(opts = {}) {
     // saiu no meio da revanche → a mesa não continua pros outros (mesmo tratamento da queda)
     if (tinhaRevanche) { try { cancelarRevanche(cod, "saiu", apel); } catch (_) {} }
     else { try { broadcastSala(cod); } catch (_) {} }
-    removerSalaSeSemConexao(cod);
     try { atualizarSaguaoMesas(); } catch (_) {}
   }
 
@@ -3990,7 +4009,6 @@ function criarServidor(opts = {}) {
           c.codigo = null; c.assento = null;
           if (tinhaRev) cancelarRevanche(cod, "saiu", apelS);
           else broadcastSala(cod);
-          removerSalaSeSemConexao(cod); // não deixa mesa órfã (criadorAssento=-1) joinável no público
           atualizarSaguaoMesas(); // abriu vaga / mesa mudou → atualiza o saguão
         }
         return;
