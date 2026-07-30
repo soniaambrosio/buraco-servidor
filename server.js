@@ -1634,6 +1634,8 @@ function criarJogo({ assentos, modalidade = "sbtl", metaPontos = 3000 } = {}) {
       tipo: a.tipo,                       // "humano" | "bot"
       apelido: a.apelido || (a.tipo === "bot" ? "Bot " + (i + 1) : "Jogador " + (i + 1)),
       dupla: duplaDoAssento(i),
+      dificuldade: a.dificuldade,         // B4: nivel do bot (iniciante..expert); undefined = avancado
+      substituto: a.substituto,           // B4: bot substituto de reconexao (secao 30)
     })),
     rodada: 0,
     placar: { nos: 0, eles: 0 },
