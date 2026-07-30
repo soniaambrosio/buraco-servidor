@@ -180,43 +180,24 @@ function validarSequencia(cartas) {
   }
   interpretacoes.sort((a, b) => a.comoCuringa.length - b.comoCuringa.length);
 
-  const N = ORDEM_SEQUENCIA.length; // 13 — o Ás alto entra como índice N (depois do K)
-  // Encaixa os naturais numa faixa contígua. O Ás é especial: pode entrar BAIXO
-  // (índice 0, antes do 2) ou ALTO (índice N, depois do K). Até 2 ases (um de cada
-  // lado) — é o que permite a ESCADA A-K-A ("Ás a Ás", 14 cartas). Retorna a faixa
-  // {minIdx,maxIdx,qtdNaturais} da melhor leitura, ou null se não couber nos curingas.
-  const encaixa = (naturais, qtdCuringas, teto) => {
-    const ases = naturais.filter((c) => c.valor === "A");
-    const outros = naturais.filter((c) => c.valor !== "A");
-    const idxOutros = outros.map((c) => ORDEM_SEQUENCIA.indexOf(c.valor));
-    if (new Set(idxOutros).size !== idxOutros.length) return null; // valor comum repetido
-    if (ases.length > 2) return null;                              // no máx. 2 ases (baixo+alto)
-    // todas as combinações de baixo(0)/alto(N) pros ases
-    let combos = [[]];
-    for (let k = 0; k < ases.length; k++) {
-      const prox = [];
-      for (const cb of combos) { prox.push(cb.concat(0)); prox.push(cb.concat(N)); }
-      combos = prox;
+  const idxBaixo = (v) => ORDEM_SEQUENCIA.indexOf(v);
+  const idxAlto = (v) => (v === "A" ? ORDEM_SEQUENCIA.length : ORDEM_SEQUENCIA.indexOf(v));
+  const encaixa = (naturais, qtdCuringas, mapa, teto) => {
+    const valores = naturais.map((c) => c.valor);
+    if (new Set(valores).size !== valores.length) return false; // valor repetido
+    const indices = naturais.map((c) => mapa(c.valor)).sort((a, b) => a - b);
+    const minIdx = indices[0];
+    const maxIdx = indices[indices.length - 1];
+    const span = maxIdx - minIdx + 1;
+    const lacunasInternas = span - naturais.length;
+    if (lacunasInternas > qtdCuringas) return false;
+    const curingasSobrando = qtdCuringas - lacunasInternas;
+    if (curingasSobrando > 0) {
+      const cabeNoInicio = minIdx - curingasSobrando >= 0;
+      const cabeNoFim = maxIdx + curingasSobrando <= teto;
+      if (!cabeNoInicio && !cabeNoFim) return false;
     }
-    let melhor = null;
-    for (const asIdx of combos) {
-      const indices = idxOutros.concat(asIdx).sort((a, b) => a - b);
-      if (new Set(indices).size !== indices.length) continue; // dois ases no mesmo lado, ou colisão
-      const minIdx = indices[0], maxIdx = indices[indices.length - 1];
-      const span = maxIdx - minIdx + 1;
-      const lacunas = span - indices.length;
-      if (lacunas > qtdCuringas) continue;
-      const sobra = qtdCuringas - lacunas;
-      if (sobra > 0) {
-        const cabeNoInicio = minIdx - sobra >= 0;
-        const cabeNoFim = maxIdx + sobra <= teto;
-        if (!cabeNoInicio && !cabeNoFim) continue;
-      }
-      const faixa = { minIdx, maxIdx, qtdNaturais: indices.length };
-      // guarda a leitura de maior maxIdx (favorece o ás alto, revelando A-K e A-K-A completos)
-      if (!melhor || maxIdx > melhor.maxIdx) melhor = faixa;
-    }
-    return melhor;
+    return true;
   };
 
   let motivoFalha = "Lacuna na sequência maior que o número de curingas disponíveis";
@@ -228,27 +209,14 @@ function validarSequencia(cartas) {
     }
     const naturais = comuns.concat(interp.comoNatural);
     if (naturais.length === 0) continue; // só curinga: já tratado no Caso 1
-    const faixa = encaixa(naturais, qtdCuringas, N);
+    let ok = encaixa(naturais, qtdCuringas, idxBaixo, ORDEM_SEQUENCIA.length - 1);
+    if (!ok && naturais.some((c) => c.valor === "A")) {
+      ok = encaixa(naturais, qtdCuringas, idxAlto, ORDEM_SEQUENCIA.length);
+    }
     // fica na PRIMEIRA que validar — como estão ordenadas da mais limpa pra
     // mais suja, essa é a melhor leitura possível daquelas cartas
-    if (faixa) {
-      // Classificação ESPECIAL, só quando 100% LIMPA (regra Sônia, sem curinga).
-      // Detecta pela COMPOSIÇÃO (todos os 13 valores A..K presentes), não pela
-      // leitura baixa/alta do ás — porque um ás sozinho cabe nas duas pontas:
-      //   - ESCADA REAL (de_500, 500 pts): A,2,…,K = 13 cartas, 1 ás.
-      //   - ÁS A ÁS (as_a_as, 1000 pts): A,A,2,…,K = 14 cartas, 2 ases.
-      // Com qualquer curinga, cai na regra normal (limpa/suja) — sem o bônus.
-      let tipoBase = "sequencia";
-      if (qtdCuringas === 0) {
-        const vals = naturais.map((c) => c.valor);
-        const nAses = vals.filter((v) => v === "A").length;
-        const outrosDistintos = new Set(vals.filter((v) => v !== "A"));
-        const temDois2aoK = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-          .every((r) => outrosDistintos.has(r)) && outrosDistintos.size === 12;
-        if (temDois2aoK && nAses === 2 && naturais.length === 14) tipoBase = "as_a_as";
-        else if (temDois2aoK && nAses === 1 && naturais.length === 13) tipoBase = "de_500";
-      }
-      return finalizar({ tipoBase, qtdCuringas, tamanho: cartas.length });
+    if (ok) {
+      return finalizar({ tipoBase: "sequencia", qtdCuringas, tamanho: cartas.length });
     }
   }
   return { valido: false, motivo: motivoFalha };
@@ -293,9 +261,9 @@ function validarTrinca(cartas) {
  */
 function validarJogo(cartas, opts = {}) {
   // O GRUPO DE ASES ("canastra de ás") é da família TRINCA — mesmo VALOR, não é
-  // sequência de verdade. Só vale onde trinca vale (Fechado). No STBL/Aberto, ás
+  // sequência de verdade. Só vale onde trinca vale (Fechado). No SBTL/Aberto, ás
   // só entra em SEQUÊNCIA (A-2-3 ou Q-K-A). Bug pego pela Sônia (20/jul): o robô
-  // descia AAA no STBL porque essa exceção furava a trava de trinca.
+  // descia AAA no SBTL porque essa exceção furava a trava de trinca.
   const soAses = !!(cartas && cartas.length && cartas.every((c) => c && c.valor === "A" && !c.eh_coringa));
   const rSeq = validarSequencia(cartas);
   if (rSeq.valido && !(soAses && !opts.permiteTrinca)) return rSeq;
@@ -304,7 +272,7 @@ function validarJogo(cartas, opts = {}) {
     if (rTri.valido) return rTri;
     return { valido: false, motivo: "não forma uma sequência nem uma trinca válida" };
   }
-  if (soAses) return { valido: false, motivo: "no STBL/Aberto o ás só entra em sequência (trinca de ases é só no Fechado)" };
+  if (soAses) return { valido: false, motivo: "no SBTL/Aberto o ás só entra em sequência (trinca de ases é só no Fechado)" };
   return rSeq;
 }
 
@@ -316,10 +284,6 @@ function finalizar({ tipoBase, qtdCuringas, tamanho }) {
     tipo = "de_curinga";
   } else if (tipoBase === "de_as") {
     tipo = "de_as";
-  } else if (tipoBase === "as_a_as") {
-    tipo = "as_a_as"; // ESCADA Ás-a-Ás (A-2-…-K-A, 14 cartas limpas) — 1000 pts
-  } else if (tipoBase === "de_500") {
-    tipo = "de_500";  // ESCADA REAL (A-2-…-K, 13 cartas limpas) — 500 pts
   } else {
     tipo = qtdCuringas > 0 ? "suja" : "limpa";
   }
@@ -356,7 +320,7 @@ module.exports = {
 
   __fabricas["bot"] = function (module, exports, require) {
 // motor/bot.js
-// Cérebro de decisão de um bot "intermediário" de Buraco (variante STBL/Jogatina).
+// Cérebro de decisão de um bot "intermediário" de Buraco (variante SBTL/Jogatina).
 // Reutiliza a validação de sequência/canastra já testada em motor/canastra.js —
 // o bot NUNCA reimplementa regra de jogo; ele só decide ENTRE jogadas válidas.
 //
@@ -704,7 +668,7 @@ function decidirCompra({ mao, topoLixo, jogosMesaDupla = [], tamanhoLixo = 1, mo
     };
   }
 
-  // ===== FECHADO / STBL: compra JUSTIFICADA =====
+  // ===== FECHADO / SBTL: compra JUSTIFICADA =====
   // TRAVA "CARTA NÃO TEM MOLA": só compra o lixo se houver PROVA concreta de
   // uso imediato do topo. A prova é o plano que será executado — impossível
   // comprar e não usar. Sem prova → monte.
@@ -847,7 +811,7 @@ function provarUsoDoTopo({ topo, mao, jogosMesaDupla, tamanhoLixo = 1, permiteTr
  *                       curingão SUJA EM DEFINITIVO — nunca há como limpar,
  *                       porque ele não tem naipe pra "voltar" ao lugar.
  *
- * STBL = "Sem Trinca e Batida Limpa" — é o Fechado com as duas regras mais
+ * SBTL = "Sem Trinca e Bate com Limpa" — é o Fechado com as duas regras mais
  * duras. Daí ser a modalidade dos jogadores experientes.
  */
 const MODALIDADES = {
@@ -989,7 +953,7 @@ function vizinhos(mao, carta) {
 }
 
 /**
- * Decide se o bot deve pegar o morto AGORA. No STBL, basta a mão estar vazia
+ * Decide se o bot deve pegar o morto AGORA. No SBTL, basta a mão estar vazia
  * (não exige canastra). Retorna true se a mão ficou vazia após as baixadas.
  */
 function decidirPegarMorto({ maoAposBaixar, mortoDisponivel }) {
@@ -1189,7 +1153,7 @@ function planejarExtensoes(mao, jogosMesaDupla, permitirSujar, naRetaFinal, perm
  *
  * @returns {{ compra, extensoes, baixadas: Carta[][], pegarMorto, bater, descarte }}
  */
-function planejarTurno({ mao, topoLixo, jogosMesaDupla = [], jogosAdversario = [], mortoDisponivel, jaPegouMorto, cartaObrigatoria = null, minimoAbertura = 0, tamanhoLixo = 1, provaTopo = null, modalidade = "sbtl", cartasLixo = null }) {
+function planejarTurno({ mao, topoLixo, jogosMesaDupla = [], jogosAdversario = [], mortoDisponivel, jaPegouMorto, cartaObrigatoria = null, minimoAbertura = 0, tamanhoLixo = 1, provaTopo = null, modalidade = "sbtl", cartasLixo = null, ctx = null }) {
   const regras = regrasDaModalidade(modalidade);
   const permiteTrinca = regras.trinca; // FECHADO: o bot também monta grupos de valor igual
   const compra = decidirCompra({ mao, topoLixo, jogosMesaDupla, tamanhoLixo, modalidade, cartasLixo });
@@ -1300,12 +1264,29 @@ function planejarTurno({ mao, topoLixo, jogosMesaDupla = [], jogosAdversario = [
     ? decidirBater({ mao, jogosMesaDupla, jaPegouMorto, permiteTrinca, bateComSuja: regras.bateComSuja }).deveBater
     : false;
 
+  // FASE B1 (secao 16): classifica a fase da rodada com o contexto publico.
+  const fase = classificarFase({ mao, jogosMesaDupla, mortoDisponivel, jaPegouMorto, minimoAbertura, ctx });
+
   let descarte = null;
   if (!bater && maoAposBaixar.length > 0) {
-    descarte = decidirDescarte(maoAposBaixar, jogosAdversario, permiteTrinca); // descarte SEGURO
+    const det = decidirDescarteDetalhado(maoAposBaixar, jogosAdversario, permiteTrinca, {
+      fase,
+      tamanhoLixo,
+      minCartasOponente: ctx ? ctx.minCartasOponente : undefined,
+      crencas: ctx ? ctx.crencas : null,
+    });
+    descarte = det.carta;
+    if (descarte) { try { descarte.__reasons = det.reasons; } catch (e) {} }
   }
 
-  return { compra, extensoes, baixadas: jogos, pegarMorto, bater, descarte };
+  const explic = explicarPlano(
+    { compra, baixadas: jogos, pegarMorto, bater, descarte },
+    { mao, jogosMesaDupla, minimoAbertura, modalidade },
+    fase
+  );
+  if (ctx && ctx.crencas && ctx.crencas.resumo) explic.telemetria.beliefSummary = ctx.crencas.resumo;
+
+  return { compra, extensoes, baixadas: jogos, pegarMorto, bater, descarte, fase, reasons: explic.reasons, telemetria: explic.telemetria };
 }
 
 /** Chave de agrupamento de um jogo pra evitar abrir DOIS que poderiam se juntar.
@@ -1342,6 +1323,226 @@ function descontar(mao, jogos) {
   return mao.filter((c) => !usados.has(c.id));
 }
 
+// ===========================================================================
+// FASE B1 — HEURISTICA FORTE + ANTI-SABOTAGEM (Diretriz secoes 11,16,20,23,24,25,31)
+// + FASE B2 — MOTOR DE CRENCAS v1 (secoes 12,14). Camada ADITIVA: nao substitui o
+// planejarTurno ja testado; FORMALIZA aquele comportamento numa funcao de
+// utilidade interpretavel, calcula MinDist-Buraco, classifica a fase, pontua o
+// risco do descarte (agora tambem com CRENCAS sobre cartas ocultas) e ANOTA cada
+// decisao com reasonCodes auditaveis. O RulesEngine (motor/jogo.js) segue como
+// UNICA fonte de legalidade; nada aqui baixa/estende/descarta — so AVALIA e EXPLICA.
+// Fronteira antifraude (secao 7): a camada de crencas so recebe INFORMACAO PUBLICA.
+// ===========================================================================
+
+var RC = {
+  completeVulnerability: "completeVulnerability",
+  takeDiscardHighValue: "takeDiscardHighValue",
+  avoidDiscardGift: "avoidDiscardGift",
+  preserveCleanCanasta: "preserveCleanCanasta",
+  useWildToSecureMorto: "useWildToSecureMorto",
+  preparePartnerGoOut: "preparePartnerGoOut",
+  preventOpponentGoOut: "preventOpponentGoOut",
+  reduceDeadwood: "reduceDeadwood",
+  takeMorto: "takeMorto",
+  goOutSecure: "goOutSecure",
+  fallbackTimeout: "fallbackTimeout",
+};
+
+// Fase da rodada (secao 16)
+function classificarFase({ mao, jogosMesaDupla, mortoDisponivel, jaPegouMorto, minimoAbertura, ctx }) {
+  const c = ctx || {};
+  const monteBaixo = typeof c.monteQtd === "number" && c.monteQtd <= 8;
+  const oponentePoucas = typeof c.minCartasOponente === "number" && c.minCartasOponente <= 3;
+  const maoEnxuta = (mao ? mao.length : 0) <= 6 && (jaPegouMorto || !mortoDisponivel);
+  if (monteBaixo || oponentePoucas || maoEnxuta || c.algumApto) return "final";
+  const naoAbriu = !jogosMesaDupla || jogosMesaDupla.length === 0;
+  if (naoAbriu || minimoAbertura > 0) return "abertura";
+  return "desenvolvimento";
+}
+
+// MinDist-Buraco (secao 11/25): distancia estrutural ate uma mao resolvida.
+function minDistBuraco(mao, jogosMesaDupla, permiteTrinca) {
+  var g = agruparMao(mao, true, permiteTrinca);
+  var cardsOutsideMelds = g.sobra.length;
+  var missingToExtend = 0, wildcardsCommitted = 0, immediateMeldPoints = 0;
+  for (var i = 0; i < g.jogos.length; i++) {
+    var j = g.jogos[i];
+    immediateMeldPoints += j.reduce(function (s, c) { return s + pontosCarta(c); }, 0);
+    var r = validarSequencia(j);
+    if (r && r.valido) wildcardsCommitted += (r.qtd_curingas || 0);
+    if (j.length >= 4 && j.length < MIN_CARTAS_CANASTRA) missingToExtend += (MIN_CARTAS_CANASTRA - j.length);
+  }
+  var deadwood = g.sobra.reduce(function (s, c) { return s + pontosCarta(c); }, 0);
+  return cardsOutsideMelds * 1.0 + missingToExtend * 1.2 + wildcardsCommitted * 0.6 + deadwood * 0.05 - immediateMeldPoints * 0.02;
+}
+
+// Pesos da utilidade por fase (secao 25) — versionados num so lugar.
+var PESOS_FASE = {
+  abertura:        { scoreDelta: 0.6, structure: 1.3, mortoProgress: 1.5, cleanCanasta: 1.4, partnerSynergy: 1.2, deadwoodAfter: 0.6, discardRisk: 1.0, wildcardWaste: 1.2, opponentThreat: 0.7 },
+  desenvolvimento: { scoreDelta: 0.9, structure: 1.0, mortoProgress: 1.2, cleanCanasta: 1.5, partnerSynergy: 1.3, deadwoodAfter: 0.9, discardRisk: 1.3, wildcardWaste: 1.1, opponentThreat: 1.0 },
+  final:           { scoreDelta: 1.3, structure: 0.6, mortoProgress: 0.4, cleanCanasta: 1.1, partnerSynergy: 1.4, deadwoodAfter: 1.7, discardRisk: 1.8, wildcardWaste: 0.7, opponentThreat: 1.8 },
+};
+var BOT_CONFIG_VERSION = "b2-2026-07-30";
+
+// U(action) — secao 25
+function avaliarUtilidade(features, fase) {
+  var w = PESOS_FASE[fase] || PESOS_FASE.desenvolvimento;
+  var f = features || {};
+  return w.scoreDelta * (f.scoreDelta || 0)
+    + w.structure * (-(f.minDist || 0))
+    + w.mortoProgress * (f.mortoProgress || 0)
+    + w.cleanCanasta * (f.cleanCanastaValue || 0)
+    + w.partnerSynergy * (f.partnerSynergy || 0)
+    - w.deadwoodAfter * (f.deadwoodAfter || 0)
+    - w.discardRisk * (f.discardRisk || 0)
+    - w.wildcardWaste * (f.wildcardWaste || 0)
+    - w.opponentThreat * (f.opponentThreat || 0);
+}
+
+// Risco do descarte (secao 23) — so informacao PUBLICA. Agora com CRENCAS (B2):
+// alem de "estende jogo publico" e adjacencia, usa P(proximo oponente usa a carta).
+function riscoDescarte(carta, mao, jogosAdversario, ctx, permiteTrinca) {
+  if (carta.eh_coringa) return 999;
+  var c = ctx || {};
+  var risco = 0;
+  var estendeAdv = jogosAdversario.some(function (j) { return podeEstenderJogo(j, carta, permiteTrinca); });
+  if (estendeAdv) risco += 40;
+  var adj = 0;
+  for (var i = 0; i < jogosAdversario.length; i++) {
+    for (var k = 0; k < jogosAdversario[i].length; k++) {
+      var d = jogosAdversario[i][k];
+      if (d.eh_coringa || carta.eh_coringa) continue;
+      if (d.naipe === carta.naipe && Math.abs(idxValor(d.valor) - idxValor(carta.valor)) <= 2) adj++;
+    }
+  }
+  risco += adj * 6;
+  // B2 — pickupLikelihood por crenca (secao 12/14): prob de o proximo oponente
+  // formar jogo com a carta usando cartas que ele PROVAVELMENTE tem (so publico).
+  if (c.crencas && typeof c.crencas.pOponenteUsa === "function") {
+    risco += c.crencas.pOponenteUsa(carta) * 30;
+  }
+  var pileSize = typeof c.tamanhoLixo === "number" ? c.tamanhoLixo : 1;
+  risco += pileSize * 1.5;
+  var endgame = (c.fase === "final") ? 1 : 0;
+  var oponentePoucas = typeof c.minCartasOponente === "number" && c.minCartasOponente <= 3 ? 1 : 0;
+  risco += (endgame + oponentePoucas) * 8 * (pontosCarta(carta) >= 10 ? 1.5 : 1);
+  var solidao = vizinhos(mao, carta);
+  if (solidao === 0) risco -= 10;
+  risco -= pontosCarta(carta) * 0.1;
+  return risco;
+}
+
+// Descarte DETALHADO (secao 23 + 31): mantem a selecao segura ja testada como
+// ESPINHA e usa riscoDescarte (com crencas) como desempate fino.
+function decidirDescarteDetalhado(mao, jogosAdversario, permiteTrinca, ctx) {
+  jogosAdversario = jogosAdversario || [];
+  var g = agruparMao(mao, true, permiteTrinca);
+  var candidatas = g.sobra.length > 0 ? g.sobra : mao.slice();
+  var semCuringa = candidatas.filter(function (c) { return !c.eh_coringa; });
+  var pool = semCuringa.length > 0 ? semCuringa : candidatas;
+  var ehPerigosa = function (carta) {
+    return jogosAdversario.some(function (j) { return podeEstenderJogo(j, carta, permiteTrinca); });
+  };
+  var seguras = pool.filter(function (c) { return !ehPerigosa(c); });
+  var evitouPresente = seguras.length > 0 && seguras.length < pool.length;
+  if (seguras.length > 0) pool = seguras;
+  var ordenada = pool.slice().sort(function (a, b) {
+    var pa = pontosCarta(a), pb = pontosCarta(b);
+    if (pa !== pb) return pa - pb;
+    var ra = riscoDescarte(a, mao, jogosAdversario, ctx, permiteTrinca);
+    var rb = riscoDescarte(b, mao, jogosAdversario, ctx, permiteTrinca);
+    if (ra !== rb) return ra - rb;
+    return vizinhos(mao, a) - vizinhos(mao, b);
+  });
+  var escolha = ordenada[0];
+  var reasons = [];
+  if (evitouPresente) reasons.push(RC.avoidDiscardGift);
+  if (escolha && ctx && ctx.fase === "final") reasons.push(RC.preventOpponentGoOut);
+  if (escolha) reasons.push(RC.reduceDeadwood);
+  var featureValues = escolha ? {
+    discardRisk: riscoDescarte(escolha, mao, jogosAdversario, ctx, permiteTrinca),
+    discardPoints: pontosCarta(escolha),
+    discardSolidao: vizinhos(mao, escolha),
+  } : {};
+  return { carta: escolha, reasons: reasons, featureValues: featureValues };
+}
+
+function explicarPlano(plano, entrada, fase) {
+  var reasons = [];
+  var regras = regrasDaModalidade(entrada.modalidade);
+  if (plano.compra && plano.compra.origem === "lixo") reasons.push(RC.takeDiscardHighValue);
+  if (entrada.minimoAbertura > 0 && plano.baixadas && plano.baixadas.length) reasons.push(RC.completeVulnerability);
+  if (plano.pegarMorto) reasons.push(RC.takeMorto);
+  if (plano.bater) reasons.push(RC.goOutSecure);
+  var g = agruparMao(entrada.mao, false, regras.trinca);
+  var curingaNaSobra = g.sobra.some(function (c) { return c.eh_coringa; });
+  var temLimpaNaMesa = (entrada.jogosMesaDupla || []).some(function (m) {
+    if (m.length < MIN_CARTAS_CANASTRA) return false;
+    var r = validarSequencia(m); return r.valido && r.qtd_curingas === 0;
+  });
+  if (curingaNaSobra && temLimpaNaMesa) reasons.push(RC.preserveCleanCanasta);
+  if (plano.descarte && plano.descarte.__reasons) {
+    for (var i = 0; i < plano.descarte.__reasons.length; i++) reasons.push(plano.descarte.__reasons[i]);
+  }
+  var telemetria = {
+    fase: fase,
+    minDist: minDistBuraco(entrada.mao, entrada.jogosMesaDupla || [], regras.trinca),
+    configVersion: BOT_CONFIG_VERSION,
+  };
+  var vistos = {}, out = [];
+  for (var r2 = 0; r2 < reasons.length; r2++) { if (!vistos[reasons[r2]]) { vistos[reasons[r2]] = 1; out.push(reasons[r2]); } }
+  return { reasons: out, telemetria: telemetria };
+}
+
+// ===========================================================================
+// FASE B2 — MOTOR DE CRENCAS v1 (secao 12/14). Distribui a probabilidade das
+// cartas OCULTAS a partir de informacao SO publica (secao 7 antifraude): mao
+// propria, jogos das duas duplas, lixo visivel (integral no Aberto; so o topo nas
+// outras), contagem de cartas do proximo oponente e tamanho do monte. NUNCA olha
+// mao adversaria nem futuro do monte. v1 = crenca por contagem + fatores + suavizacao.
+// ===========================================================================
+function chaveCarta(c) { return c.valor === "JOKER" ? "JOKER" : (c.valor + "|" + c.naipe); }
+function totalCopias(chave) { return chave === "JOKER" ? 4 : 2; }
+
+function construirCrencas(pub) {
+  var seen = {};
+  var add = function (c) { var k = chaveCarta(c); seen[k] = (seen[k] || 0) + 1; };
+  (pub.mao || []).forEach(add);
+  (pub.jogosNos || []).forEach(function (j) { j.forEach(add); });
+  (pub.jogosEles || []).forEach(function (j) { j.forEach(add); });
+  (pub.lixoConhecido || []).forEach(add);
+  var vistas = 0; for (var k0 in seen) vistas += seen[k0];
+  var proxN = Math.max(0, pub.proxCartas || 0);
+  var ocultasTotal = Math.max(proxN, 108 - vistas);
+  var unseen = function (k) { return Math.max(0, totalCopias(k) - (seen[k] || 0)); };
+  var frac = ocultasTotal > 0 ? Math.min(1, proxN / ocultasTotal) : 0;
+  var pTem = function (k) { var u = unseen(k); if (u <= 0) return 0; return 1 - Math.pow(1 - frac, u); };
+  var idx = function (v) { return ORDEM_SEQUENCIA.indexOf(v); };
+  function pOponenteUsa(carta) {
+    if (carta.eh_coringa) return 0.9;
+    var naipe = carta.naipe, v = idx(carta.valor);
+    var key = function (vv) { return (vv >= 0 && vv < ORDEM_SEQUENCIA.length) ? (ORDEM_SEQUENCIA[vv] + "|" + naipe) : null; };
+    var pares = [[v - 2, v - 1], [v - 1, v + 1], [v + 1, v + 2]];
+    var melhor = 0;
+    for (var i = 0; i < pares.length; i++) {
+      var ka = key(pares[i][0]), kb = key(pares[i][1]);
+      if (!ka || !kb) continue;
+      melhor = Math.max(melhor, pTem(ka) * pTem(kb));
+    }
+    if (pub.modalidade === "fechado") {
+      var outros = ["copas", "ouros", "paus", "espadas"].filter(function (n) { return n !== naipe; });
+      var pt = 0;
+      for (var a = 0; a < outros.length; a++) for (var b = a + 1; b < outros.length; b++) {
+        pt = Math.max(pt, pTem(carta.valor + "|" + outros[a]) * pTem(carta.valor + "|" + outros[b]));
+      }
+      melhor = Math.max(melhor, pt);
+    }
+    return melhor;
+  }
+  var resumo = { ocultas: ocultasTotal, proxCartas: proxN, fracProx: Number(frac.toFixed(3)) };
+  return { pOponenteUsa: pOponenteUsa, pTem: pTem, resumo: resumo };
+}
+
 // --- Export universal: funciona tanto no Node (motor/testes) quanto no
 // navegador (mockup). No Node usa module.exports; no browser expõe window.BotBuraco.
 // A lógica acima é idêntica nos dois ambientes — fonte única de verdade. ---
@@ -1366,6 +1567,17 @@ function descontar(mao, jogos) {
   decidirBater,
   planejarExtensoes,
   planejarTurno,
+  // --- Fase B1/B2 (aditivo) ---
+  RC,
+  classificarFase,
+  minDistBuraco,
+  avaliarUtilidade,
+  PESOS_FASE,
+  BOT_CONFIG_VERSION,
+  riscoDescarte,
+  decidirDescarteDetalhado,
+  explicarPlano,
+  construirCrencas,
 });
 
   };
@@ -1431,10 +1643,6 @@ function criarJogo({ assentos, modalidade = "sbtl", metaPontos = 3000 } = {}) {
     // só some numa partida nova.
     rodadasVulneravel: { nos: 0, eles: 0 },
     encerrada: false,        // partida encerrada (bateu a meta)
-    // STATS DA PARTIDA por assento (pros Cartões de Conquista — Sônia 23/jul): acumulam
-    // ao longo da partida (NÃO resetam por rodada). canastras/canastras1000 são da DUPLA
-    // (creditadas aos dois parceiros); batidas/batidasMorto são de QUEM bateu.
-    statsPartida: [0, 1, 2, 3].map(function () { return { canastras: 0, canastras1000: 0, batidas: 0, batidasMorto: 0 }; }),
     // campos por rodada (preenchidos em distribuirRodada):
     maos: null,
     monte: null,
@@ -1482,7 +1690,6 @@ function distribuirRodada(jogo) {
   jogo.turnosRodada = 0;          // válvula de segurança anti-livelock (ver passarVez)
   jogo.rodadaEncerrada = false;
   jogo.duplaQueBateu = null;
-  jogo.assentoQueBateu = null;    // qual assento deu a batida (pro mascote comemorar) — null se esgotamento
   jogo.pontosRodada = null;
   return jogo;
 }
@@ -1513,7 +1720,6 @@ function visaoDoAssento(jogo, assento) {
     // quando rodadaEncerrada vira true, estes dois vêm preenchidos (até a próxima
     // distribuirRodada, que os zera de novo) — é o detalhe pra tela de contagem
     duplaQueBateu: jogo.duplaQueBateu,
-    assentoQueBateu: jogo.assentoQueBateu,
     pontosRodada: jogo.pontosRodada,
     rodadasVulneravel: jogo.rodadasVulneravel, // pra tela mostrar o selo "vulnerável · precisa N+"
     vez: jogo.vez,
@@ -1589,8 +1795,7 @@ function comprarMonte(jogo, assento) {
 function baixar(jogo, assento, idsCartas) {
   const v = validarVez(jogo, assento, { precisaTerComprado: true });
   if (!v.ok) return v;
-  if (!Array.isArray(idsCartas) || idsCartas.length < 3) return { ok: false, erro: "um jogo tem no mínimo 3 cartas" };
-  if (new Set(idsCartas).size !== idsCartas.length) return { ok: false, erro: "carta repetida no jogo" };
+  if (!idsCartas || idsCartas.length < 3) return { ok: false, erro: "um jogo tem no mínimo 3 cartas" };
   const cartas = [];
   for (const id of idsCartas) {
     const idx = idxNaMao(jogo, assento, id);
@@ -1646,7 +1851,7 @@ function aoZerarMaoBaixando(jogo, assento) {
     return { pegouMorto: true };
   }
   if (duplaPodeBater(jogo, dupla)) {
-    encerrarRodada(jogo, dupla, assento);
+    encerrarRodada(jogo, dupla);
     return { bateu: true };
   }
   return null;
@@ -1660,8 +1865,7 @@ function estender(jogo, assento, indiceJogo, idsCartas) {
   const jogos = jogo.jogosDupla[dupla];
   const alvo = jogos[indiceJogo];
   if (!alvo) return { ok: false, erro: "jogo " + indiceJogo + " não existe na sua mesa" };
-  if (!Array.isArray(idsCartas) || !idsCartas.length) return { ok: false, erro: "nenhuma carta pra estender" };
-  if (new Set(idsCartas).size !== idsCartas.length) return { ok: false, erro: "carta repetida na extensão" };
+  if (!idsCartas || !idsCartas.length) return { ok: false, erro: "nenhuma carta pra estender" };
   const cartas = [];
   for (const id of idsCartas) {
     const idx = idxNaMao(jogo, assento, id);
@@ -1720,7 +1924,7 @@ function topoTemUsoLegal(jogo, assento, topo) {
   return false;
 }
 
-/** COMPRAR O LIXO INTEIRO. No STBL/Fechado (compra justificada) o TOPO precisa
+/** COMPRAR O LIXO INTEIRO. No SBTL/Fechado (compra justificada) o TOPO precisa
  *  ter uso imediato — "carta não tem mola" (legalidade via topoTemUsoLegal).
  *  Leva o lixo todo pra mão e liga a trava deveUsarTopo (só solta quando o topo
  *  for baixado/estendido; até lá não pode descartar). */
@@ -1833,7 +2037,7 @@ function descartar(jogo, assento, idCarta) {
       return { ok: true, descarte: carta, pegouMorto: true };
     }
     // BATIDA FINAL (tem limpa, garantido pela checagem acima) — encerra a rodada
-    encerrarRodada(jogo, dupla, assento);
+    encerrarRodada(jogo, dupla);
     return { ok: true, descarte: carta, bateu: true };
   }
   passarVez(jogo);
@@ -1850,7 +2054,7 @@ function duplaTemCanastraLimpa(jogo, dupla) {
     const res = validarSequencia(meld);
     // Ás NÃO forma canastra de ás na casa da Sônia (vale só valor de carta) — só
     // canastra de SEQUÊNCIA limpa (ou a de 500/1000) libera a batida.
-    return res.valido && (res.tipo === "limpa" || res.tipo === "de_500" || res.tipo === "as_a_as");
+    return res.valido && (res.tipo === "limpa" || res.tipo === "de_500");
   });
 }
 
@@ -1868,7 +2072,7 @@ function duplaPodeBater(jogo, dupla) {
     if (meld.length < 7) return false;
     const res = validarSequencia(meld); // trinca de valor igual é RECUSADA aqui de propósito
     if (!res.valido) return false;
-    if (res.tipo === "limpa" || res.tipo === "de_500" || res.tipo === "as_a_as") return true; // ás não conta (só valor de carta)
+    if (res.tipo === "limpa" || res.tipo === "de_500") return true; // ás não conta (só valor de carta)
     return aceitaSuja && res.tipo === "suja";
   });
 }
@@ -1883,7 +2087,7 @@ function baixadaTravaria(jogo, dupla, maoRestante, meldsFuturos) {
   const temLimpa = meldsFuturos.some((m) => {
     if (m.length < 7) return false;
     const r = validarSequencia(m);
-    return r.valido && (r.tipo === "limpa" || r.tipo === "de_500" || r.tipo === "as_a_as");
+    return r.valido && (r.tipo === "limpa" || r.tipo === "de_500");
   });
   const mortoDisp = !jogo.mortoPego[dupla] && jogo.mortos.length > 0;
   return !(temLimpa || mortoDisp);
@@ -1929,13 +2133,11 @@ function encerrarRodadaPorEsgotamento(jogo) {
 
 /** Encerra a rodada, conta os pontos das duas duplas e soma no placar. Se
  *  alguma dupla bateu a meta, a PARTIDA encerra. `duplaQueBateu` = "nos"|"eles"
- *  (bônus de batida) ou null (esgotamento). `assentoQueBateu` = o assento que deu
- *  a batida (pra tela comemorar com o mascote DELE especificamente) ou null. */
-function encerrarRodada(jogo, duplaQueBateu, assentoQueBateu) {
+ *  (bônus de batida) ou null (esgotamento). */
+function encerrarRodada(jogo, duplaQueBateu) {
   if (jogo.rodadaEncerrada) return; // idempotente
   jogo.rodadaEncerrada = true;
   jogo.duplaQueBateu = duplaQueBateu;
-  jogo.assentoQueBateu = (assentoQueBateu === undefined ? null : assentoQueBateu);
   contarPontos(jogo);
 }
 
@@ -1953,7 +2155,7 @@ function valorCarta(c) {
  *  batida (+100) − cartas na mão − morto não pego (−100). */
 function pontuarDuplaJogo(jogo, dupla, { bateu, mortoPego, cartasNaMao, algumPegouMorto }) {
   let pontosCanastras = 0, pontosCartas = 0;
-  const detalhe = { asAas: 0, de500: 0, limpas: 0, sujas: 0, baixadas: 0 };
+  const detalhe = { de500: 0, limpas: 0, sujas: 0, baixadas: 0 };
   for (const meld of jogo.jogosDupla[dupla]) {
     if (meld.length >= 7) {
       // TRINCA não forma canastra (regra Sônia 19/jul): usa validarSequencia, que RECUSA
@@ -1961,8 +2163,7 @@ function pontuarDuplaJogo(jogo, dupla, { bateu, mortoPego, cartasNaMao, algumPeg
       // pontos das cartas (contados no laço abaixo) entram. Canastra de sequência normal.
       const res = validarSequencia(meld);
       if (res.valido) {
-        if (res.tipo === "as_a_as") { pontosCanastras += 1000; detalhe.asAas = (detalhe.asAas || 0) + 1; }
-        else if (res.tipo === "de_500") { pontosCanastras += 500; detalhe.de500++; }
+        if (res.tipo === "de_500") { pontosCanastras += 500; detalhe.de500++; }
         else if (res.tipo === "limpa") { pontosCanastras += 200; detalhe.limpas++; }
         else if (res.tipo === "suja") { pontosCanastras += 100; detalhe.sujas++; }
       }
@@ -2006,25 +2207,6 @@ function contarPontos(jogo) {
     }
   }
   jogo.pontosRodada = resultado;
-  // STATS DA PARTIDA (Cartões de Conquista): acumula por assento nesta rodada.
-  if (jogo.statsPartida) {
-    for (const dupla of ["nos", "eles"]) {
-      const assentos = dupla === "nos" ? [0, 2] : [1, 3];
-      const det = (resultado[dupla] && resultado[dupla].detalhe) || {};
-      const canas = (det.limpas || 0) + (det.sujas || 0) + (det.de500 || 0) + (det.asAas || 0);
-      for (const a of assentos) {
-        jogo.statsPartida[a].canastras += canas;            // dupla → creditado aos dois
-        jogo.statsPartida[a].canastras1000 += (det.asAas || 0);
-      }
-    }
-    // BATIDA (só quem bateu): +1; e +1 em batidasMorto se a dupla dele pegou o morto
-    if (jogo.assentoQueBateu != null && jogo.statsPartida[jogo.assentoQueBateu]) {
-      jogo.statsPartida[jogo.assentoQueBateu].batidas += 1;
-      if (jogo.duplaQueBateu && jogo.mortoPego[jogo.duplaQueBateu]) {
-        jogo.statsPartida[jogo.assentoQueBateu].batidasMorto += 1;
-      }
-    }
-  }
   if (jogo.placar.nos >= jogo.metaPontos || jogo.placar.eles >= jogo.metaPontos) {
     jogo.encerrada = true; // partida acabou (bateu a meta)
   }
@@ -2109,7 +2291,7 @@ function compraJustificada(modalidade) {
  * Joga o TURNO INTEIRO de um assento-bot, mutando `jogo` via as jogadas do
  * motor. Retorna { ok, log:[...strings], bateu?, pegouMorto?, encerrouRodada? }.
  */
-function jogarTurnoBot(jogo, assento) {
+function jogarTurnoBotCore(jogo, assento) {
   const log = [];
   if (jogo.encerrada) return { ok: false, erro: "a partida já terminou", log };
   if (jogo.rodadaEncerrada) return { ok: false, erro: "a rodada já terminou", log };
@@ -2132,6 +2314,27 @@ function jogarTurnoBot(jogo, assento) {
   const rodadasVuln = jogo.rodadasVulneravel[dupla];
   const minimoAbertura = jogosDupla.length === 0 && rodadasVuln > 0 ? (rodadasVuln === 1 ? 75 : 90) : 0;
 
+  // CONTEXTO PUBLICO (B1/B2, secao 7 antifraude): so o que o assento PODE ver.
+  // As CRENCAS sao construidas aqui, no driver, e recebem apenas informacao
+  // publica — nunca a mao adversaria nem o futuro do monte.
+  const proxAssento = (assento + 1) % 4;
+  const lixoConhecido = jogo.modalidade === "aberto" ? jogo.lixo.slice() : (topo ? [topo] : []);
+  const crencas = Bot.construirCrencas({
+    mao: jogo.maos[assento],
+    jogosNos: jogosDupla,
+    jogosEles: jogosAdv,
+    lixoConhecido: lixoConhecido,
+    proxCartas: jogo.maos[proxAssento].length,
+    monteQtd: jogo.monte.length,
+    modalidade: jogo.modalidade,
+  });
+  const ctxPub = {
+    monteQtd: jogo.monte.length,
+    minCartasOponente: Math.min(jogo.maos[(assento + 1) % 4].length, jogo.maos[(assento + 3) % 4].length),
+    algumApto: J.duplaPodeBater(jogo, outra),
+    crencas: crencas,
+  };
+
   // 1) COMPRA — pergunta ao cérebro por onde comprar
   const plano1 = Bot.planejarTurno({
     mao: jogo.maos[assento],
@@ -2144,11 +2347,12 @@ function jogarTurnoBot(jogo, assento) {
     tamanhoLixo: jogo.lixo.length,
     modalidade: jogo.modalidade,
     cartasLixo: jogo.modalidade === "aberto" ? jogo.lixo : null,
+    ctx: ctxPub,
   });
 
   let comprouLixo = false;
   // SEGURANÇA anti-trava (bug do lixo vazio, Sônia 18/jul): pegar o lixo OBRIGA a
-  // baixar o topo (deveUsarTopo) no STBL/Fechado. Se, depois de baixar o topo, não
+  // baixar o topo (deveUsarTopo) no SBTL/Fechado. Se, depois de baixar o topo, não
   // sobrar carta pra DESCARTAR, o bot fica com 1 carta impossível de largar e passa
   // a vez SEM descartar — o lixo chega vazio pro próximo. Então: só pega o lixo se
   // sobrar reserva pro descarte DEPOIS do custo mínimo de baixar o topo. Senão,
@@ -2158,7 +2362,7 @@ function jogarTurnoBot(jogo, assento) {
     (jogo.maos[assento].length + jogo.lixo.length) - custoMinimoTopo(jogo, assento, topo) < reservaMinima(jogo, assento);
   // VULNERABILIDADE (bug do bot adversário abrindo 15 pts vulnerável, Sônia 19/jul):
   // com a dupla vulnerável e a mesa AINDA vazia (abertura) numa modalidade que obriga
-  // usar o topo (STBL/Fechado), pegar o lixo forçaria ABRIR um jogo com o topo — e a
+  // usar o topo (SBTL/Fechado), pegar o lixo forçaria ABRIR um jogo com o topo — e a
   // abertura precisa somar 75/90. Um jogo do topo (3 cartas) quase nunca alcança isso,
   // e o forcarTopoNaMesa acabava ABRINDO fraco na marra. Então o bot NÃO pega o lixo
   // nesse caso: compra do monte e abre da mão quando puder (o cérebro respeita o
@@ -2196,9 +2400,16 @@ function jogarTurnoBot(jogo, assento) {
     cartaObrigatoria: justif && comprouLixo && topo ? topo : null,
     provaTopo: justif && comprouLixo ? plano1.compra.provaTopo : null,
     modalidade: jogo.modalidade,
+    ctx: ctxPub,
   });
+  // AUDITORIA (B1/B2, secao 31/35): reasonCodes + telemetria (com beliefSummary).
+  const auditoria = {
+    reasons: (plano2.reasons && plano2.reasons.length ? plano2.reasons : (plano1.reasons || [])),
+    telemetria: plano2.telemetria || plano1.telemetria || null,
+    fase: plano2.fase || plano1.fase || null,
+  };
 
-  // 2.5) DESCE O TOPO OBRIGATÓRIO PRIMEIRO. Se comprou o lixo (STBL/Fechado), o
+  // 2.5) DESCE O TOPO OBRIGATÓRIO PRIMEIRO. Se comprou o lixo (SBTL/Fechado), o
   //    topo TEM que ir pra mesa antes de qualquer outra jogada — senão uma extensão
   //    de uma carta DUPLICADA (mesmo valor/naipe, id diferente) pode roubar o exato
   //    encaixe do topo e deixá-lo órfão na mão, travando o descarte (bug raro do
@@ -2266,23 +2477,41 @@ function jogarTurnoBot(jogo, assento) {
   // 6) DESCARTE — fecha a vez. O motor resolve morto/batida sozinho.
   const idDescarte = escolherDescarteLegal(jogo, assento, plano2.descarte ? plano2.descarte.id : null);
   if (idDescarte == null) {
-    // Sem descarte legal (ex.: 1 carta, batida exigiria limpa que não há). Segura
-    // a carta e passa a vez — "carta não tem mola", nada volta pro lixo/monte.
     J.passarVez(jogo);
     log.push("segurou a carta (descarte seria batida ilegal) — passou a vez");
-    return { ok: true, log, semDescarte: true };
+    return Object.assign({ ok: true, log, semDescarte: true }, auditoria);
   }
   const rd = J.descartar(jogo, assento, idDescarte);
   if (!rd.ok) {
-    // Descarte recusado (ex.: trava do topo ainda ligada). Passa a vez sem travar.
     J.passarVez(jogo);
     log.push("descarte recusado (" + rd.erro + ") — passou a vez");
-    return { ok: true, log, semDescarte: true };
+    return Object.assign({ ok: true, log, semDescarte: true }, auditoria);
   }
-  if (rd.bateu) { log.push("descartou " + cartaTxt(rd.descarte) + " → BATEU! encerra a rodada"); return { ok: true, log, bateu: true }; }
-  if (rd.pegouMorto) { log.push("descartou " + cartaTxt(rd.descarte) + " → zerou e pegou o MORTO"); return { ok: true, log, pegouMorto: true }; }
-  log.push("descartou " + cartaTxt(rd.descarte));
-  return { ok: true, log };
+  const frase = fraseMotivos(auditoria.reasons);
+  if (rd.bateu) { log.push("descartou " + cartaTxt(rd.descarte) + " → BATEU! encerra a rodada" + frase); return Object.assign({ ok: true, log, bateu: true }, auditoria); }
+  if (rd.pegouMorto) { log.push("descartou " + cartaTxt(rd.descarte) + " → zerou e pegou o MORTO" + frase); return Object.assign({ ok: true, log, pegouMorto: true }, auditoria); }
+  log.push("descartou " + cartaTxt(rd.descarte) + frase);
+  return Object.assign({ ok: true, log }, auditoria);
+}
+
+const FRASES_RC = {
+  completeVulnerability: "cumpri a abertura vulneravel",
+  takeDiscardHighValue: "peguei o lixo pelo valor",
+  avoidDiscardGift: "evitei entregar o lixo ao adversario",
+  preserveCleanCanasta: "preservei a canastra limpa",
+  useWildToSecureMorto: "usei o curinga p/ garantir morto/batida",
+  preparePartnerGoOut: "preparei a saida do parceiro",
+  preventOpponentGoOut: "neguei carta ao adversario",
+  reduceDeadwood: "descartei carta morta",
+  takeMorto: "peguei o morto",
+  goOutSecure: "bati com seguranca",
+  fallbackTimeout: "joguei seguro (fallback)",
+};
+function fraseMotivos(reasons) {
+  if (!reasons || !reasons.length) return "";
+  const preferida = ["goOutSecure", "takeMorto", "preserveCleanCanasta", "avoidDiscardGift", "completeVulnerability", "takeDiscardHighValue", "preventOpponentGoOut", "reduceDeadwood"];
+  for (const p of preferida) if (reasons.indexOf(p) >= 0 && FRASES_RC[p]) return " — " + FRASES_RC[p];
+  return FRASES_RC[reasons[0]] ? " — " + FRASES_RC[reasons[0]] : "";
 }
 
 /** Quantas cartas o bot PRECISA manter na mão pra conseguir FECHAR o turno com um
@@ -2406,7 +2635,78 @@ function escolherDescarteLegal(jogo, assento, preferidoId) {
   return mao[mao.length - 1].id;
 }
 
-module.exports = { jogarTurnoBot, cartaTxt, escolherDescarteLegal };
+// ===========================================================================
+// SafeFallbackPolicy (secao 34) — o fallback e PARTE do produto. Se o
+// planejamento normal lancar QUALQUER excecao, o bot ainda joga uma vez de forma
+// garantidamente LEGAL e razoavel: compra do monte, NAO baixa nada, descarta a
+// carta mais segura. Nunca quebra canastra, nunca faz acao ilegal.
+// ===========================================================================
+function jogarTurnoBot(jogo, assento) {
+  try {
+    return jogarTurnoBotCore(jogo, assento);
+  } catch (e) {
+    return safeFallbackTurn(jogo, assento, "excecao no planejamento: " + (e && e.message));
+  }
+}
+
+function escolherDescarteSeguroFallback(jogo, assento) {
+  const dupla = J.duplaDoAssento(assento);
+  if (jogo.deveUsarTopo && jogo.deveUsarTopo.assento === assento) {
+    try { forcarTopoNaMesa(jogo, assento, []); } catch (_) {}
+    if (jogo.deveUsarTopo && jogo.deveUsarTopo.assento === assento) return null;
+  }
+  const mao = jogo.maos[assento];
+  if (!mao.length) return null;
+  if (mao.length === 1) {
+    const mortoDisp = !jogo.mortoPego[dupla] && jogo.mortos.length > 0;
+    const podeFinal = jogo.mortoPego[dupla] || jogo.mortos.length === 0;
+    if (!(mortoDisp || (podeFinal && J.duplaPodeBater(jogo, dupla)))) return null;
+  }
+  const pt = ptDaMesa(jogo);
+  const advs = jogo.jogosDupla[dupla === "nos" ? "eles" : "nos"];
+  const naoCuringa = mao.filter((c) => !ehCuringa(c));
+  const base = naoCuringa.length ? naoCuringa : mao;
+  const perigosa = (c) => advs.some((j) => validarJogo(j.concat([c]), { permiteTrinca: pt }).valido);
+  const seguras = base.filter((c) => !perigosa(c));
+  const pool = (seguras.length ? seguras : base).slice();
+  pool.sort((a, b) => J.valorCarta(a) - J.valorCarta(b));
+  return pool[0].id;
+}
+
+function safeFallbackTurn(jogo, assento, motivo) {
+  const log = ["[FALLBACK secao34] " + (motivo || "jogada segura")];
+  try {
+    if (jogo.encerrada || jogo.rodadaEncerrada || jogo.vez !== assento) {
+      return { ok: true, log, fallback: true, reasons: ["fallbackTimeout"] };
+    }
+    if (!jogo.jaComprou) {
+      const rm = J.comprarMonte(jogo, assento);
+      if (!rm.ok && jogo.rodadaEncerrada) {
+        return { ok: true, log, encerrouRodada: true, fallback: true, reasons: ["fallbackTimeout"] };
+      }
+    }
+    const id = escolherDescarteSeguroFallback(jogo, assento);
+    if (id == null) {
+      J.passarVez(jogo);
+      log.push("segurou a carta — passou a vez");
+      return { ok: true, log, semDescarte: true, fallback: true, reasons: ["fallbackTimeout"] };
+    }
+    const rd = J.descartar(jogo, assento, id);
+    if (!rd.ok) {
+      J.passarVez(jogo);
+      log.push("descarte recusado (" + rd.erro + ") — passou a vez");
+      return { ok: true, log, semDescarte: true, fallback: true, reasons: ["fallbackTimeout"] };
+    }
+    log.push("descartou " + cartaTxt(rd.descarte) + " (fallback seguro)");
+    return { ok: true, log, bateu: rd.bateu, pegouMorto: rd.pegouMorto, fallback: true, reasons: ["fallbackTimeout"] };
+  } catch (e) {
+    try { J.passarVez(jogo); } catch (_) {}
+    log.push("excecao no proprio fallback (" + (e && e.message) + ") — passou a vez");
+    return { ok: true, log, semDescarte: true, fallback: true, reasons: ["fallbackTimeout"] };
+  }
+}
+
+module.exports = { jogarTurnoBot, jogarTurnoBotCore, safeFallbackTurn, cartaTxt, escolherDescarteLegal };
 
   };
 
@@ -2511,28 +2811,10 @@ function criarContas(opts = {}) {
       xpNoNivel: p.xpNoNivel, xpProxNivel: p.xpProxNivel, faltamXp: p.faltam,
       partidas: c.partidas, vitorias: c.vitorias, derrotas: c.derrotas,
       canastras: c.canastras,
-      // contadores dos Cartões de Conquista (Sônia 23/jul) — default 0 em contas antigas
-      canastras1000: c.canastras1000 || 0,
-      batidas: c.batidas || 0,
-      batidasMorto: c.batidasMorto || 0,
-      vitoriasDupla: c.vitoriasDupla || 0,
-      itensVIP: c.itensVIP || 0, // placeholder (precisa de inventário — Colecionador VIP fica pra depois)
-      vip: !!c.vip, // assinante VIP (libera Salão VIP + carinhas VIP). Ligado pela assinatura (a implementar).
       aproveitamento: c.partidas ? Math.round((c.vitorias / c.partidas) * 100) : 0,
       // avatar: tipo "foto" (upload, servido em /avatar/<id>), "galeria" (avatarId
       // = índice do avatar pronto) ou null (padrão). avatarVer serve de "cache-bust".
       avatarTipo: c.avatarTipo || null, avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0,
-      // mascote da vitrine (colecionável, item VIP): só galeria (sem upload de foto),
-      // mascoteId = índice em __MASCOTES (cliente/galeria_mascotes.js) ou null (nenhum
-      // equipado — a mesa não mostra o companheiro espiando nem a comemoração).
-      mascoteId: c.mascoteId || null, mascoteVer: c.mascoteVer || 0,
-      // moldura da vitrine (item VIP): molduraId = índice em __MOLDURAS ou null
-      // (moldura padrão do app). tituloId = índice em __TITULOS ou null (sem título).
-      molduraId: c.molduraId || null, molduraVer: c.molduraVer || 0,
-      tituloId: c.tituloId || null, tituloVer: c.tituloVer || 0,
-      // tratamento: como o jogador quer ser chamado nos títulos gendrados
-      // ('rei' | 'rainha' | 'neutro'). Decide qual arte do título/card mostrar.
-      tratamento: c.tratamento || 'neutro',
     };
   }
 
@@ -2545,7 +2827,6 @@ function criarContas(opts = {}) {
         id, apelido: (apelido || "Jogador").slice(0, 24),
         moedas: ECON.BONUS_BOAS_VINDAS, xp: 0,
         partidas: 0, vitorias: 0, derrotas: 0, canastras: 0,
-        canastras1000: 0, batidas: 0, batidasMorto: 0, vitoriasDupla: 0, // Cartões de Conquista
         criadoEm: agora(), atualizadoEm: agora(),
       };
       salvar();
@@ -2568,7 +2849,7 @@ function criarContas(opts = {}) {
   function ajustarMoedas(id, n) {
     const c = dados.contas[id];
     if (!c) return null;
-    c.moedas = Math.max(0, c.moedas + Math.round(n)); c.atualizadoEm = agora(); salvar();
+    c.moedas = Math.max(0, c.moedas + Math.round(n)); c.atualizadoEm = agora();
     return c.moedas;
   }
 
@@ -2586,19 +2867,11 @@ function criarContas(opts = {}) {
     const vencedora = placar.nos >= placar.eles ? "nos" : "eles";
     aposta = Math.max(0, Math.round(aposta || 0));
 
-    // pote (mesa com aposta): CONSERVAÇÃO — ninguém paga mais do que tem (piso 0).
-    // A contribuição real de cada um é min(aposta, saldo); o pote é a soma dessas
-    // contribuições e os vencedores dividem exatamente esse pote. Assim o total de
-    // moedas se conserva mesmo se um perdedor estava quebrado (antes: cunhava moeda).
-    const contribPorId = {};
-    let pote = 0;
-    if (aposta > 0) {
-      for (const j of humanos) {
-        const cc = dados.contas[j.id] || dados.contas[obterOuCriar(j.id, j.apelido).id];
-        const contrib = Math.min(aposta, Math.max(0, cc.moedas));
-        contribPorId[j.id] = contrib; pote += contrib;
-      }
-    }
+    // pote (mesa com aposta): só entra quem tem conta e está sentado; vencedores
+    // humanos dividem o pote. Cada um "pagou" a entrada ao começar — aqui a gente
+    // debita a entrada de todos e credita o pote a quem venceu.
+    const pagantes = humanos.length;
+    const pote = aposta * pagantes;
     const vencedoresH = humanos.filter((j) => duplaDoAssento(j.assento) === vencedora);
     const quinhao = (aposta > 0 && vencedoresH.length) ? Math.floor(pote / vencedoresH.length) : 0;
 
@@ -2620,7 +2893,7 @@ function criarContas(opts = {}) {
       // MOEDAS
       let deltaMoedas;
       if (aposta > 0) {
-        deltaMoedas = (venceu ? quinhao : 0) - (contribPorId[j.id] || 0); // paga só o que pode; vencedor leva quinhão
+        deltaMoedas = (venceu ? quinhao : 0) - aposta; // pagou a entrada; vencedor leva quinhão
       } else {
         deltaMoedas = ECON.MOEDAS_PARTICIPACAO + (venceu ? ECON.MOEDAS_VITORIA : 0);
       }
@@ -2630,11 +2903,6 @@ function criarContas(opts = {}) {
       c.partidas += 1;
       if (venceu) c.vitorias += 1; else c.derrotas += 1;
       c.canastras += canastras;
-      // CONTADORES DOS CARTÕES DE CONQUISTA (Sônia 23/jul)
-      c.canastras1000 = (c.canastras1000 || 0) + Math.max(0, j.canastras1000 || 0);
-      c.batidas = (c.batidas || 0) + Math.max(0, j.batidas || 0);
-      c.batidasMorto = (c.batidasMorto || 0) + Math.max(0, j.batidasMorto || 0);
-      if (venceu && j.parceiroHumano) c.vitoriasDupla = (c.vitoriasDupla || 0) + 1;
       c.atualizadoEm = agora();
 
       const nivelDepois = nivelDeXp(c.xp);
@@ -2650,15 +2918,12 @@ function criarContas(opts = {}) {
   }
 
   /** Ranking dos jogadores. Critério padrão: XP (progresso do jogador). */
-  function ranking({ limite = 50, criterio = "xp", ids = null } = {}) {
-    let lista = Object.values(dados.contas).map(contaPublica);
-    if (ids) { const set = ids instanceof Set ? ids : new Set(ids); lista = lista.filter((c) => set.has(c.id)); } // aba Amigos
+  function ranking({ limite = 50, criterio = "xp" } = {}) {
+    const lista = Object.values(dados.contas).map(contaPublica);
     const chave = criterio === "vitorias" ? "vitorias" : (criterio === "moedas" ? "moedas" : "xp");
     lista.sort((a, b) => (b[chave] - a[chave]) || (b.xp - a.xp) || (b.vitorias - a.vitorias));
     return lista.slice(0, limite).map((c, i) => Object.assign({ posicao: i + 1 }, c));
   }
-  /** IDs dos amigos de um jogador (pra aba "Amigos" do ranking). */
-  function amigosIds(id) { const c = dados.contas[id]; return c && c.amigos ? c.amigos.slice() : []; }
 
   /** Posição de um jogador no ranking (1-based) por um critério. 0 se não achar. */
   function posicaoNoRanking(id, criterio = "xp") {
@@ -2742,160 +3007,11 @@ function criarContas(opts = {}) {
     return { ok: true, reports: c.reportsAvatar, ocultado };
   }
 
-  /** Escolhe o MASCOTE da vitrine (galeria, item VIP). mascoteId = índice (1..N)
-   *  em __MASCOTES no cliente. Espelha definirAvatarGaleria — só que sem variante
-   *  de foto (mascote é sempre arte pronta do acervo). */
-  function definirMascoteGaleria(id, mascoteId) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.mascoteId = Math.max(1, parseInt(mascoteId, 10) || 1);
-    c.mascoteVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Desequipa o mascote (mesa/perfil voltam a não mostrar nenhum). */
-  function removerMascote(id) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.mascoteId = null; c.mascoteVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Escolhe a MOLDURA da vitrine (galeria, item VIP). molduraId = índice (1..N)
-   *  em __MOLDURAS no cliente. Espelha definirMascoteGaleria. */
-  function definirMolduraGaleria(id, molduraId) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.molduraId = Math.max(1, parseInt(molduraId, 10) || 1);
-    c.molduraVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Desequipa a moldura (volta pra moldura padrão do app). */
-  function removerMoldura(id) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.molduraId = null; c.molduraVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Escolhe o TÍTULO da vitrine (placa de nome). tituloId = índice (1..N)
-   *  em __TITULOS no cliente. Espelha definirMascoteGaleria. */
-  function definirTituloGaleria(id, tituloId) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.tituloId = Math.max(1, parseInt(tituloId, 10) || 1);
-    c.tituloVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Desequipa o título (perfil volta a mostrar "sem título"). */
-  function removerTitulo(id) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    c.tituloId = null; c.tituloVer = agora(); c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  /** Define como o jogador quer ser tratado nos títulos gendrados. */
-  function definirTratamento(id, t) {
-    const c = dados.contas[id];
-    if (!c) return { erro: "conta não encontrada" };
-    const ok = (t === "rei" || t === "rainha" || t === "neutro") ? t : "neutro";
-    c.tratamento = ok; c.atualizadoEm = agora();
-    salvar();
-    return contaPublica(c);
-  }
-
-  // ===== AMIGOS (buscar / pedir / responder / listar) =====
-  function _gerarCodigo(id) {
-    let h = 0; for (let i = 0; i < id.length; i++) { h = (h * 31 + id.charCodeAt(i)) >>> 0; }
-    const base = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let s = "", n = h;
-    for (let i = 0; i < 5; i++) { s += base[n % base.length]; n = Math.floor(n / base.length); }
-    return "BMV-" + s;
-  }
-  function codigoConta(id) {
-    const c = dados.contas[id]; if (!c) return null;
-    if (!c.codigo) { c.codigo = _gerarCodigo(id); salvar(); }
-    return c.codigo;
-  }
-  /** Cartão compacto de um jogador pra listas/busca. */
-  function _resumoAmigo(c) {
-    if (!c) return null;
-    const p = progressoDeXp(c.xp);
-    return { id: c.id, apelido: c.apelido, nivel: p.nivel,
-      avatarTipo: c.avatarTipo || null, avatarId: c.avatarId || null, avatarVer: c.avatarVer || 0 };
-  }
-  /** Busca por apelido (trecho, sem diferenciar maiúsculas) OU pelo código exato. */
-  function buscarPorApelido(termo, excluirId, limite) {
-    termo = String(termo || "").trim(); if (!termo) return [];
-    const alvo = termo.toLowerCase(), cod = termo.toUpperCase(); const out = [];
-    for (const id in dados.contas) {
-      if (id === excluirId) continue;
-      const c = dados.contas[id];
-      const ap = (c.apelido || "").toLowerCase();
-      if (ap.indexOf(alvo) >= 0 || (c.codigo && c.codigo.toUpperCase() === cod)) {
-        out.push(_resumoAmigo(c));
-        if (out.length >= (limite || 20)) break;
-      }
-    }
-    return out;
-  }
-  /** Manda pedido de amizade. Se o outro já tinha pedido pra você, vira amizade na hora. */
-  function enviarPedido(deId, paraId) {
-    if (!deId || !paraId || deId === paraId) return { erro: "pedido inválido" };
-    const de = dados.contas[deId], para = dados.contas[paraId];
-    if (!de || !para) return { erro: "jogador não encontrado" };
-    de.amigos = de.amigos || []; de.pedidosEnviados = de.pedidosEnviados || []; de.pedidosRecebidos = de.pedidosRecebidos || [];
-    para.pedidosRecebidos = para.pedidosRecebidos || []; para.amigos = para.amigos || [];
-    if (de.amigos.indexOf(paraId) >= 0) return { erro: "vocês já são amigos" };
-    if (de.pedidosRecebidos.indexOf(paraId) >= 0) return responderPedido(deId, paraId, true); // aceita direto
-    if (de.pedidosEnviados.indexOf(paraId) < 0) de.pedidosEnviados.push(paraId);
-    if (para.pedidosRecebidos.indexOf(deId) < 0) para.pedidosRecebidos.push(deId);
-    de.atualizadoEm = agora(); para.atualizadoEm = agora(); salvar();
-    return { ok: true, paraApelido: para.apelido, paraId: paraId };
-  }
-  /** Aceita ou recusa um pedido recebido. */
-  function responderPedido(id, deId, aceitar) {
-    const eu = dados.contas[id], outro = dados.contas[deId];
-    if (!eu || !outro) return { erro: "jogador não encontrado" };
-    eu.pedidosRecebidos = (eu.pedidosRecebidos || []).filter((x) => x !== deId);
-    outro.pedidosEnviados = (outro.pedidosEnviados || []).filter((x) => x !== id);
-    if (aceitar) {
-      eu.amigos = eu.amigos || []; outro.amigos = outro.amigos || [];
-      if (eu.amigos.indexOf(deId) < 0) eu.amigos.push(deId);
-      if (outro.amigos.indexOf(id) < 0) outro.amigos.push(id);
-    }
-    eu.atualizadoEm = agora(); outro.atualizadoEm = agora(); salvar();
-    return { ok: true, aceitou: !!aceitar, amigoApelido: outro.apelido, amigoId: deId };
-  }
-  /** Estado completo de amizades pra pintar a tela (marca quem está online). */
-  function estadoAmigos(id, onlineSet) {
-    const c = dados.contas[id];
-    const mapa = (arr) => (arr || []).map((x) => { const r = _resumoAmigo(dados.contas[x]); if (r && onlineSet) r.online = onlineSet.has(x); return r; }).filter(Boolean);
-    return {
-      meuCodigo: codigoConta(id),
-      amigos: c ? mapa(c.amigos) : [],
-      pedidosRecebidos: c ? mapa(c.pedidosRecebidos) : [],
-      pedidosEnviados: c ? mapa(c.pedidosEnviados) : [],
-    };
-  }
-
   carregar();
   return {
     obterOuCriar, obter, atualizarApelido, ajustarMoedas, registrarPartida,
-    ranking, amigosIds, posicaoNoRanking, totalDeContas, salvar, carregar,
+    ranking, posicaoNoRanking, totalDeContas, salvar, carregar,
     definirAvatarFoto, definirAvatarGaleria, removerAvatar, avatarBuffer, denunciarAvatar,
-    definirMascoteGaleria, removerMascote,
-    definirMolduraGaleria, removerMoldura, definirTituloGaleria, removerTitulo,
-    definirTratamento,
-    buscarPorApelido, enviarPedido, responderPedido, estadoAmigos, codigoConta,
     _dados: () => dados, ECON,
   };
 }
@@ -2936,55 +3052,21 @@ function criarGerenciador(opts = {}) {
   // só não persiste estatística nenhuma (útil pra testes puros de mesa).
   const contas = opts.contas || null;
   const gerarCodigo = opts.gerarCodigo || gerarCodigoPadrao;
-  // RESERVAS: quando o Saguão gera um código pra um convite, ele é "reservado" por
-  // alguns segundos até o anfitrião abrir a mesa — assim nenhuma outra mesa aleatória
-  // rouba esse código no meio do caminho. Expira sozinho (sem timers).
-  const reservas = {}; // codigo -> ts de expiração
-  const agoraMs = opts.agora || (() => Date.now());
   const LIMITE_BOTS = opts.limiteAvanco || 5000; // trava anti-loop do avanço
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
   // controla o ritmo (jogarUmBot), pra dar o "respiro" entre jogadas na tela.
   const autoBots = opts.autoBots !== false;
 
-  function _reservado(cod) { return reservas[cod] && agoraMs() < reservas[cod]; }
-  /** Reserva um código livre por `ttlMs` (padrão 30s). Usado pelo Saguão pra combinar
-   *  a mesa do convite ANTES do anfitrião abri-la — o convidado recebe o mesmo código. */
-  function reservarCodigo(ttlMs) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
     let codigo, tentativas = 0;
-    do { codigo = gerarCodigo(); } while ((salas[codigo] || _reservado(codigo)) && ++tentativas < 200);
-    if (salas[codigo] || _reservado(codigo)) return null;
-    reservas[codigo] = agoraMs() + (ttlMs || 30000);
-    return codigo;
-  }
-
-  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0, privada = false, codigo: codigoPedido = null } = {}) {
-    // RECONEXÃO do anfitrião: se o código pedido JÁ existe e este jogador já é dono de uma
-    // cadeira nele (caiu e recarregou), re-atribui a MESMA mesa em vez de criar OUTRA com
-    // código diferente. Corrige "duas mesas com o mesmo código / jogadores não se encontram".
-    if (codigoPedido && jogadorId && salas[codigoPedido] && !salas[codigoPedido].iniciada) {
-      const sx = salas[codigoPedido];
-      const meu = sx.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
-      if (meu !== -1) { if (apelido) sx.assentos[meu].apelido = apelido; return { codigo: codigoPedido, assento: meu, reatou: true }; }
-    }
-    let codigo, tentativas = 0;
-    // Código PEDIDO (convite do Saguão): usa se estiver livre; senão gera um novo.
-    if (codigoPedido && !salas[codigoPedido]) {
-      codigo = codigoPedido;
-    } else {
-      do { codigo = gerarCodigo(); } while ((salas[codigo] || _reservado(codigo)) && ++tentativas < 100);
-    }
+    do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
-    delete reservas[codigo]; // consome a reserva (se havia)
     salas[codigo] = {
       codigo, modalidade, metaPontos,
       aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
-      // PRIVADA (recurso VIP): mesa por convite (código). Fica FORA do matchmaking
-      // público — só entra quem tem o código. Público nunca cai numa privada.
-      privada: !!privada,
       criadorAssento: 0,
       assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
       iniciada: false,
-      divulgada: null,    // {por, apelido} quando o anfitrião "chama a galera" pro saguão
       jogo: null,
       liquidada: false,   // já contabilizou o resultado no cofre?
       resumoFinal: null,  // resumo por jogador (deltas de moedas/xp) pra tela de fim
@@ -2993,50 +3075,10 @@ function criarGerenciador(opts = {}) {
     return { codigo, assento: 0 };
   }
 
-  /** MATCHMAKING PÚBLICO (pedido Sônia — bug: público entrava na privada). Junta o
-   *  jogador numa mesa PÚBLICA aberta (não privada, não iniciada, com assento livre);
-   *  se não houver, cria uma nova pública. NUNCA entra numa mesa privada. */
-  function entrarPublica({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000 } = {}) {
-    for (const codigo in salas) {
-      const s = salas[codigo];
-      if (!s || s.privada || s.iniciada) continue;      // pula privada e mesa já começada
-      if (!s.assentos.some((a) => a === null)) continue; // sem assento livre
-      const r = entrarMesa({ codigo, apelido, jogadorId });
-      if (!r.erro) return { codigo, assento: r.assento, criador: false };
-    }
-    // nenhuma mesa pública aberta → cria uma nova (o jogador vira o anfitrião)
-    const r = criarMesa({ apelido, jogadorId, modalidade, metaPontos, privada: false });
-    if (r.erro) return r;
-    return { codigo: r.codigo, assento: r.assento, criador: true };
-  }
-
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
-    if (sala.iniciada) {
-      // RECONEXÃO numa partida EM ANDAMENTO: se este jogador era um assento (caiu → virou
-      // bot), deixa ele REASSUMIR a própria cadeira (volta a ser humano). Senão, a partida
-      // já começou de fato e ele não entra.
-      if (jogadorId) {
-        const meu = sala.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
-        if (meu !== -1) {
-          if (sala.jogo && sala.jogo.assentos[meu]) { sala.jogo.assentos[meu].tipo = "humano"; if (apelido) sala.jogo.assentos[meu].apelido = apelido; }
-          if (apelido) sala.assentos[meu].apelido = apelido;
-          return { assento: meu, codigo, reatou: true };
-        }
-      }
-      return { erro: "a partida já começou" };
-    }
-    // IDEMPOTÊNCIA: se este jogador JÁ está sentado nesta mesa, devolve a MESMA cadeira
-    // (não abre uma segunda). Corrige o "1 jogador em 2 cadeiras" causado por reenvio do
-    // convite (retry), toque duplo ou reconexão. Sem jogadorId (anônimo) segue o fluxo normal.
-    if (jogadorId) {
-      const jaSentado = sala.assentos.findIndex((a) => a && a.jogadorId === jogadorId);
-      if (jaSentado !== -1) {
-        if (apelido) sala.assentos[jaSentado].apelido = apelido;
-        return { assento: jaSentado, codigo };
-      }
-    }
+    if (sala.iniciada) return { erro: "a partida já começou" };
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
     // caso comum (casal/dupla que quer jogar JUNTA). Só depois enche os adversários
@@ -3085,23 +3127,12 @@ function criarGerenciador(opts = {}) {
     if (!contas) return null;
     const jogo = sala.jogo;
     const jogadores = [];
-    const parceiro = (i) => (i % 2 === 0 ? (i === 0 ? 2 : 0) : (i === 1 ? 3 : 1));
     for (let i = 0; i < 4; i++) {
       const aj = jogo.assentos[i], sj = sala.assentos[i];
       // só credita quem TERMINOU a partida como humano E tem conta (jogadorId).
       // Quem virou bot no meio (saiu/AFK) não pontua.
       if (aj && aj.tipo === "humano" && sj && sj.jogadorId) {
-        const st = (jogo.statsPartida && jogo.statsPartida[i]) || {};
-        const pj = jogo.assentos[parceiro(i)];
-        jogadores.push({
-          assento: i, id: sj.jogadorId, apelido: aj.apelido,
-          // stats da partida pros Cartões de Conquista
-          canastras: st.canastras || 0,
-          canastras1000: st.canastras1000 || 0,
-          batidas: st.batidas || 0,
-          batidasMorto: st.batidasMorto || 0,
-          parceiroHumano: !!(pj && pj.tipo === "humano"), // pra "Dupla Imbatível"
-        });
+        jogadores.push({ assento: i, id: sj.jogadorId, apelido: aj.apelido });
       }
     }
     try {
@@ -3187,29 +3218,8 @@ function criarGerenciador(opts = {}) {
     const assento = j.vez;
     const r = jogarTurnoBot(j, assento);
     sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: r.log });
-    // ANTI-TRAVA (mesa congelada): a vez NUNCA pode ficar presa num bot. Se depois do
-    // turno a vez continua neste assento e a rodada não encerrou, o bot não conseguiu
-    // jogar (ex.: o humano já tinha COMPRADO e saiu/AFK no meio → o assento-bot não pode
-    // comprar de novo). Força passar a vez pra mesa seguir em vez de reagendar pra sempre.
-    if (!j.encerrada && !j.rodadaEncerrada && j.vez === assento) {
-      J.passarVez(j);
-      sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: ["turno preso — vez passada à força (anti-trava)"] });
-    }
     liquidar(sala); // batida de bot pode ter encerrado a partida
     return { jogou: true, assento, resultado: r };
-  }
-
-  /** ANTI-TRAVA: se a vez está presa num BOT (rodada em andamento), força passar a vez.
-   *  Usado pela rede de segurança do servidor quando um passo de bot lança exceção —
-   *  a mesa nunca pode congelar num turno preso. Retorna true se destravou. */
-  function destravarBotPreso(codigo) {
-    const sala = salas[codigo];
-    if (!sala || !sala.jogo) return false;
-    const j = sala.jogo;
-    if (j.encerrada || j.rodadaEncerrada) return false;
-    const v = j.assentos[j.vez];
-    if (v && v.tipo === "bot") { J.passarVez(j); return true; }
-    return false;
   }
 
   /** O que um assento PODE ver (lobby antes de iniciar, ou a visão do jogo). */
@@ -3238,10 +3248,6 @@ function criarGerenciador(opts = {}) {
             v.assentos[i].avatarTipo = c.avatarTipo || null;
             v.assentos[i].avatarId = c.avatarId || null;
             v.assentos[i].avatarVer = c.avatarVer || 0;
-            // mascote equipado (vitrine) — cliente desenha espiando do lado do avatar
-            v.assentos[i].mascoteId = c.mascoteId || null;
-            // moldura equipada (vitrine) — cliente desenha a borda em volta do avatar
-            v.assentos[i].molduraId = c.molduraId || null;
           }
         }
       }
@@ -3255,9 +3261,6 @@ function criarGerenciador(opts = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (!sala.iniciada) {
-      // no lobby, libera o assento — MENOS o do criador (preserva a mesa e a cadeira do
-      // anfitrião, pra ele poder recarregar e reassumir; não desmancha o convite por uma
-      // queda de conexão temporária).
       if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
       return { ok: true };
     }
@@ -3269,374 +3272,10 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  // ===== REVANCHE ("Vamos outra?") — pedido Sônia 23/jul =====
-  // No fim da partida, se a mesa for 100% HUMANA (nenhum robô, nenhum AFK), dá pra
-  // recomeçar na MESMA mesa com a MESMA galera. Se tiver 1 robô, não vale (regra
-  // dela: "se tiver 1 robô já não dá").
-  function podeRevanche(codigo) {
-    const sala = salas[codigo];
-    if (!sala || !sala.jogo || !sala.jogo.encerrada) return false;
-    for (let i = 0; i < 4; i++) {
-      const a = sala.jogo.assentos[i], sj = sala.assentos[i];
-      if (!a || a.tipo !== "humano" || !sj || !sj.jogadorId) return false;
-    }
-    return true;
-  }
-
-  /** Perfil de cada assento pra tela "Vamos outra?" (avatar + apelido + dupla).
-   *  Reaproveita o cofre pra puxar avatar/moldura de quem está sentado. */
-  function perfilAssentos(codigo) {
-    const sala = salas[codigo];
-    if (!sala || !sala.jogo) return null;
-    return sala.jogo.assentos.map((a, i) => {
-      const sj = sala.assentos[i];
-      const p = { assento: i, apelido: (a && a.apelido) || "", tipo: (a && a.tipo) || "bot", dupla: (i % 2 === 0) ? "nos" : "eles" };
-      if (contas && sj && sj.jogadorId) {
-        const c = contas.obter(sj.jogadorId);
-        if (c) {
-          p.jogadorId = sj.jogadorId;
-          p.avatarTipo = c.avatarTipo || null;
-          p.avatarId = c.avatarId || null;
-          p.avatarVer = c.avatarVer || 0;
-          p.molduraId = c.molduraId || null;
-        }
-      }
-      return p;
-    });
-  }
-
-  /** REVANCHE aceita por todos: redistribui uma partida NOVA na mesma mesa, com a
-   *  mesma galera e a mesma config (modalidade/meta). Zera o placar (jogo novo). */
-  function reiniciarMesa(codigo) {
-    const sala = salas[codigo];
-    if (!sala) return { erro: "mesa não encontrada" };
-    const assentosJogo = sala.assentos.map((a) => ({ tipo: a.tipo, apelido: a.apelido }));
-    sala.jogo = J.criarJogo({ assentos: assentosJogo, modalidade: sala.modalidade, metaPontos: sala.metaPontos });
-    sala.liquidada = false;
-    sala.resumoFinal = null;
-    if (autoBots) avancarBots(sala);
-    liquidar(sala);
-    return { ok: true, codigo };
-  }
-
-  // DIVULGAR NO SAGUÃO ("estou na minha mesa, venham"): o anfitrião marca a mesa como
-  // divulgada; o saguão passa a listá-la com um botão "Entrar" enquanto tiver vaga.
-  function divulgar(codigo, jogadorId, apelido, on) {
-    const sala = salas[codigo];
-    if (!sala) return { erro: "mesa não encontrada" };
-    sala.divulgada = on ? { por: jogadorId || null, apelido: apelido || "Jogador" } : null;
-    return { ok: true, divulgada: !!sala.divulgada };
-  }
-  // mesas divulgadas que ainda têm VAGA (assento humano livre) e não acabaram — viram
-  // "cartões" na lista do saguão público.
-  function mesasDivulgadas() {
-    const out = [];
-    for (const codigo in salas) {
-      const s = salas[codigo];
-      if (!s || !s.divulgada || s.liquidada) continue;
-      const temVaga = s.assentos.some((a) => a === null);
-      const temHumano = s.assentos.some((a) => a && a.tipo === "humano");
-      if (!temVaga || !temHumano) continue;
-      out.push({ codigo, apelido: s.divulgada.apelido, modalidade: s.modalidade, privada: !!s.privada });
-    }
-    return out;
-  }
-  return { salas, criarMesa, entrarMesa, entrarPublica, reservarCodigo, divulgar, mesasDivulgadas, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, destravarBotPreso, visao, sair, podeRevanche, perfilAssentos, reiniciarMesa };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
-
-  };
-
-  __fabricas["saguao"] = function (module, exports, require) {
-// servidor/saguao.js — SAGUÃO PÚBLICO (chat social que leva pra mesa).
-// Filosofia (spec Sônia/GPT 23/jul): "jogar é o destino". FRASES APROVADAS (sem texto
-// livre), presença, reações, limites anti-spam e bloqueio. SEM Firebase: tudo em memória
-// no servidor WS (o feed do MVP não precisa persistir). Adaptado à nossa stack real.
-//
-// Estrutura pensada pra NÃO dar retrabalho (pedido da Sônia): enums/tipos definidos uma
-// vez; as "ligações" que faltam (clã, acesso VIP) são só campos/flags a preencher depois.
-
-// ===== biblioteca de frases aprovadas (seed da spec, Tabela 8) =====
-// categoria: geral | matchmaking | provocacao | elogio | cla | coordenacao
-const FRASES = [
-  ["geral", "Bom jogo para todos!"], ["geral", "Quem está chegando agora?"],
-  ["geral", "Essa sala está animada hoje."], ["geral", "Estou só observando…"],
-  ["geral", "Bora movimentar esse salão!"],
-  ["matchmaking", "Quem quer formar dupla?"], ["matchmaking", "Procuro parceiro para jogar agora."],
-  ["matchmaking", "Tem vaga em alguma mesa?"], ["matchmaking", "Alguém para uma partida rápida?"],
-  ["matchmaking", "Quero jogar valendo ranking."],
-  ["provocacao", "Quem vai encarar?"], ["provocacao", "Pode vir preparado."],
-  ["provocacao", "Hoje a mesa vai pegar fogo."], ["provocacao", "Já estou sentindo o medo daqui."],
-  ["provocacao", "Quero adversário, não figurante."], ["provocacao", "Essa mesa precisa de emoção."],
-  ["elogio", "Jogou bonito!"], ["elogio", "Essa merece aplausos."],
-  ["elogio", "Que sequência maravilhosa!"], ["elogio", "Essa dupla está impossível."],
-  ["elogio", "Respeitei essa jogada."],
-  ["coordenacao", "Já estou indo."], ["coordenacao", "Me convide para uma mesa."],
-  ["coordenacao", "Agora não consigo."], ["coordenacao", "Vamos formar dupla?"],
-  ["coordenacao", "Prefere jogar como adversário?"], ["coordenacao", "Crie a mesa e me chame."],
-  // categoria exclusiva do Salão VIP (frases nobres) — só aparecem no VIP no cliente
-  ["vip", "Um brinde à boa jogada! 🥂"], ["vip", "Aqui a casa é nobre. 👑"],
-  ["vip", "Cartas finas, jogo fino."], ["vip", "Reservei a melhor mesa pra você."],
-  ["vip", "Elegância também se joga."], ["vip", "Que a sorte sirva os nobres. ✨"],
-].map(([cat, texto], i) => ({ id: "f" + (i + 1), categoria: cat, texto, ativa: true }));
-const FRASE_POR_ID = {}; FRASES.forEach((f) => { FRASE_POR_ID[f.id] = f; });
-
-// reações rápidas (spec 4.4) — id + emoji + rótulo acessível
-const REACOES = [
-  { id: "essa_doeu", emoji: "😂", rotulo: "Essa doeu" },
-  { id: "mestre", emoji: "👑", rotulo: "Jogada de mestre" },
-  { id: "fogo", emoji: "🔥", rotulo: "Mesa pegando fogo" },
-  { id: "de_olho", emoji: "👀", rotulo: "Estou de olho" },
-  { id: "nao_acredito", emoji: "😱", rotulo: "Não acredito" },
-  { id: "quero_jogar", emoji: "🃏", rotulo: "Quero jogar" },
-  { id: "mandou_bem", emoji: "💜", rotulo: "Mandou bem" },
-  // reações PREMIUM (Salão VIP) — mostradas só no VIP no cliente
-  { id: "brinde", emoji: "🥂", rotulo: "Um brinde" },
-  { id: "diamante", emoji: "💎", rotulo: "Diamante" },
-  { id: "rosa", emoji: "🌹", rotulo: "Uma rosa" },
-  { id: "brilho", emoji: "✨", rotulo: "Brilho" },
-  { id: "champanhe", emoji: "🍾", rotulo: "Champanhe" },
-];
-const REACAO_IDS = new Set(REACOES.map((r) => r.id));
-
-// ===== CARINHAS (emojis) — enviadas como "figurinha" no feed (msg com emote) =====
-// Público: pacote Salas Públicas (grátis, todos). VIP: Clássicos VIP (inclusos na
-// assinatura) + rindo/gargalhada (pedido Sônia). O CLIENTE mapeia id -> arte (PNG).
-const EMOJIS_PUBLICO = ["feliz", "rindo", "piscadinha", "beijinho", "surpreso", "triste", "pensativo", "estiloso", "aplausos", "bravo"];
-const EMOJIS_VIP = ["feliz", "rindo", "gargalhada", "chorando", "bravo", "furia", "piscada", "impressionado", "rico", "estiloso", "apaixonado", "chocado"];
-const EMOJI_PUB_SET = new Set(EMOJIS_PUBLICO);
-const EMOJI_VIP_SET = new Set(EMOJIS_VIP);
-function emojiPermitido(id, vip) { return EMOJI_PUB_SET.has(id) || (!!vip && EMOJI_VIP_SET.has(id)); }
-
-// PRESENTES (Salão VIP) — gesto social: quem ENVIA paga em moedas; aparece no feed.
-// Quem recebe ganha o carinho + destaque (SEM moedas — decisão Sônia 24/jul).
-const PRESENTES = [
-  { id: "rosa", emoji: "🌹", nome: "Rosa", custo: 50 },
-  { id: "bombom", emoji: "🍫", nome: "Bombom", custo: 100 },
-  { id: "champanhe", emoji: "🍾", nome: "Champanhe", custo: 200 },
-  { id: "diamante", emoji: "💎", nome: "Diamante", custo: 500 },
-];
-const PRESENTE_POR_ID = {}; PRESENTES.forEach((p) => { PRESENTE_POR_ID[p.id] = p; });
-
-// status de presença (spec 11.1 presence_status)
-const STATUS = new Set(["disponivel", "procurando", "em_partida", "observando", "ausente"]);
-// modalidade preferida (preferência de jogo, mostrada na presença)
-const MODALIDADES = new Set(["aberto", "fechado", "sbtl"]);
-
-function criarSaguao(opts = {}) {
-  const agora = opts.agora || (() => Date.now());
-  const MAX_FEED = opts.maxFeed || 60;
-  const presenca = {};   // jogadorId -> perfil de presença
-  const feed = [];       // últimas mensagens (memória)
-  const bloqueios = {};  // jogadorId -> Set(bloqueado) (bilateral na leitura)
-  const ritmo = {};      // jogadorId -> controle de limites
-  let seq = 0;
-
-  function frases() { return FRASES; }
-  function reacoesCatalogo() { return REACOES; }
-  function emojisCatalogo() { return { publico: EMOJIS_PUBLICO, vip: EMOJIS_VIP }; }
-  function presentesCatalogo() { return PRESENTES; }
-
-  function _bloqueado(a, b) { // A não vê/interage com B se qualquer um bloqueou o outro
-    return !!((bloqueios[a] && bloqueios[a].has(b)) || (bloqueios[b] && bloqueios[b].has(a)));
-  }
-  function bloquear(jid, alvo) {
-    if (!jid || !alvo || jid === alvo) return { erro: "bloqueio inválido" };
-    (bloqueios[jid] || (bloqueios[jid] = new Set())).add(alvo);
-    return { ok: true, alvo };
-  }
-  function desbloquear(jid, alvo) { if (bloqueios[jid]) bloqueios[jid].delete(alvo); return { ok: true }; }
-
-  function entrar(p) {
-    if (!p || !p.jogadorId) return { erro: "sem jogador" };
-    presenca[p.jogadorId] = {
-      jogadorId: p.jogadorId, apelido: p.apelido || "Jogador",
-      avatarTipo: p.avatarTipo || null, avatarId: p.avatarId || null, avatarVer: p.avatarVer || 0,
-      molduraId: p.molduraId || null, nivel: p.nivel || 1, tituloId: p.tituloId || null,
-      cla: p.cla || null,          // 🔌 CASCA: preenche quando existir sistema de clãs
-      vip: !!p.vip,                // 🔌 CASCA: acesso VIP (flag) até a assinatura amadurecer
-      status: STATUS.has(p.status) ? p.status : "disponivel",
-      modalidade: MODALIDADES.has(p.modalidade) ? p.modalidade : "sbtl", // preferência de jogo
-      mesa: null,                  // {codigo, vaga} quando o jogador está/abre uma mesa
-      ultimoVisto: agora(),
-    };
-    return { ok: true };
-  }
-  function sair(jid) { delete presenca[jid]; return { ok: true }; }
-  function definirStatus(jid, status) {
-    if (presenca[jid] && STATUS.has(status)) { presenca[jid].status = status; presenca[jid].ultimoVisto = agora(); return { ok: true }; }
-    return { erro: "status inválido ou fora do saguão" };
-  }
-  // MODALIDADE preferida (Aberto/Fechado/Sbtl) — aparece na presença
-  function definirModalidade(jid, m) {
-    if (presenca[jid] && MODALIDADES.has(m)) { presenca[jid].modalidade = m; return { ok: true }; }
-    return { erro: "modalidade inválida ou fora do saguão" };
-  }
-  // MESA: o jogador está numa mesa (ou abriu uma). Vira "Na mesa X" e, se tiver vaga,
-  // rende o botão "Entrar" pros outros. codigo=null limpa (saiu da mesa).
-  function definirMesa(jid, codigo, vaga) {
-    if (!presenca[jid]) return { erro: "fora do saguão" };
-    if (codigo) { presenca[jid].mesa = { codigo: codigo, vaga: vaga !== false }; presenca[jid].status = "em_partida"; }
-    else { presenca[jid].mesa = null; if (presenca[jid].status === "em_partida") presenca[jid].status = "disponivel"; }
-    return { ok: true };
-  }
-  function estaNoSaguao(jid) { return !!presenca[jid]; }
-  function online(paraJid) { // lista pública, escondendo bloqueados mútuos
-    return Object.values(presenca)
-      .filter((p) => !paraJid || !_bloqueado(paraJid, p.jogadorId))
-      .map((p) => ({ jogadorId: p.jogadorId, apelido: p.apelido, avatarTipo: p.avatarTipo, avatarId: p.avatarId, avatarVer: p.avatarVer, molduraId: p.molduraId, nivel: p.nivel, cla: p.cla, vip: p.vip, status: p.status, modalidade: p.modalidade, mesa: p.mesa }));
-  }
-
-  // LIMITES (spec Tabela 14): 1 msg/3s; burst 5/min; frase idêntica no máx 3x/60s.
-  function podeEnviar(jid, phraseId) {
-    const now = agora();
-    const r = ritmo[jid] || (ritmo[jid] = { ultima: 0, janela: [], frases: [] });
-    if (now - r.ultima < 3000) return { ok: false, motivo: "Vá com calma 🙂", esperaMs: 3000 - (now - r.ultima) };
-    r.janela = r.janela.filter((t) => now - t < 60000);
-    if (r.janela.length >= 5) return { ok: false, motivo: "Muitas mensagens seguidas — respira um pouco.", esperaMs: 60000 - (now - r.janela[0]) };
-    r.frases = r.frases.filter((x) => now - x.t < 60000);
-    if (r.frases.filter((x) => x.id === phraseId).length >= 3) return { ok: false, motivo: "Você repetiu essa frase demais." };
-    return { ok: true };
-  }
-  function _registraEnvio(jid, phraseId) {
-    const now = agora(); const r = ritmo[jid] || (ritmo[jid] = { ultima: 0, janela: [], frases: [] });
-    r.ultima = now; r.janela.push(now); r.frases.push({ id: phraseId, t: now });
-  }
-
-  function enviarFrase(remetente, phraseId, alvoId) {
-    if (!estaNoSaguao(remetente.jogadorId)) return { erro: "entre no saguão primeiro" };
-    const fr = FRASE_POR_ID[phraseId];
-    if (!fr || !fr.ativa) return { erro: "frase inválida" };
-    if (fr.categoria === "vip" && !((presenca[remetente.jogadorId] || remetente).vip)) return { erro: "frase exclusiva do Salão VIP 👑" };
-    const lim = podeEnviar(remetente.jogadorId, phraseId);
-    if (!lim.ok) return { erro: lim.motivo, esperaMs: lim.esperaMs };
-    _registraEnvio(remetente.jogadorId, phraseId);
-    const p = presenca[remetente.jogadorId] || remetente;
-    const msg = {
-      id: "m" + (++seq), jogadorId: remetente.jogadorId, apelido: p.apelido,
-      avatarTipo: p.avatarTipo, avatarId: p.avatarId, avatarVer: p.avatarVer, molduraId: p.molduraId,
-      nivel: p.nivel, cla: p.cla, vip: p.vip,
-      phraseId, texto: fr.texto, categoria: fr.categoria,
-      alvoId: alvoId || null, ts: agora(), reacoes: {},
-    };
-    feed.push(msg); while (feed.length > MAX_FEED) feed.shift();
-    return { ok: true, msg };
-  }
-
-  // CARINHA (emote): entra no feed como "figurinha" (msg com emote, sem texto). Mesmos
-  // limites anti-spam das frases. VIP só passa se o remetente for VIP (emojiPermitido).
-  function enviarEmote(remetente, emojiId) {
-    if (!estaNoSaguao(remetente.jogadorId)) return { erro: "entre no saguão primeiro" };
-    const p = presenca[remetente.jogadorId] || remetente;
-    if (!emojiPermitido(emojiId, !!p.vip)) return { erro: "carinha indisponível" };
-    const lim = podeEnviar(remetente.jogadorId, "emo:" + emojiId);
-    if (!lim.ok) return { erro: lim.motivo, esperaMs: lim.esperaMs };
-    _registraEnvio(remetente.jogadorId, "emo:" + emojiId);
-    const msg = {
-      id: "m" + (++seq), jogadorId: remetente.jogadorId, apelido: p.apelido,
-      avatarTipo: p.avatarTipo, avatarId: p.avatarId, avatarVer: p.avatarVer, molduraId: p.molduraId,
-      nivel: p.nivel, cla: p.cla, vip: p.vip,
-      emote: emojiId, ts: agora(), reacoes: {},
-    };
-    feed.push(msg); while (feed.length > MAX_FEED) feed.shift();
-    return { ok: true, msg };
-  }
-
-  // PRESENTE (Salão VIP): entra no feed como "fulano presenteou beltrano com 🌹". A
-  // cobrança das moedas do remetente é feita no servidor.js (tem o cofre).
-  function enviarPresente(remetente, alvoId, alvoApelido, presenteId) {
-    if (!estaNoSaguao(remetente.jogadorId)) return { erro: "entre no saguão primeiro" };
-    const pr = PRESENTE_POR_ID[presenteId];
-    if (!pr) return { erro: "presente inválido" };
-    const lim = podeEnviar(remetente.jogadorId, "pres:" + presenteId);
-    if (!lim.ok) return { erro: lim.motivo, esperaMs: lim.esperaMs };
-    _registraEnvio(remetente.jogadorId, "pres:" + presenteId);
-    const p = presenca[remetente.jogadorId] || remetente;
-    const msg = {
-      id: "m" + (++seq), jogadorId: remetente.jogadorId, apelido: p.apelido,
-      avatarTipo: p.avatarTipo, avatarId: p.avatarId, avatarVer: p.avatarVer, molduraId: p.molduraId,
-      nivel: p.nivel, cla: p.cla, vip: p.vip,
-      presente: { id: pr.id, emoji: pr.emoji, nome: pr.nome, custo: pr.custo, de: p.apelido, para: alvoApelido, paraId: alvoId },
-      ts: agora(), reacoes: {},
-    };
-    feed.push(msg); while (feed.length > MAX_FEED) feed.shift();
-    return { ok: true, msg, custo: pr.custo };
-  }
-
-  function reagir(jid, messageId, reacaoId) {
-    if (!REACAO_IDS.has(reacaoId)) return { erro: "reação inválida" };
-    const msg = feed.find((m) => m.id === messageId);
-    if (!msg) return { erro: "mensagem não encontrada" };
-    const r = msg.reacoes[reacaoId] || (msg.reacoes[reacaoId] = new Set());
-    if (r.has(jid)) r.delete(jid); else r.add(jid); // alterna (spec: 1 por usuário/mensagem/tipo)
-    return { ok: true, messageId, contagens: _contarReacoes(msg) };
-  }
-  function _contarReacoes(msg) {
-    const out = {}; for (const k in msg.reacoes) if (msg.reacoes[k].size) out[k] = msg.reacoes[k].size; return out;
-  }
-
-  function estado(paraJid) { // o que o cliente precisa ao entrar
-    return {
-      frases: FRASES, reacoes: REACOES, emojis: emojisCatalogo(), presentes: PRESENTES,
-      online: online(paraJid),
-      feed: feed.filter((m) => !paraJid || !_bloqueado(paraJid, m.jogadorId))
-        .map((m) => Object.assign({}, m, { reacoes: _contarReacoes(m) })),
-    };
-  }
-
-  // ===== INTERAÇÕES: "Estou esperando você" e "Convidar pra jogar" =====
-  // Objetos com estado (spec 4.2/4.3). Expiração preguiçosa (sem timers). Cooldown por par.
-  const interacoes = {}; // id -> {id, tipo, de, para, tipoConvite?, codigo?, status, expiraEm}
-  const cooldown = {};   // "de|para|tipo" -> ts liberado
-  let iseq = 0;
-  const EXPIRA_MS = 5 * 60 * 1000;      // convite/espera expira em 5 min (spec)
-  const COOLDOWN_ESPERA = 2 * 60 * 1000; // "estou esperando": 1 por par a cada 2 min
-
-  function _vivo(it) { return it && it.status === "pending" && agora() < it.expiraEm; }
-  function interacao(id) { const it = interacoes[id]; if (it && it.status === "pending" && agora() >= it.expiraEm) it.status = "expired"; return it; }
-
-  function criarEspera(de, para) {
-    if (!estaNoSaguao(de) || de === para) return { erro: "ação inválida" };
-    if (_bloqueado(de, para)) return { erro: "indisponível" };
-    const k = de + "|" + para + "|espera";
-    if (cooldown[k] && agora() < cooldown[k]) return { erro: "Você já chamou essa pessoa há pouco — aguarde um instante." };
-    cooldown[k] = agora() + COOLDOWN_ESPERA;
-    const it = { id: "i" + (++iseq), tipo: "espera", de, para, status: "pending", expiraEm: agora() + EXPIRA_MS };
-    interacoes[it.id] = it;
-    return { ok: true, interacao: it };
-  }
-  // respostas: "indo" | "convide" | "agora_nao"
-  function responderEspera(id, quem, resposta) {
-    const it = interacao(id);
-    if (!_vivo(it)) return { erro: "esse convite expirou" };
-    if (it.para !== quem || it.tipo !== "espera") return { erro: "não é pra você" };
-    it.status = "answered"; it.resposta = resposta;
-    return { ok: true, interacao: it };
-  }
-
-  function criarConvite(de, para, tipoConvite, codigo) {
-    if (!estaNoSaguao(de) || de === para) return { erro: "ação inválida" };
-    if (_bloqueado(de, para)) return { erro: "indisponível" };
-    const k = de + "|" + para + "|convite";
-    if (cooldown[k] && agora() < cooldown[k]) return { erro: "Você já convidou essa pessoa há pouco." };
-    cooldown[k] = agora() + 30000; // 30s entre convites pro mesmo par
-    const it = { id: "i" + (++iseq), tipo: "convite", de, para, tipoConvite: tipoConvite || "dupla", codigo, status: "pending", expiraEm: agora() + EXPIRA_MS };
-    interacoes[it.id] = it;
-    return { ok: true, interacao: it };
-  }
-  function responderConvite(id, quem, aceitar) {
-    const it = interacao(id);
-    if (!_vivo(it)) return { erro: "esse convite expirou" };
-    if (it.para !== quem || it.tipo !== "convite") return { erro: "não é pra você" };
-    it.status = aceitar ? "accepted" : "declined";
-    return { ok: true, aceitou: !!aceitar, interacao: it };
-  }
-
-  return { frases, reacoesCatalogo, emojisCatalogo, presentesCatalogo, entrar, sair, definirStatus, definirModalidade, definirMesa, estaNoSaguao, online, enviarFrase, enviarEmote, enviarPresente, reagir, bloquear, desbloquear, estado, presenca, _bloqueado, criarEspera, responderEspera, criarConvite, responderConvite, interacao };
-}
-
-module.exports = { criarSaguao, FRASES, REACOES, EMOJIS_PUBLICO, EMOJIS_VIP, PRESENTES };
 
   };
 
@@ -3657,7 +3296,6 @@ module.exports = { criarSaguao, FRASES, REACOES, EMOJIS_PUBLICO, EMOJIS_VIP, PRE
 //   servidor.desconectar(id)               // cliente caiu/saiu
 
 const { criarGerenciador } = require("./salas");
-const { criarSaguao } = require("./saguao");
 
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
@@ -3666,23 +3304,12 @@ function criarServidor(opts = {}) {
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
   const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
-  // REVANCHE ("Vamos outra?"): janela de 3 min pra todo mundo topar (dá tempo do
-  // anúncio rodar — pedido Sônia). Injetável pra teste (revancheMs curto + timers fake).
-  const revancheMs = opts.revancheMs || 180000;
-  const agendarTempo = opts.agendarTempo || ((fn, ms) => setTimeout(fn, ms));
-  const cancelarTempo = opts.cancelarTempo || ((h) => clearTimeout(h));
-  // DOIS SALÕES: Chat Público (todos) e Salão VIP (só assinantes). Cada um tem sua
-  // própria presença/feed. A conexão guarda em qual sala está (c.sgSala).
-  const saguaoPublico = opts.saguao || criarSaguao(); // Chat Público
-  const saguaoVip = opts.saguaoVip || criarSaguao();  // Salão VIP
-  const saguao = saguaoPublico;                        // compat p/ referências antigas
-  function salaSaguao(c) { return c && c.sgSala === "vip" ? saguaoVip : saguaoPublico; }
-  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId, sgSala }
+  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
   let seq = 0;
 
   function conectar(enviar) {
     const id = "c" + ++seq;
-    conexoes[id] = { id, enviar, codigo: null, assento: null, jogadorId: null, sgSala: null };
+    conexoes[id] = { id, enviar, codigo: null, assento: null, jogadorId: null };
     return id;
   }
 
@@ -3691,54 +3318,11 @@ function criarServidor(opts = {}) {
     if (!c) return;
     if (c.codigo != null && c.assento != null) {
       const cod = c.codigo;
-      const sala = ger.salas[cod];
-      const apel = (sala && sala.jogo && sala.jogo.assentos[c.assento]) ? sala.jogo.assentos[c.assento].apelido : "Um jogador";
-      const tinhaRevanche = !!(sala && sala.revanche && sala.revanche.ativa);
       ger.sair({ codigo: cod, assento: c.assento });
       c.codigo = null; c.assento = null;
-      // caiu durante a revanche = a mesa não continua (os outros "vão atrás")
-      if (tinhaRevanche) cancelarRevanche(cod, "saiu", apel);
-      else broadcastSala(cod);
-      // NÃO apaga a mesa numa queda de conexão (temporária): a pessoa pode voltar e
-      // reassumir a cadeira. Apagar aqui separava os jogadores (mesas duplicadas).
-      atualizarSaguaoMesas(); // saiu da mesa (desconexão) → atualiza o saguão
-    }
-    // saiu do saguão ao cair (presença sempre reflete quem está conectado). Só
-    // remove a presença se NÃO houver outra aba/conexão do mesmo jogador na mesma sala.
-    if (c.jogadorId && c.sgSala) {
-      const s = c.sgSala; const sg = salaSaguao(c);
-      let outraAba = false;
-      for (const k in conexoes) { if (k !== id && conexoes[k].jogadorId === c.jogadorId && conexoes[k].sgSala === s) { outraAba = true; break; } }
-      if (!outraAba && sg.estaNoSaguao(c.jogadorId)) sg.sair(c.jogadorId);
-      c.sgSala = null; broadcastSaguao({ tipo: "saguaoPresenca" }, true, s);
+      broadcastSala(cod);
     }
     delete conexoes[id];
-  }
-
-  // libera o assento da mesa atual da conexão (evita "assento fantasma" quando o
-  // jogador troca de mesa sem sair da anterior — a mesa velha não trava mais).
-  function liberarAssentoAtual(c) {
-    if (!c || c.codigo == null) return;
-    const cod = c.codigo;
-    const salaAnt = ger.salas[cod];
-    const apel = (salaAnt && salaAnt.jogo && salaAnt.jogo.assentos[c.assento]) ? salaAnt.jogo.assentos[c.assento].apelido : "Um jogador";
-    const tinhaRevanche = !!(salaAnt && salaAnt.revanche && salaAnt.revanche.ativa);
-    try { ger.sair({ codigo: cod, assento: c.assento }); } catch (_) {}
-    c.codigo = null; c.assento = null;
-    // saiu no meio da revanche → a mesa não continua pros outros (mesmo tratamento da queda)
-    if (tinhaRevanche) { try { cancelarRevanche(cod, "saiu", apel); } catch (_) {} }
-    else { try { broadcastSala(cod); } catch (_) {} }
-    try { atualizarSaguaoMesas(); } catch (_) {}
-  }
-
-  // remove a sala da memória quando NENHUMA conexão a referencia mais. Evita o
-  // vazamento (mesas abandonadas acumulando) e a mesa-fantasma do lobby.
-  function removerSalaSeSemConexao(cod) {
-    if (cod == null || !ger.salas[cod]) return;
-    for (const k in conexoes) { if (conexoes[k].codigo === cod) return; } // ainda tem gente conectada
-    const sala = ger.salas[cod];
-    if (sala && sala.revanche && sala.revanche.timer != null) { try { cancelarTempo(sala.revanche.timer); } catch (_) {} }
-    delete ger.salas[cod];
   }
 
   function enviarPara(id, msg) {
@@ -3746,114 +3330,40 @@ function criarServidor(opts = {}) {
     if (c && typeof c.enviar === "function") c.enviar(msg);
   }
 
-  // manda uma msg pra TODAS as conexões de um jogador (por jogadorId) — usado pra
-  // avisar amigos online (pedido chegou / amizade aceita etc.)
-  function enviarParaJogador(jid, msg) {
-    if (!jid) return;
-    for (const k in conexoes) { if (conexoes[k].jogadorId === jid) enviarPara(k, msg); }
-  }
-  // conjunto de jogadorIds online agora (pra marcar amigos online)
-  function jogadoresOnline() {
-    const s = new Set();
-    for (const k in conexoes) { if (conexoes[k].jogadorId) s.add(conexoes[k].jogadorId); }
-    return s;
-  }
-
-  // rede de proteção: NENHUMA mensagem malformada pode derrubar o processo. Qualquer
-  // exceção vira um "erro" pro cliente e a mesa/servidor seguem vivos (todas as outras
-  // mesas continuam). Foi o bug crítico #1 da auditoria de 24/jul.
   function processar(id, msg) {
-    try { return _processarInterno(id, msg); }
-    catch (e) {
-      try { console.error("[processar] falhou em", (msg && msg.tipo), "-", (e && e.message) || e); } catch (_) {}
-      try { enviarPara(id, { tipo: "erro", motivo: "erro interno — a jogada foi ignorada" }); } catch (_) {}
-    }
-  }
-  function _processarInterno(id, msg) {
     const c = conexoes[id];
     if (!c) return;
     if (!msg || !msg.tipo) return enviarPara(id, { tipo: "erro", motivo: "mensagem sem tipo" });
-
-    // trava anti-DoS: um socket não pode criar um monte de contas "fantasma" (jogadorId
-    // forjado, cada uma persiste e reescreve o disco). Cliente legítimo usa 1 id por
-    // sessão; 30 identidades NOVAS na mesma conexão = abuso → recusa criar mais.
-    if (msg.jogadorId && contas && !contas.obter(msg.jogadorId)) {
-      c._novasIdent = (c._novasIdent || 0) + 1;
-      if (c._novasIdent > 30) return enviarPara(id, { tipo: "erro", motivo: "muitas identidades novas nesta sessão" });
-    }
 
     switch (msg.tipo) {
       case "criarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        liberarAssentoAtual(c);
-        // MESA PRIVADA: o dono paga uma taxa pra abrir (recurso VIP). Cobra ANTES de
-        // criar e RECUSA se não tiver saldo. Se a criação falhar depois, devolve.
-        const custoPriv = (msg.privada && msg.custo) ? Math.max(0, Math.round(msg.custo)) : 0;
-        if (custoPriv > 0) {
-          if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login pra abrir mesa privada" });
-          const conta = contas.obter(c.jogadorId);
-          const saldo = (conta && conta.moedas) || 0;
-          if (saldo < custoPriv) return enviarPara(id, { tipo: "saldoInsuficiente", motivo: "Você tem 🪙 " + saldo + " — abrir uma mesa privada custa 🪙 " + custoPriv + ".", saldo: saldo, custo: custoPriv });
-          contas.ajustarMoedas(c.jogadorId, -custoPriv);
-        }
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta, privada: !!msg.privada, codigo: msg.codigo || null });
-        if (r.erro) {
-          if (custoPriv > 0 && contas && c.jogadorId) contas.ajustarMoedas(c.jogadorId, custoPriv); // devolve a taxa
-          return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        }
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento, privada: !!custoPriv, custoPago: custoPriv });
+        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
         return broadcastSala(r.codigo);
       }
       case "entrarMesa": {
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        liberarAssentoAtual(c);
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, assento: Number.isInteger(msg.assento) ? msg.assento : undefined });
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
-        broadcastSala(c.codigo); return atualizarSaguaoMesas();
-      }
-      case "entrarPublica": {
-        // MATCHMAKING público: junta numa mesa pública aberta ou cria uma. NUNCA cai
-        // numa mesa privada (corrige o bug do público entrando na privada).
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        liberarAssentoAtual(c);
-        const r = ger.entrarPublica({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        c.codigo = r.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento, publica: true });
-        broadcastSala(r.codigo); return atualizarSaguaoMesas();
-      }
-      case "divulgarMesa": { // anfitrião "chama a galera pro salão" (ou tira)
-        if (!c.jogadorId || !c.codigo) return;
-        const salaDiv = ger.salas[c.codigo];
-        if (salaDiv && salaDiv.criadorAssento != null && c.assento !== salaDiv.criadorAssento) return enviarPara(id, { tipo: "erro", motivo: "só o anfitrião divulga a mesa" });
-        const apel = perfilSaguao(c.jogadorId, msg.apelido).apelido;
-        ger.divulgar(c.codigo, c.jogadorId, apel, !!msg.divulgar);
-        enviarPara(id, { tipo: "mesaDivulgada", divulgada: !!msg.divulgar, codigo: c.codigo });
-        return atualizarSaguaoMesas();
+        return broadcastSala(c.codigo);
       }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
         const jid = msg.jogadorId || c.jogadorId;
-        if (jid) c.jogadorId = jid; // associa a conexão ao jogador (pra ficar "online" p/ amigos)
         if (!contas || !jid) return enviarPara(id, { tipo: "perfil", conta: null });
         const conta = contas.obterOuCriar(jid, msg.apelido);
         return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
       }
       case "ranking": {
-        if (!contas) return enviarPara(id, { tipo: "ranking", aba: msg.aba || null, lista: [] });
-        let ids = null;
-        if (msg.aba === "amigos") { // aba Amigos: só eu + meus amigos
-          const jid = msg.jogadorId || c.jogadorId;
-          if (jid) ids = new Set([jid].concat(contas.amigosIds(jid)));
-          else ids = new Set(); // sem login → lista vazia
-        }
-        return enviarPara(id, { tipo: "ranking", aba: msg.aba || null, lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio, ids: ids }) });
+        if (!contas) return enviarPara(id, { tipo: "ranking", lista: [] });
+        return enviarPara(id, { tipo: "ranking", lista: contas.ranking({ limite: msg.limite || 50, criterio: msg.criterio }) });
       }
       case "definirAvatar": {
         // foto própria (upload), avatar da galeria, ou remover (voltar ao padrão)
@@ -3871,89 +3381,6 @@ function criarServidor(opts = {}) {
       case "denunciarAvatar": {
         if (!contas || !msg.alvo) return;
         return enviarPara(id, Object.assign({ tipo: "denuncia" }, contas.denunciarAvatar(msg.alvo)));
-      }
-      case "definirMascote": {
-        // mascote da vitrine: só galeria (item VIP pronto) ou remover (desequipar)
-        const jid = msg.jogadorId || c.jogadorId;
-        if (!contas || !jid) return enviarPara(id, { tipo: "mascote", conta: null });
-        contas.obterOuCriar(jid, msg.apelido);
-        let r;
-        if (msg.galeria != null) r = contas.definirMascoteGaleria(jid, msg.galeria);
-        else if (msg.remover) r = contas.removerMascote(jid);
-        else r = { erro: "mascote: informe galeria ou remover" };
-        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        return enviarPara(id, { tipo: "mascote", conta: r });
-      }
-      case "definirMoldura": {
-        // moldura da vitrine: galeria (item VIP) ou remover (volta pro padrão)
-        const jid = msg.jogadorId || c.jogadorId;
-        if (!contas || !jid) return enviarPara(id, { tipo: "moldura", conta: null });
-        contas.obterOuCriar(jid, msg.apelido);
-        let r;
-        if (msg.galeria != null) r = contas.definirMolduraGaleria(jid, msg.galeria);
-        else if (msg.remover) r = contas.removerMoldura(jid);
-        else r = { erro: "moldura: informe galeria ou remover" };
-        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        return enviarPara(id, { tipo: "moldura", conta: r });
-      }
-      case "definirTitulo": {
-        // título da vitrine (placa de nome): galeria ou remover (desequipar)
-        const jid = msg.jogadorId || c.jogadorId;
-        if (!contas || !jid) return enviarPara(id, { tipo: "titulo", conta: null });
-        contas.obterOuCriar(jid, msg.apelido);
-        let r;
-        if (msg.galeria != null) r = contas.definirTituloGaleria(jid, msg.galeria);
-        else if (msg.remover) r = contas.removerTitulo(jid);
-        else r = { erro: "titulo: informe galeria ou remover" };
-        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        return enviarPara(id, { tipo: "titulo", conta: r });
-      }
-      case "definirTratamento": {
-        // como o jogador quer ser chamado (rei/rainha/neutro) nos títulos gendrados
-        const jid = msg.jogadorId || c.jogadorId;
-        if (!contas || !jid) return enviarPara(id, { tipo: "tratamento", conta: null });
-        contas.obterOuCriar(jid, msg.apelido);
-        const r = contas.definirTratamento(jid, msg.valor);
-        if (r && r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        return enviarPara(id, { tipo: "tratamento", conta: r });
-      }
-      // ===== AMIGOS =====
-      case "buscarJogador": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "resultadoBusca", lista: [] });
-        contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const lista = contas.buscarPorApelido(msg.termo, c.jogadorId, 20);
-        const on = jogadoresOnline();
-        lista.forEach((a) => { a.online = on.has(a.id); });
-        return enviarPara(id, { tipo: "resultadoBusca", lista });
-      }
-      case "enviarPedidoAmizade": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login pra adicionar amigos" });
-        contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = contas.enviarPedido(c.jogadorId, msg.alvo);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        if (r.aceitou) enviarPara(id, { tipo: "pedidoAmizadeRespondido", aceitou: true, amigoApelido: r.amigoApelido });
-        else enviarPara(id, { tipo: "pedidoAmizadeEnviado", paraApelido: r.paraApelido });
-        enviarPara(id, { tipo: "amigosAtualizar" });        // atualiza a minha própria lista
-        enviarParaJogador(msg.alvo, { tipo: "amigosAtualizar" }); // e a do outro, se online
-        return;
-      }
-      case "responderPedidoAmizade": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "erro", motivo: "faça login" });
-        const r = contas.responderPedido(c.jogadorId, msg.deId, msg.aceitar);
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
-        enviarPara(id, { tipo: "pedidoAmizadeRespondido", aceitou: r.aceitou, amigoApelido: r.amigoApelido });
-        enviarPara(id, { tipo: "amigosAtualizar" });
-        enviarParaJogador(msg.deId, { tipo: "amigosAtualizar" });
-        return;
-      }
-      case "listarAmigos": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (!contas || !c.jogadorId) return enviarPara(id, { tipo: "amigos", meuCodigo: null, amigos: [], pedidosRecebidos: [], pedidosEnviados: [] });
-        contas.obterOuCriar(c.jogadorId, msg.apelido);
-        return enviarPara(id, Object.assign({ tipo: "amigos" }, contas.estadoAmigos(c.jogadorId, jogadoresOnline())));
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
@@ -3980,200 +3407,28 @@ function criarServidor(opts = {}) {
         // alguém dorme com o celular (pedido Sônia). Só marca o tipo e destrava o ritmo.
         if (c.codigo == null) return;
         const salaB = ger.salas[c.codigo];
-        // só age se o assento é HUMANO agora (idempotente: evita re-disparar o ritmo à toa)
-        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento] && salaB.jogo.assentos[c.assento].tipo === "humano") {
+        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento]) {
           salaB.jogo.assentos[c.assento].tipo = "bot";
-          return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
         }
-        return;
+        return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
       }
       case "afkVoltar": {
         // o jogador voltou: o assento volta a ser HUMANO. O servidor para na vez dele
         // (vezEhBot=false) e espera — ele reassume no próximo turno dele.
         if (c.codigo == null) return;
         const salaV = ger.salas[c.codigo];
-        // só reassume se o assento está como BOT (não pode "reclamar" um assento já humano)
-        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento] && salaV.jogo.assentos[c.assento].tipo === "bot") {
+        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento]) {
           salaV.jogo.assentos[c.assento].tipo = "humano";
-          return broadcastSala(c.codigo);
         }
-        return;
+        return broadcastSala(c.codigo);
       }
       case "sair": {
         if (c.codigo != null) {
           const cod = c.codigo;
-          const salaS = ger.salas[cod];
-          const tinhaRev = !!(salaS && salaS.revanche && salaS.revanche.ativa);
-          const apelS = (salaS && salaS.jogo && salaS.jogo.assentos[c.assento]) ? salaS.jogo.assentos[c.assento].apelido : "Um jogador";
           ger.sair({ codigo: cod, assento: c.assento });
           c.codigo = null; c.assento = null;
-          if (tinhaRev) cancelarRevanche(cod, "saiu", apelS);
-          else broadcastSala(cod);
-          atualizarSaguaoMesas(); // abriu vaga / mesa mudou → atualiza o saguão
+          broadcastSala(cod);
         }
-        return;
-      }
-      // ===== REVANCHE ("Vamos outra?") =====
-      case "revancheVoto": {
-        // o jogador topou jogar de novo. Marca o voto do assento dele e avisa a mesa;
-        // quando os 4 assentos toparem, redistribui uma partida nova na mesma mesa.
-        if (c.codigo == null) return;
-        const sala = ger.salas[c.codigo];
-        if (!sala || !sala.revanche || !sala.revanche.ativa) return;
-        sala.revanche.votos[c.assento] = true;
-        broadcastRevanche(c.codigo);
-        if ([0, 1, 2, 3].every((i) => sala.revanche.votos[i])) reiniciarRevanche(c.codigo);
-        return;
-      }
-      case "revancheSair": {
-        // o jogador não topou: sai da mesa e, com isso, a mesa não continua pra ninguém
-        // (os outros "vão atrás" — pedido Sônia).
-        if (c.codigo == null) return;
-        const cod = c.codigo;
-        const sala = ger.salas[cod];
-        const apel = (sala && sala.jogo && sala.jogo.assentos[c.assento]) ? sala.jogo.assentos[c.assento].apelido : "Um jogador";
-        // tira o jogador da mesa ANTES de avisar — assim quem saiu não recebe o
-        // aviso "fulano saiu" (foi ele mesmo; no cliente já vai pro menu na hora).
-        ger.sair({ codigo: cod, assento: c.assento });
-        c.codigo = null; c.assento = null;
-        cancelarRevanche(cod, "saiu", apel);
-        return;
-      }
-      // ===== SAGUÃO PÚBLICO (chat social) =====
-      case "entrarSaguao": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (!c.jogadorId) return enviarPara(id, { tipo: "saguaoErro", motivo: "faça login pra entrar no saguão" });
-        const querVip = msg.sala === "vip";
-        const contaSg = contas ? contas.obter(c.jogadorId) : null;
-        // SALÃO VIP: só assinantes (conta.vip). Público é aberto a todos.
-        if (querVip && !(contaSg && contaSg.vip)) return enviarPara(id, { tipo: "saguaoErro", motivo: "O Salão VIP é exclusivo dos assinantes 👑", sala: "vip", vipBloqueado: true });
-        const novaSala = querVip ? "vip" : "publico";
-        // se estava noutra sala, sai dela primeiro (e avisa a sala antiga)
-        if (c.sgSala && c.sgSala !== novaSala) {
-          const antiga = salaSaguao(c);
-          if (antiga.estaNoSaguao(c.jogadorId)) antiga.sair(c.jogadorId);
-          const salaAntiga = c.sgSala; c.sgSala = null;
-          broadcastSaguao({ tipo: "saguaoPresenca" }, true, salaAntiga);
-        }
-        c.sgSala = novaSala;
-        const sg = salaSaguao(c);
-        sg.entrar(perfilSaguao(c.jogadorId, msg.apelido, novaSala));
-        if (msg.modalidade) sg.definirModalidade(c.jogadorId, msg.modalidade);
-        const est = sg.estado(c.jogadorId);
-        est.online = listaSaguao(sg, c.jogadorId, novaSala); // inclui mesas divulgadas (público)
-        enviarPara(id, Object.assign({ tipo: "saguaoEstado", sala: novaSala }, est));
-        return broadcastSaguao({ tipo: "saguaoPresenca", online: null }, true, novaSala);
-      }
-      case "sairSaguao": {
-        if (c.jogadorId && c.sgSala) { const sg = salaSaguao(c); sg.sair(c.jogadorId); const s = c.sgSala; c.sgSala = null; broadcastSaguao({ tipo: "saguaoPresenca" }, true, s); }
-        return;
-      }
-      case "saguaoStatus": {
-        if (!c.jogadorId) return;
-        salaSaguao(c).definirStatus(c.jogadorId, msg.status);
-        return broadcastSaguao({ tipo: "saguaoPresenca" }, true, c.sgSala);
-      }
-      case "saguaoFrase": {
-        if (!c.jogadorId) return;
-        const r = salaSaguao(c).enviarFrase(perfilSaguao(c.jogadorId, msg.apelido, c.sgSala), msg.phraseId, msg.alvoId);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro, esperaMs: r.esperaMs || 0 });
-        return broadcastSaguao({ tipo: "saguaoMensagem", msg: Object.assign({}, r.msg, { reacoes: {} }) }, false, c.sgSala);
-      }
-      case "saguaoReacao": {
-        if (!c.jogadorId) return;
-        const r = salaSaguao(c).reagir(c.jogadorId, msg.messageId, msg.reacaoId);
-        if (r.erro) return;
-        return broadcastSaguao({ tipo: "saguaoReacaoAtualizar", messageId: r.messageId, contagens: r.contagens }, false, c.sgSala);
-      }
-      case "saguaoEmote": { // CARINHA (emoji) → vai pro feed como figurinha
-        if (!c.jogadorId) return;
-        const r = salaSaguao(c).enviarEmote(perfilSaguao(c.jogadorId, msg.apelido, c.sgSala), msg.emojiId);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro, esperaMs: r.esperaMs || 0 });
-        return broadcastSaguao({ tipo: "saguaoMensagem", msg: Object.assign({}, r.msg, { reacoes: {} }) }, false, c.sgSala);
-      }
-      case "saguaoPresente": { // 🎁 presentear (só no Salão VIP) — quem envia paga em moedas
-        if (!c.jogadorId || !msg.alvo) return;
-        if (c.sgSala !== "vip") return enviarPara(id, { tipo: "saguaoErro", motivo: "Presentes são exclusivos do Salão VIP 👑" });
-        const sg = salaSaguao(c);
-        if (!sg.estaNoSaguao(msg.alvo)) return enviarPara(id, { tipo: "saguaoErro", motivo: "essa pessoa saiu do salão." });
-        const pr = sg.presentesCatalogo().find((x) => x.id === msg.presenteId);
-        if (!pr) return enviarPara(id, { tipo: "saguaoErro", motivo: "presente inválido" });
-        if (!contas) return;
-        const conta = contas.obter(c.jogadorId);
-        const saldo = (conta && conta.moedas) || 0;
-        if (saldo < pr.custo) return enviarPara(id, { tipo: "saldoInsuficiente", motivo: "Você tem 🪙 " + saldo + " — esse presente custa 🪙 " + pr.custo + ".", saldo: saldo, custo: pr.custo });
-        contas.ajustarMoedas(c.jogadorId, -pr.custo);
-        const alvoApel = perfilSaguao(msg.alvo, null, "vip").apelido;
-        const r = sg.enviarPresente(perfilSaguao(c.jogadorId, msg.apelido, "vip"), msg.alvo, alvoApel, msg.presenteId);
-        if (r.erro) { contas.ajustarMoedas(c.jogadorId, pr.custo); return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro, esperaMs: r.esperaMs || 0 }); }
-        broadcastSaguao({ tipo: "saguaoMensagem", msg: Object.assign({}, r.msg, { reacoes: {} }) }, false, "vip");
-        enviarPara(id, { tipo: "saguaoPresenteEnviado", alvoApelido: alvoApel, presente: r.msg.presente, saldo: saldo - pr.custo });
-        enviarParaJogador(msg.alvo, { tipo: "saguaoPresenteRecebido", de: r.msg.apelido, presente: r.msg.presente });
-        return;
-      }
-      case "saguaoModalidade": { // preferência de jogo (Aberto/Fechado/Sbtl)
-        if (!c.jogadorId) return;
-        salaSaguao(c).definirModalidade(c.jogadorId, msg.modalidade);
-        return broadcastSaguao({ tipo: "saguaoPresenca" }, true, c.sgSala);
-      }
-      case "saguaoMesa": { // "estou na mesa X" (ou saí: codigo null) → presença + botão Entrar
-        if (!c.jogadorId) return;
-        salaSaguao(c).definirMesa(c.jogadorId, msg.codigo || null, msg.vaga !== false);
-        return broadcastSaguao({ tipo: "saguaoPresenca" }, true, c.sgSala);
-      }
-      case "saguaoBloquear": {
-        if (!c.jogadorId || !msg.alvo) return;
-        salaSaguao(c).bloquear(c.jogadorId, msg.alvo);
-        enviarPara(id, { tipo: "saguaoBloqueado", alvo: msg.alvo });
-        return broadcastSaguao({ tipo: "saguaoPresenca" }, true, c.sgSala);
-      }
-      // ---- "Estou esperando você" (toque leve, sem sair da mesa) ----
-      case "saguaoEspera": {
-        if (!c.jogadorId || !msg.alvo) return;
-        const sg = salaSaguao(c);
-        if (!sg.estaNoSaguao(msg.alvo)) return enviarPara(id, { tipo: "saguaoErro", motivo: "essa pessoa saiu do saguão." });
-        const r = sg.criarEspera(c.jogadorId, msg.alvo);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro });
-        enviarPara(id, { tipo: "saguaoEsperaEnviada", alvo: msg.alvo, alvoApelido: perfilSaguao(msg.alvo).apelido });
-        // avisa o alvo em TODAS as conexões dele
-        enviarParaJogador(msg.alvo, { tipo: "saguaoEsperaRecebida", id: r.interacao.id, de: c.jogadorId, deApelido: perfilSaguao(c.jogadorId, msg.apelido).apelido });
-        return;
-      }
-      case "saguaoRespostaEspera": {
-        if (!c.jogadorId || !msg.id) return;
-        const r = salaSaguao(c).responderEspera(msg.id, c.jogadorId, msg.resposta);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro });
-        // devolve pro remetente original a resposta ("indo" / "convide" / "agora_nao")
-        enviarParaJogador(r.interacao.de, { tipo: "saguaoEsperaRespondida", id: msg.id, de: c.jogadorId, deApelido: perfilSaguao(c.jogadorId).apelido, resposta: r.interacao.resposta });
-        return;
-      }
-      // ---- "Convidar pra jogar" → gera a mesa (privada, código combinado) ----
-      case "saguaoConvite": {
-        if (!c.jogadorId || !msg.alvo) return;
-        const sg = salaSaguao(c);
-        if (!sg.estaNoSaguao(msg.alvo)) return enviarPara(id, { tipo: "saguaoErro", motivo: "essa pessoa saiu do saguão." });
-        const codigo = ger.reservarCodigo(90000); // 90s até o anfitrião abrir a mesa
-        if (!codigo) return enviarPara(id, { tipo: "saguaoErro", motivo: "não consegui abrir a mesa agora, tente de novo." });
-        const tipoConvite = (msg.tipoConvite === "adversario") ? "adversario" : "dupla";
-        const r = sg.criarConvite(c.jogadorId, msg.alvo, tipoConvite, codigo);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro });
-        enviarPara(id, { tipo: "saguaoConviteEnviado", alvo: msg.alvo, alvoApelido: perfilSaguao(msg.alvo).apelido, tipoConvite });
-        enviarParaJogador(msg.alvo, { tipo: "saguaoConviteRecebido", id: r.interacao.id, de: c.jogadorId, deApelido: perfilSaguao(c.jogadorId, msg.apelido).apelido, tipoConvite });
-        return;
-      }
-      case "saguaoRespostaConvite": {
-        if (!c.jogadorId || !msg.id) return;
-        const r = salaSaguao(c).responderConvite(msg.id, c.jogadorId, !!msg.aceitar);
-        if (r.erro) return enviarPara(id, { tipo: "saguaoErro", motivo: r.erro });
-        const it = r.interacao;
-        if (!r.aceitou) {
-          enviarParaJogador(it.de, { tipo: "saguaoConviteRecusado", id: msg.id, de: c.jogadorId, deApelido: perfilSaguao(c.jogadorId).apelido });
-          return;
-        }
-        // ACEITO: os dois vão pra MESMA mesa (privada, com o código combinado). O
-        // anfitrião (quem convidou) CRIA a mesa; o convidado ENTRA por código (com retry).
-        enviarParaJogador(it.de, { tipo: "saguaoConviteVai", codigo: it.codigo, host: true, tipoConvite: it.tipoConvite, comApelido: perfilSaguao(it.para).apelido });
-        enviarParaJogador(it.para, { tipo: "saguaoConviteVai", codigo: it.codigo, host: false, tipoConvite: it.tipoConvite, comApelido: perfilSaguao(it.de).apelido });
         return;
       }
       default:
@@ -4189,18 +3444,8 @@ function criarServidor(opts = {}) {
     emitirFimSeAcabou(codigo);
     if (ger.vezEhBot(codigo)) {
       agendar(function () {
-        // o passo do bot roda num timer (fora do try/catch do processar). Se um bot
-        // lançar, a rede aqui segura: a mesa recebe um broadcast e o processo NÃO cai.
-        try {
-          ger.jogarUmBot(codigo);
-          avancarComRespiro(codigo);
-        } catch (e) {
-          try { console.error("[bot] falhou na mesa", codigo, "-", (e && e.message) || e); } catch (_) {}
-          // ANTI-TRAVA: bot que lançou no meio do turno não pode prender a vez —
-          // destrava (passa a vez) e SEGUE a mesa em vez de congelar.
-          try { ger.destravarBotPreso(codigo); } catch (_) {}
-          try { avancarComRespiro(codigo); } catch (_) {}
-        }
+        ger.jogarUmBot(codigo);
+        avancarComRespiro(codigo);
       });
     }
   }
@@ -4213,70 +3458,12 @@ function criarServidor(opts = {}) {
     if (!sala || !sala.resumoFinal || sala.fimEmitido) return;
     sala.fimEmitido = true;
     const placar = sala.jogo && sala.jogo.placar;
-    // REVANCHE: só rola se a mesa for 100% humana (nenhum robô). Abre a janela de
-    // 3 min e manda os perfis dos 4 pra tela "Vamos outra?".
-    const revanchePossivel = ger.podeRevanche(codigo);
-    if (revanchePossivel) iniciarRevanche(codigo);
-    const perfis = revanchePossivel ? ger.perfilAssentos(codigo) : null;
     for (const cid in conexoes) {
       const c = conexoes[cid];
       if (c.codigo === codigo && c.assento != null) {
-        const rev = revanchePossivel
-          ? { possivel: true, ms: revancheMs, assentos: perfis, meuAssento: c.assento }
-          : { possivel: false };
-        c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar, revanche: rev });
+        c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar });
       }
     }
-    if (revanchePossivel) broadcastRevanche(codigo);
-  }
-
-  // ---- REVANCHE: coordenação dos votos + timer de 3 min + reinício/cancelamento ----
-  function conexoesDaSala(codigo) {
-    const arr = [];
-    for (const cid in conexoes) { const c = conexoes[cid]; if (c.codigo === codigo && c.assento != null) arr.push(c); }
-    return arr;
-  }
-  function iniciarRevanche(codigo) {
-    const sala = ger.salas[codigo];
-    if (!sala || !ger.podeRevanche(codigo)) return;
-    const deadline = Date.now() + revancheMs;
-    const rev = { ativa: true, votos: {}, deadline, timer: null };
-    rev.timer = agendarTempo(function () { cancelarRevanche(codigo, "tempo"); }, revancheMs);
-    sala.revanche = rev;
-  }
-  function limparRevanche(sala) {
-    if (sala && sala.revanche) {
-      if (sala.revanche.timer != null) { try { cancelarTempo(sala.revanche.timer); } catch (e) {} }
-      sala.revanche.ativa = false;
-      sala.revanche = null;
-    }
-  }
-  function broadcastRevanche(codigo) {
-    const sala = ger.salas[codigo];
-    if (!sala || !sala.revanche || !sala.revanche.ativa) return;
-    const rev = sala.revanche;
-    const votos = [0, 1, 2, 3].map((i) => !!rev.votos[i]);
-    const restanteMs = Math.max(0, rev.deadline - Date.now());
-    for (const c of conexoesDaSala(codigo)) {
-      c.enviar({ tipo: "revancheEstado", votos, restanteMs, deadline: rev.deadline, meuAssento: c.assento });
-    }
-  }
-  function cancelarRevanche(codigo, motivo, apelidoQuemSaiu) {
-    const sala = ger.salas[codigo];
-    if (!sala || !sala.revanche || !sala.revanche.ativa) return;
-    limparRevanche(sala);
-    for (const c of conexoesDaSala(codigo)) {
-      c.enviar({ tipo: "revancheCancelada", motivo: motivo, apelido: apelidoQuemSaiu || null });
-    }
-  }
-  function reiniciarRevanche(codigo) {
-    const sala = ger.salas[codigo];
-    if (!sala) return;
-    limparRevanche(sala);
-    sala.fimEmitido = false; // a próxima partida pode emitir "fim" de novo
-    const r = ger.reiniciarMesa(codigo);
-    if (r && r.erro) return;
-    avancarComRespiro(codigo); // desenha o estado NOVO (o cliente fecha o overlay e joga)
   }
 
   /** Manda pra cada conexão da sala a SUA visão (por assento). É o "tempo real":
@@ -4291,51 +3478,7 @@ function criarServidor(opts = {}) {
     }
   }
 
-  // ---- SAGUÃO: identidade de presença (do cofre) + broadcast pros membros ----
-  function perfilSaguao(jid, apelidoFallback, sala) {
-    const conta = contas ? contas.obter(jid) : null;
-    return {
-      jogadorId: jid,
-      apelido: (conta && conta.apelido) || apelidoFallback || "Jogador",
-      avatarTipo: conta && conta.avatarTipo, avatarId: conta && conta.avatarId, avatarVer: (conta && conta.avatarVer) || 0,
-      molduraId: conta && conta.molduraId, nivel: (conta && conta.nivel) || 1, tituloId: conta && conta.tituloId,
-      cla: null,   // 🔌 CASCA: liga quando existir sistema de clãs
-      // no Salão VIP todos são VIP (sala é gated); no público, quem for assinante (conta.vip)
-      vip: sala === "vip" ? true : !!(conta && conta.vip),
-    };
-  }
-  // MESAS DIVULGADAS ("estou na minha mesa, venham") viram cartões na lista do saguão
-  // PÚBLICO — mesmo que o anfitrião esteja na mesa (outra página), não no saguão.
-  function mesasPresenca() {
-    return ger.mesasDivulgadas().map((m) => ({
-      jogadorId: "mesa:" + m.codigo, apelido: m.apelido, vip: false, cla: null, nivel: 1,
-      status: "em_partida", modalidade: m.modalidade, mesa: { codigo: m.codigo, vaga: true },
-      soEntrar: true, // cliente mostra SÓ o botão Entrar (sem menu de convite)
-    }));
-  }
-  function listaSaguao(sg, paraJid, sala) {
-    let lista = sg.online(paraJid);
-    if (sala === "publico") lista = lista.concat(mesasPresenca());
-    return lista;
-  }
-  function atualizarSaguaoMesas() { broadcastSaguao({ tipo: "saguaoPresenca" }, true, "publico"); }
-  // broadcast SÓ pra quem está na MESMA sala (público ou VIP não se misturam)
-  function broadcastSaguao(msg, presencaPorJogador, sala) {
-    const remetente = msg && msg.msg && msg.msg.jogadorId; // saguaoMensagem
-    for (const cid in conexoes) {
-      const c = conexoes[cid];
-      if (!c.jogadorId || !c.sgSala || (sala && c.sgSala !== sala)) continue;
-      const sg = salaSaguao(c);
-      if (!sg.estaNoSaguao(c.jogadorId)) continue;
-      if (presencaPorJogador) { c.enviar({ tipo: "saguaoPresenca", online: listaSaguao(sg, c.jogadorId, c.sgSala) }); continue; }
-      if (remetente && sg._bloqueado(c.jogadorId, remetente)) continue; // não entrega msg de quem foi bloqueado
-      c.enviar(msg);
-    }
-  }
-
-  // _teste: ganchos internos usados só pelos testes (forçar o fim pra exercitar a
-  // revanche sem precisar jogar uma partida inteira). Não muda o comportamento.
-  return { conectar, desconectar, processar, broadcastSala, ger, conexoes, saguao, _teste: { emitirFimSeAcabou } };
+  return { conectar, desconectar, processar, broadcastSala, ger, conexoes };
 }
 
 module.exports = { criarServidor };
@@ -4443,9 +3586,6 @@ function criarConexao(socket, handlers) {
         const hi = buf.readUInt32BE(off), lo = buf.readUInt32BE(off + 4);
         len = hi * 4294967296 + lo; off += 8;
       }
-      // trava anti-OOM: frame gigante (crafted) não aloca memória absurda. 12MB
-      // é folgado até pra upload de avatar em base64.
-      if (len > 12582912) { fechar(1009); return; }
       // cliente DEVE mascarar (RFC 6455). Se não veio máscara, encerra.
       if (!masked) { fechar(1002); return; }
       if (buf.length < off + 4 + len) return; // frame ainda incompleto
@@ -4476,11 +3616,6 @@ function criarConexao(socket, handlers) {
 }
 
 function iniciar(porta) {
-  // REDE DE SEGURANÇA FINAL: nada — nem um timer solto, nem um bug de bot — pode
-  // matar o processo e derrubar TODAS as mesas. Loga e segue vivo (servidor de jogo:
-  // manter as outras mesas no ar é melhor que cair inteiro).
-  process.on("uncaughtException", (e) => { try { console.error("[uncaughtException]", (e && e.stack) || e); } catch (_) {} });
-  process.on("unhandledRejection", (e) => { try { console.error("[unhandledRejection]", e); } catch (_) {} });
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
   const RESPIRO_MS = Number(process.env.RESPIRO_MS) || 1100; // ritmo dos bots na tela
