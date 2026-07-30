@@ -1382,7 +1382,7 @@ var PESOS_FASE = {
   desenvolvimento: { scoreDelta: 0.9, structure: 1.0, mortoProgress: 1.2, cleanCanasta: 1.5, partnerSynergy: 1.3, deadwoodAfter: 0.9, discardRisk: 1.3, wildcardWaste: 1.1, opponentThreat: 1.0 },
   final:           { scoreDelta: 1.3, structure: 0.6, mortoProgress: 0.4, cleanCanasta: 1.1, partnerSynergy: 1.4, deadwoodAfter: 1.7, discardRisk: 1.8, wildcardWaste: 0.7, opponentThreat: 1.8 },
 };
-var BOT_CONFIG_VERSION = "b2-2026-07-30";
+var BOT_CONFIG_VERSION = "b3-2026-07-30";
 
 // U(action) — secao 25
 function avaliarUtilidade(features, fase) {
@@ -2291,6 +2291,170 @@ function compraJustificada(modalidade) {
  * Joga o TURNO INTEIRO de um assento-bot, mutando `jogo` via as jogadas do
  * motor. Retorna { ok, log:[...strings], bateu?, pegouMorto?, encerrouRodada? }.
  */
+// ===========================================================================
+// FASE B3 — SO-ISMCTS "lite" (Diretriz secao 26). Busca limitada e ANYTIME sobre
+// os melhores candidatos de DESCARTE. Para cada candidato, amostra determinizacoes
+// das maos ocultas coerentes com as CRENCAS/contagens (InformationMasker, secao 7:
+// so info publica), simula alguns lances com a POLITICA HEURISTICA (rollout) e
+// pontua por uma funcao de valor. Escolhe o descarte de maior valor esperado; so
+// TROCA o descarte heuristico se o ganho superar uma margem (estabilidade/legibilidade).
+// Respeita um orcamento de tempo (deadline) e, no estouro, devolve o melhor ja
+// avaliado — nunca ultrapassa o SLO. Recursao evitada via flag `emRollout`.
+// ===========================================================================
+let emRollout = false;
+// Orcamento (secao 26). Sobrescrevivel por globalThis.__B3_OPTS (usado nos testes
+// pra acelerar; em producao usa o default, dentro do SLO de 120-250ms).
+const B3_OPTS = Object.assign(
+  { orcamentoMs: 50, maxIter: 60, depth: 2, margem: 35, topK: 5, ativo: true },
+  (typeof globalThis !== "undefined" && globalThis.__B3_OPTS) || {}
+);
+function b3Ativo(jogo) { return B3_OPTS.ativo !== false; }
+
+const NAIPES_B3 = ["copas", "ouros", "paus", "espadas"];
+const VALORES_B3 = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+let __synth = 0;
+function synthCarta(valor, naipe) {
+  return { id: "s" + (__synth++), naipe: naipe, valor: valor, eh_coringa: (valor === "2" || valor === "JOKER") };
+}
+function chaveB3(c) { return c.valor === "JOKER" ? "JOKER" : (c.valor + "|" + c.naipe); }
+// multiconjunto do baralho conforme a modalidade (Aberto nao tem Joker)
+function deckCounts(modalidade) {
+  const m = {};
+  for (const n of NAIPES_B3) for (const v of VALORES_B3) m[v + "|" + n] = 2;
+  if (modalidade !== "aberto") m["JOKER"] = 4;
+  return m;
+}
+function cloneJogoB3(j) {
+  return {
+    modalidade: j.modalidade, metaPontos: j.metaPontos, rodada: j.rodada,
+    placar: { nos: j.placar.nos, eles: j.placar.eles },
+    rodadasVulneravel: { nos: j.rodadasVulneravel.nos, eles: j.rodadasVulneravel.eles },
+    encerrada: j.encerrada,
+    maos: [j.maos[0].slice(), j.maos[1].slice(), j.maos[2].slice(), j.maos[3].slice()],
+    monte: j.monte.slice(),
+    mortos: j.mortos.map(function (m) { return m.slice(); }),
+    lixo: j.lixo.slice(),
+    jogosDupla: { nos: j.jogosDupla.nos.map(function (m) { return m.slice(); }), eles: j.jogosDupla.eles.map(function (m) { return m.slice(); }) },
+    mortoPego: { nos: j.mortoPego.nos, eles: j.mortoPego.eles },
+    abriuValido: { nos: j.abriuValido.nos, eles: j.abriuValido.eles },
+    vez: j.vez, jaComprou: j.jaComprou,
+    deveUsarTopo: j.deveUsarTopo ? { assento: j.deveUsarTopo.assento, idTopo: j.deveUsarTopo.idTopo } : null,
+    lixoCompradoNoTurno: null, turnosRodada: j.turnosRodada || 0,
+    rodadaEncerrada: j.rodadaEncerrada, duplaQueBateu: j.duplaQueBateu, pontosRodada: null,
+    // TODOS os assentos viram "bot" na simulacao — modelamos os oponentes/parceiro
+    // com a nossa propria heuristica (nao ha acesso a mao real deles).
+    assentos: j.assentos.map(function (a) { return { tipo: "bot", apelido: a.apelido, dupla: a.dupla }; }),
+  };
+}
+// Amostra uma determinizacao: mao propria fica REAL; demais maos/monte/mortos e o
+// lixo enterrado (nao-Aberto) sao preenchidos com o multiconjunto NAO-VISTO.
+function amostrarDeterminizacao(j, assento) {
+  const seen = {};
+  const add = function (c) { const k = chaveB3(c); seen[k] = (seen[k] || 0) + 1; };
+  j.maos[assento].forEach(add);
+  j.jogosDupla.nos.forEach(function (m) { m.forEach(add); });
+  j.jogosDupla.eles.forEach(function (m) { m.forEach(add); });
+  const aberto = j.modalidade === "aberto";
+  if (aberto) j.lixo.forEach(add); else if (j.lixo.length) add(j.lixo[j.lixo.length - 1]);
+  const counts = deckCounts(j.modalidade);
+  const pool = [];
+  for (const k in counts) {
+    const falta = counts[k] - (seen[k] || 0);
+    for (let i = 0; i < falta; i++) {
+      if (k === "JOKER") pool.push(synthCarta("JOKER", null));
+      else { const p = k.split("|"); pool.push(synthCarta(p[0], p[1])); }
+    }
+  }
+  // embaralha (Math.random — producao).
+  for (let i = pool.length - 1; i > 0; i--) { const r = Math.floor(Math.random() * (i + 1)); const t = pool[i]; pool[i] = pool[r]; pool[r] = t; }
+  const clone = cloneJogoB3(j);
+  let p = 0;
+  const draw = function (n) { const out = []; for (let i = 0; i < n && p < pool.length; i++) out.push(pool[p++]); return out; };
+  for (let a = 0; a < 4; a++) if (a !== assento) clone.maos[a] = draw(j.maos[a].length);
+  clone.monte = draw(j.monte.length);
+  clone.mortos = j.mortos.map(function (m) { return draw(m.length); });
+  if (!aberto && clone.lixo.length > 1) {
+    const topo = clone.lixo[clone.lixo.length - 1];
+    const enterrado = draw(clone.lixo.length - 1);
+    clone.lixo = enterrado.concat([topo]);
+  }
+  return clone;
+}
+// Valor do estado da perspectiva de `dupla` (canastras + baixadas − adversario −
+// deadwood nas nossas maos + bonus/penalidade de batida).
+function valorEstadoB3(j, dupla) {
+  const outra = dupla === "nos" ? "eles" : "nos";
+  const valDupla = function (d) {
+    let s = 0;
+    for (const m of j.jogosDupla[d]) {
+      if (m.length >= 7) { const r = validarJogo(m, { permiteTrinca: j.modalidade === "fechado" }); if (r.valido) { if (r.tipo === "de_500") s += 500; else if (r.tipo === "limpa") s += 200; else if (r.tipo === "suja") s += 100; } }
+      for (const c of m) s += J.valorCarta(c);
+    }
+    return s;
+  };
+  let s = valDupla(dupla) - valDupla(outra);
+  const seats = dupla === "nos" ? [0, 2] : [1, 3];
+  for (const a of seats) s -= j.maos[a].reduce(function (t, c) { return t + J.valorCarta(c); }, 0) * 0.5;
+  if (j.rodadaEncerrada && j.duplaQueBateu === dupla) s += 100;
+  if (j.rodadaEncerrada && j.duplaQueBateu === outra) s -= 100;
+  return s;
+}
+function gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId) {
+  const dupla = J.duplaDoAssento(assento);
+  const advs = jogo.jogosDupla[dupla === "nos" ? "eles" : "nos"];
+  const pt = ptDaMesa(jogo);
+  const mao = jogo.maos[assento];
+  const naoCuringa = mao.filter(function (c) { return !ehCuringa(c); });
+  const base = naoCuringa.length ? naoCuringa : mao;
+  const perigosa = function (c) { return advs.some(function (j) { return validarJogo(j.concat([c]), { permiteTrinca: pt }).valido; }); };
+  let pool = base.filter(function (c) { return !perigosa(c); });
+  if (!pool.length) pool = base.slice();
+  const ctxRisk = { fase: null, tamanhoLixo: jogo.lixo.length, crencas: ctxPub ? ctxPub.crencas : null, minCartasOponente: ctxPub ? ctxPub.minCartasOponente : undefined };
+  pool.sort(function (a, b) { return Bot.riscoDescarte(a, mao, advs, ctxRisk, pt) - Bot.riscoDescarte(b, mao, advs, ctxRisk, pt); });
+  const ids = [];
+  for (let i = 0; i < pool.length && ids.length < B3_OPTS.topK; i++) ids.push(pool[i].id);
+  if (preferidoId && ids.indexOf(preferidoId) < 0 && mao.some(function (c) { return c.id === preferidoId; })) ids.push(preferidoId);
+  return ids;
+}
+function simularDescarteB3(clone, assento, discardId, depth) {
+  const dupla = J.duplaDoAssento(assento);
+  const rd = J.descartar(clone, assento, discardId);
+  if (!rd || !rd.ok) return null;
+  let plies = 0;
+  while (plies < depth && !clone.encerrada && !clone.rodadaEncerrada) {
+    const a2 = clone.vez;
+    try { jogarTurnoBotCore(clone, a2); } catch (e) { try { J.passarVez(clone); } catch (_) {} }
+    plies++;
+  }
+  return valorEstadoB3(clone, dupla);
+}
+function ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoId) {
+  const cands = gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId);
+  if (cands.length <= 1) return cands[0] || preferidoId;
+  const soma = {}, cnt = {};
+  cands.forEach(function (id) { soma[id] = 0; cnt[id] = 0; });
+  const deadline = Date.now() + B3_OPTS.orcamentoMs;
+  emRollout = true;
+  try {
+    let it = 0;
+    while (it < B3_OPTS.maxIter && Date.now() < deadline) {
+      for (let ci = 0; ci < cands.length; ci++) {
+        if (Date.now() >= deadline) break;
+        const clone = amostrarDeterminizacao(jogo, assento);
+        const v = simularDescarteB3(clone, assento, cands[ci], B3_OPTS.depth);
+        if (v != null) { soma[cands[ci]] += v; cnt[cands[ci]] += 1; }
+      }
+      it++;
+    }
+  } finally { emRollout = false; }
+  let melhorId = preferidoId, melhorMed = -Infinity;
+  for (let ci = 0; ci < cands.length; ci++) { const id = cands[ci]; if (!cnt[id]) continue; const med = soma[id] / cnt[id]; if (med > melhorMed) { melhorMed = med; melhorId = id; } }
+  const medPref = (preferidoId && cnt[preferidoId]) ? soma[preferidoId] / cnt[preferidoId] : -Infinity;
+  // so troca o descarte heuristico se o ganho for claro (margem) — estabilidade.
+  if (melhorId !== preferidoId && (melhorMed - medPref) < B3_OPTS.margem) return preferidoId;
+  return melhorId;
+}
+
 function jogarTurnoBotCore(jogo, assento) {
   const log = [];
   if (jogo.encerrada) return { ok: false, erro: "a partida já terminou", log };
@@ -2475,7 +2639,16 @@ function jogarTurnoBotCore(jogo, assento) {
   }
 
   // 6) DESCARTE — fecha a vez. O motor resolve morto/batida sozinho.
-  const idDescarte = escolherDescarteLegal(jogo, assento, plano2.descarte ? plano2.descarte.id : null);
+  // FASE B3: se a busca estiver ativa e a mao permitir, ela pode escolher um
+  // descarte melhor entre os candidatos legais (nunca durante rollout).
+  let preferidoDescarteId = plano2.descarte ? plano2.descarte.id : null;
+  if (!emRollout && b3Ativo(jogo) && !(jogo.deveUsarTopo && jogo.deveUsarTopo.assento === assento) && jogo.maos[assento].length >= 2) {
+    try {
+      const alt = ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoDescarteId);
+      if (alt) preferidoDescarteId = alt;
+    } catch (e) { /* qualquer erro na busca: mantem o descarte heuristico */ }
+  }
+  const idDescarte = escolherDescarteLegal(jogo, assento, preferidoDescarteId);
   if (idDescarte == null) {
     J.passarVez(jogo);
     log.push("segurou a carta (descarte seria batida ilegal) — passou a vez");
