@@ -1382,7 +1382,7 @@ var PESOS_FASE = {
   desenvolvimento: { scoreDelta: 0.9, structure: 1.0, mortoProgress: 1.2, cleanCanasta: 1.5, partnerSynergy: 1.3, deadwoodAfter: 0.9, discardRisk: 1.3, wildcardWaste: 1.1, opponentThreat: 1.0 },
   final:           { scoreDelta: 1.3, structure: 0.6, mortoProgress: 0.4, cleanCanasta: 1.1, partnerSynergy: 1.4, deadwoodAfter: 1.7, discardRisk: 1.8, wildcardWaste: 0.7, opponentThreat: 1.8 },
 };
-var BOT_CONFIG_VERSION = "b3-2026-07-30";
+var BOT_CONFIG_VERSION = "b4-2026-07-30";
 
 // U(action) — secao 25
 function avaliarUtilidade(features, fase) {
@@ -2310,6 +2310,28 @@ const B3_OPTS = Object.assign(
 );
 function b3Ativo(jogo) { return B3_OPTS.ativo !== false; }
 
+// ===========================================================================
+// FASE B4 — NIVEIS DE DIFICULDADE + HUMANIZACAO (Diretriz secao 29/30/13).
+// A dificuldade muda SO profundidade/exploracao da busca (secao 29). NAO altera
+// distribuicao, monte, pontos, nem "erra de proposito". Lida de
+// jogo.assentos[assento].dificuldade (e .substituto). Default = avancado (mantem
+// exatamente o comportamento B3 ja testado). O SUBSTITUTO (secao 30) joga
+// previsivel/conservador: 'margem' de troca alta = quase sempre a jogada
+// heuristica legivel, protegendo o plano do parceiro humano (legibilityMargin, secao 13).
+// ===========================================================================
+const DIFICULDADES = {
+  iniciante:     { nome: "iniciante",     ismcts: false },
+  intermediario: { nome: "intermediario", ismcts: false },
+  avancado:      { nome: "avancado",      ismcts: true,  orcamentoMs: 50,  maxIter: 60,  depth: 2, margem: 35, topK: 5 },
+  expert:        { nome: "expert",        ismcts: true,  orcamentoMs: 120, maxIter: 120, depth: 3, margem: 25, topK: 6 },
+  substituto:    { nome: "substituto",    ismcts: true,  orcamentoMs: 40,  maxIter: 50,  depth: 2, margem: 55, topK: 5, substituto: true },
+};
+function perfilDoAssento(jogo, assento) {
+  const a = (jogo.assentos && jogo.assentos[assento]) || {};
+  const nome = a.substituto ? "substituto" : (a.dificuldade || "avancado");
+  return Object.assign({}, DIFICULDADES[nome] || DIFICULDADES.avancado);
+}
+
 const NAIPES_B3 = ["copas", "ouros", "paus", "espadas"];
 const VALORES_B3 = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 let __synth = 0;
@@ -2399,7 +2421,7 @@ function valorEstadoB3(j, dupla) {
   if (j.rodadaEncerrada && j.duplaQueBateu === outra) s -= 100;
   return s;
 }
-function gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId) {
+function gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId, opts) {
   const dupla = J.duplaDoAssento(assento);
   const advs = jogo.jogosDupla[dupla === "nos" ? "eles" : "nos"];
   const pt = ptDaMesa(jogo);
@@ -2412,7 +2434,8 @@ function gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId) {
   const ctxRisk = { fase: null, tamanhoLixo: jogo.lixo.length, crencas: ctxPub ? ctxPub.crencas : null, minCartasOponente: ctxPub ? ctxPub.minCartasOponente : undefined };
   pool.sort(function (a, b) { return Bot.riscoDescarte(a, mao, advs, ctxRisk, pt) - Bot.riscoDescarte(b, mao, advs, ctxRisk, pt); });
   const ids = [];
-  for (let i = 0; i < pool.length && ids.length < B3_OPTS.topK; i++) ids.push(pool[i].id);
+  const topK = (opts && opts.topK) || B3_OPTS.topK;
+  for (let i = 0; i < pool.length && ids.length < topK; i++) ids.push(pool[i].id);
   if (preferidoId && ids.indexOf(preferidoId) < 0 && mao.some(function (c) { return c.id === preferidoId; })) ids.push(preferidoId);
   return ids;
 }
@@ -2428,20 +2451,25 @@ function simularDescarteB3(clone, assento, discardId, depth) {
   }
   return valorEstadoB3(clone, dupla);
 }
-function ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoId) {
-  const cands = gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId);
+function ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoId, opts) {
+  opts = opts || B3_OPTS;
+  const orcamentoMs = opts.orcamentoMs != null ? opts.orcamentoMs : B3_OPTS.orcamentoMs;
+  const maxIter = opts.maxIter != null ? opts.maxIter : B3_OPTS.maxIter;
+  const depth = opts.depth != null ? opts.depth : B3_OPTS.depth;
+  const margem = opts.margem != null ? opts.margem : B3_OPTS.margem;
+  const cands = gerarCandidatosDescarte(jogo, assento, ctxPub, preferidoId, opts);
   if (cands.length <= 1) return cands[0] || preferidoId;
   const soma = {}, cnt = {};
   cands.forEach(function (id) { soma[id] = 0; cnt[id] = 0; });
-  const deadline = Date.now() + B3_OPTS.orcamentoMs;
+  const deadline = Date.now() + orcamentoMs;
   emRollout = true;
   try {
     let it = 0;
-    while (it < B3_OPTS.maxIter && Date.now() < deadline) {
+    while (it < maxIter && Date.now() < deadline) {
       for (let ci = 0; ci < cands.length; ci++) {
         if (Date.now() >= deadline) break;
         const clone = amostrarDeterminizacao(jogo, assento);
-        const v = simularDescarteB3(clone, assento, cands[ci], B3_OPTS.depth);
+        const v = simularDescarteB3(clone, assento, cands[ci], depth);
         if (v != null) { soma[cands[ci]] += v; cnt[cands[ci]] += 1; }
       }
       it++;
@@ -2450,8 +2478,9 @@ function ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoId) {
   let melhorId = preferidoId, melhorMed = -Infinity;
   for (let ci = 0; ci < cands.length; ci++) { const id = cands[ci]; if (!cnt[id]) continue; const med = soma[id] / cnt[id]; if (med > melhorMed) { melhorMed = med; melhorId = id; } }
   const medPref = (preferidoId && cnt[preferidoId]) ? soma[preferidoId] / cnt[preferidoId] : -Infinity;
-  // so troca o descarte heuristico se o ganho for claro (margem) — estabilidade.
-  if (melhorId !== preferidoId && (melhorMed - medPref) < B3_OPTS.margem) return preferidoId;
+  // so troca o descarte heuristico se o ganho superar a margem da dificuldade —
+  // margem alta (substituto) = jogada previsivel/conservadora (legibilityMargin, secao 13).
+  if (melhorId !== preferidoId && (melhorMed - medPref) < margem) return preferidoId;
   return melhorId;
 }
 
@@ -2642,9 +2671,11 @@ function jogarTurnoBotCore(jogo, assento) {
   // FASE B3: se a busca estiver ativa e a mao permitir, ela pode escolher um
   // descarte melhor entre os candidatos legais (nunca durante rollout).
   let preferidoDescarteId = plano2.descarte ? plano2.descarte.id : null;
-  if (!emRollout && b3Ativo(jogo) && !(jogo.deveUsarTopo && jogo.deveUsarTopo.assento === assento) && jogo.maos[assento].length >= 2) {
+  const perfil = perfilDoAssento(jogo, assento);
+  if (auditoria.telemetria) { auditoria.telemetria.dificuldade = perfil.nome; if (perfil.substituto) auditoria.telemetria.substituto = true; }
+  if (!emRollout && perfil.ismcts && b3Ativo(jogo) && !(jogo.deveUsarTopo && jogo.deveUsarTopo.assento === assento) && jogo.maos[assento].length >= 2) {
     try {
-      const alt = ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoDescarteId);
+      const alt = ismctsEscolherDescarte(jogo, assento, ctxPub, preferidoDescarteId, perfil);
       if (alt) preferidoDescarteId = alt;
     } catch (e) { /* qualquer erro na busca: mantem o descarte heuristico */ }
   }
