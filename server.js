@@ -1382,7 +1382,7 @@ var PESOS_FASE = {
   desenvolvimento: { scoreDelta: 0.9, structure: 1.0, mortoProgress: 1.2, cleanCanasta: 1.5, partnerSynergy: 1.3, deadwoodAfter: 0.9, discardRisk: 1.3, wildcardWaste: 1.1, opponentThreat: 1.0 },
   final:           { scoreDelta: 1.3, structure: 0.6, mortoProgress: 0.4, cleanCanasta: 1.1, partnerSynergy: 1.4, deadwoodAfter: 1.7, discardRisk: 1.8, wildcardWaste: 0.7, opponentThreat: 1.8 },
 };
-var BOT_CONFIG_VERSION = "b4-2026-07-30";
+var BOT_CONFIG_VERSION = "b4.2-2026-07-31";
 
 // U(action) — secao 25
 function avaliarUtilidade(features, fase) {
@@ -1419,7 +1419,7 @@ function riscoDescarte(carta, mao, jogosAdversario, ctx, permiteTrinca) {
   // B2 — pickupLikelihood por crenca (secao 12/14): prob de o proximo oponente
   // formar jogo com a carta usando cartas que ele PROVAVELMENTE tem (so publico).
   if (c.crencas && typeof c.crencas.pOponenteUsa === "function") {
-    risco += c.crencas.pOponenteUsa(carta) * 30;
+    risco += c.crencas.pOponenteUsa(carta) * 0; // B4.1: crenca v1 nao ajuda o descarte heuristico (achado na suite de 50 testes, secao 12); peso 0 ate a rede treinada da B5. Infra + telemetria preservadas.
   }
   var pileSize = typeof c.tamanhoLixo === "number" ? c.tamanhoLixo : 1;
   risco += pileSize * 1.5;
@@ -2682,6 +2682,15 @@ function jogarTurnoBotCore(jogo, assento) {
     } catch (e) { /* qualquer erro na busca: mantem o descarte heuristico */ }
   }
   const idDescarte = escolherDescarteLegal(jogo, assento, preferidoDescarteId);
+  // AUDITABILIDADE 100% (secao 35, correcao b4.2): quando o PLANO previa zerar a
+  // mao (sem descarte planejado) mas a execucao acabou descartando, os reasonCodes
+  // vinham vazios — o turno ficava sem explicacao. Aqui derivamos o motivo da carta
+  // REALMENTE descartada, avaliando-a com a mesma regra do descarte seguro.
+  // Achado pela suite de testes: 11 turnos em 4122 (0,27%) sem motivo.
+  if (idDescarte != null && (!auditoria.reasons || !auditoria.reasons.length)) {
+    const _c = jogo.maos[assento].find((c) => c.id === idDescarte);
+    if (_c) auditoria.reasons = motivosDoDescarteReal(jogo, assento, _c);
+  }
   if (idDescarte == null) {
     J.passarVez(jogo);
     log.push("segurou a carta (descarte seria batida ilegal) — passou a vez");
@@ -2838,7 +2847,20 @@ function escolherDescarteLegal(jogo, assento, preferidoId) {
     if (!podeZerar) return null;
   }
   if (preferidoId && mao.some((c) => c.id === preferidoId)) return preferidoId;
-  return mao[mao.length - 1].id;
+  // FALLBACK SEGURO (B4.1): sem sugestão do cérebro, NÃO solta a última carta à toa.
+  // Escolhe a mais segura: não-curinga, que não estenda jogo público do adversário,
+  // de menor valor. Evita descarte inseguro/curinga em turnos de borda (achado na
+  // suíte de 50 testes — antes o fallback era mao[último], que às vezes entregava).
+  const _dupla = J.duplaDoAssento(assento);
+  const _advs = jogo.jogosDupla[_dupla === "nos" ? "eles" : "nos"];
+  const _pt = ptDaMesa(jogo);
+  const _perigosa = (c) => _advs.some((j) => validarJogo(j.concat([c]), { permiteTrinca: _pt }).valido);
+  const _naoCuringa = mao.filter((c) => !ehCuringa(c));
+  const _base = _naoCuringa.length ? _naoCuringa : mao;
+  const _seguras = _base.filter((c) => !_perigosa(c));
+  const _pool = (_seguras.length ? _seguras : _base).slice();
+  _pool.sort((a, b) => J.valorCarta(a) - J.valorCarta(b));
+  return _pool[0].id;
 }
 
 // ===========================================================================
@@ -2877,6 +2899,21 @@ function escolherDescarteSeguroFallback(jogo, assento) {
   const pool = (seguras.length ? seguras : base).slice();
   pool.sort((a, b) => J.valorCarta(a) - J.valorCarta(b));
   return pool[0].id;
+}
+
+/** Motivos (reasonCodes) da carta REALMENTE descartada — usado quando o plano nao
+ *  gerou motivo (ex.: plano previa zerar a mao). Avalia a carta com a mesma regra
+ *  do descarte seguro: se ela NAO serve aos jogos publicos do adversario, o bot
+ *  evitou presentear (avoidDiscardGift); em todo caso, reduziu peso morto. */
+function motivosDoDescarteReal(jogo, assento, carta) {
+  const dupla = J.duplaDoAssento(assento);
+  const advs = jogo.jogosDupla[dupla === "nos" ? "eles" : "nos"] || [];
+  const pt = ptDaMesa(jogo);
+  const serveAoAdversario = advs.some((j) => validarJogo(j.concat([carta]), { permiteTrinca: pt }).valido);
+  const out = [];
+  if (!serveAoAdversario) out.push("avoidDiscardGift");
+  out.push("reduceDeadwood");
+  return out;
 }
 
 function safeFallbackTurn(jogo, assento, motivo) {
