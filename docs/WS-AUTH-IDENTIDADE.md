@@ -58,9 +58,13 @@ Depois desta mudança vale a afirmação:
                      │                    │
               AUTENTICANDO      CONECTADO_NAO_AUTENTICADO
                      │                    │
-                     │            {tipo:"auth", token}
+                     │       {tipo:"auth", token, protocolo}
                      │                    │
                      └────────┬───────────┘
+                              │
+                     protocolo >= 2?  ──não──> ATUALIZACAO_OBRIGATORIA
+                              │                 + conexão fechada
+                             sim
                               │
                     verificação criptográfica
                      │                    │
@@ -70,6 +74,15 @@ Depois desta mudança vale a afirmação:
           uid = payload.sub       + conexão fechada
        jogadorId = jogadorIdDoUid(uid)
        (ambos NÃO-GRAVÁVEIS na conexão)
+       validade = exp do token
+                     │
+              (chegou o exp)
+                     │
+           CREDENCIAL_EXPIRADA ──token novo do MESMO uid──> AUTENTICADO
+                     │
+            (30s sem renovar)
+                     │
+             conexão encerrada
 ```
 
 Enquanto não estiver `AUTENTICADO`, o único tipo aceito é `auth`. Mesa, jogada,
@@ -141,26 +154,70 @@ Hoje o cofre de contas é chaveado pelo próprio uid: `jogadorIdDoUid(uid) = uid
 (`opts.jogadorIdDoUid`), e nunca informada pelo cliente. Se um dia houver tabela
 de perfis, troca-se só essa derivação.
 
-Consequência de dados para o rollout: as contas atuais estão chaveadas pelos
-`j-<random>` que os navegadores inventaram em `localStorage`. Depois do deploy
-elas ficam órfãs — quem entrar autenticado recebe uma conta nova sob o uid do
-Firebase. **Não há migração automática nesta OS.** Se as contas atuais
-importarem, isso é trabalho próprio, a ser decidido antes do deploy.
+#### Contas legadas `j-<random>` — CORTE LIMPO (decisão fechada)
+
+As contas atuais estão chaveadas pelos `j-<random>` que os navegadores
+inventaram em `localStorage`. Depois do deploy elas ficam **órfãs**: quem entrar
+autenticado recebe conta nova sob o uid do Firebase.
+
+**Decisão da Sônia: não haverá migração automática, e isso é definitivo.**
+
+Nenhum mecanismo deste servidor aceita um `jogadorId` vindo do cliente para
+transferir carteira, XP, ranking ou qualquer outro patrimônio para um uid. Não é
+omissão — é a decisão.
+
+O motivo é o mesmo desta OS inteira: o identificador legado nasceu em
+`localStorage`, era escolhido pelo cliente e **não tem prova de posse**. Aceitá-lo
+como fundamento de migração seria reabrir a impersonação exatamente na fronteira
+que este trabalho fecha — bastaria dizer "eu sou o `j-abc123`" para herdar a
+carteira de outra pessoa.
+
+As contas atuais são de ambiente anterior ao lançamento público. Benefícios que
+precisarem ser preservados serão concedidos depois, por mecanismo administrativo
+confiável, fora do protocolo do cliente.
+
+**Não implementar "migração por jogadorId" mesmo que alguém peça depois.**
 
 ### 3.5 Expiração do token durante a partida (§16)
 
-Política escolhida, sem invenção:
+**Token válido no handshake NÃO compra sessão eterna.** A validade da conexão é
+o `exp` do token que a autenticou, e nada mais.
 
-- uma conexão já estabelecida **não** é derrubada quando o token expira — a
-  identidade vinculada vale por toda a vida daquela conexão;
-- **toda conexão nova exige credencial válida**, inclusive reconexão;
-- token expirado **não** estabelece sessão autenticada nenhuma;
-- o app pede o token ao Firebase SDK **antes de cada tentativa de conexão**, e o
-  SDK devolve um token renovado quando o que está em cache já expirou ou está
-  perto de expirar.
+```
+AUTENTICADO ──(chegou o exp)──> CREDENCIAL_EXPIRADA ──(token novo, MESMO uid)──> AUTENTICADO
+                                        │
+                                        └──(30s sem renovar, ou outro uid)──> conexão fechada
+```
 
-Não foi implementado refresh periódico em conexão já aberta: não há necessidade
-demonstrada, e isso exigiria máquina de estados e testes próprios.
+O que acontece exatamente ao cruzar o `exp`:
+
+| | Antes do `exp` | Depois do `exp` |
+|---|---|---|
+| comando de jogador | executa | recusado, `CREDENCIAL_EXPIRADA` |
+| `estado` (visão do assento) | recebe | **para de receber** |
+| `fim` (resumo com moedas/XP) | recebe | **não recebe** |
+| `auth` com token novo do mesmo uid | renova a validade | volta a `AUTENTICADO`, sem derrubar |
+| `auth` com token de outro uid | conexão fechada | conexão fechada |
+| nada, por 30s | — | conexão encerrada |
+
+A expiração é aplicada por **duas** vias, de propósito: um agendador armado no
+instante da autenticação (pega a conexão parada, que só recebe broadcast) e uma
+conferência no ato de cada comando (pega o caso do timer atrasado — processo
+suspenso, máquina hibernada).
+
+**Por que renovar em vez de derrubar direto.** As duas saídas eram aceitáveis.
+Derrubar a cada hora entregaria ao bot o assento de quem está numa partida longa
+— o servidor não tem retomada de assento, quem cai vira bot e não reassume. A
+renovação no mesmo socket evita esse dano sem afrouxar nada: durante a carência,
+o único tipo aceito é `auth`, igual ao estado inicial, e a identidade continua
+imutável (token de outro uid derruba a conexão).
+
+Também vale, como antes: **toda conexão nova exige credencial válida**, inclusive
+reconexão; token expirado não estabelece sessão nenhuma; e o app pede o token ao
+Firebase SDK antes de cada tentativa de conexão.
+
+Não há refresh periódico em conexão aberta — a renovação é **reativa**, disparada
+pelo servidor quando a credencial vence, não um relógio do cliente.
 
 ### 3.6 Revogação (§17) — risco residual declarado
 
@@ -174,6 +231,10 @@ Risco aceito, explicitamente: **um ID Token já emitido continua sendo aceito at
 expirar (Firebase: 1 hora) mesmo que a sessão seja revogada nesse intervalo.**
 Desativar uma conta ou revogar as sessões dela não derruba na hora quem já está
 com token na mão. Nenhuma cobertura maior do que essa está sendo alegada.
+
+O que **não** faz parte deste risco: sessão sobrevivendo à expiração do token.
+Isso está fechado — ver 3.5. O limite superior do estrago de uma credencial
+comprometida é o `exp` dela, não a duração da conexão.
 
 Se isso virar requisito, o caminho é adotar Firebase Admin com service account
 por variável de ambiente — e aí a §18 precisa ser reaberta com a Sônia.
@@ -215,35 +276,77 @@ Nada foi alterado em produção nem no Railway.
 
 ---
 
-## 5. Compatibilidade e rollout (§20)
+## 5. Versionamento do protocolo e rollout (§20)
 
-A mudança de protocolo é **quebra dura**: um cliente que não autentica não
-consegue mais fazer absolutamente nada.
+### 5.1 A ponte de versão
 
-| | Mínimo compatível |
+O protocolo de conexão passou a ter número:
+
+| Versão | O que é |
 |---|---|
-| Servidor | esta branch (`seguranca/ws-auth-identidade`) |
-| App | branch `claude/ws-auth-identidade` (envia `{tipo:"auth"}` antes de qualquer comando) |
-| `app.html` / `mesa-online*.html` | **incompatíveis.** Ainda mandam `jogadorId` de `localStorage` e não têm Firebase Auth. Ficam sem online até serem portados — trabalho próprio, fora desta OS |
+| 1 | protocolo antigo, sem autenticação: identidade declarada pelo cliente |
+| 2 | este: a conexão apresenta credencial e o servidor deriva a identidade |
 
-**Ordem segura de rollout** (nada disso foi feito nesta OS):
+`PROTOCOLO_MINIMO = 2`, e **não vai baixar**: aceitar 1 seria exatamente o
+fallback que reabriria a confiança em `jogadorId` vindo do cliente.
 
-1. decidir o que fazer com as contas chaveadas por `j-<random>` (§3.4);
-2. configurar `FIREBASE_PROJECT_ID` no Railway;
-3. implantar servidor e app **na mesma janela**;
-4. portar ou aposentar os clientes HTML.
+O cliente declara a versão junto com a credencial — `{tipo:"auth", token,
+protocolo:2}`, ou o cabeçalho `X-BMV-Protocolo: 2` no upgrade HTTP. O servidor
+devolve a versão dele no `autenticado`.
 
-**Não existe compatibilidade cruzada em nenhuma das duas direções**, e é
-proposital (§20 proíbe fallback que preserve cliente inseguro):
+**A checagem de versão acontece ANTES de olhar o token.** Duas razões: um cliente
+velho não precisa nem ter credencial para receber uma resposta que ele consiga
+explicar para a pessoa, e nenhum detalhe de autenticação vaza para ele.
 
-- app novo × servidor antigo: o `{tipo:"auth"}` cai no `default` do `switch` do
-  servidor antigo e volta `"tipo desconhecido"`. O app trata como falha de
-  autenticação e não manda comando nenhum;
-- app antigo × servidor novo: nunca autentica, e todo comando é recusado com
-  `NAO_AUTENTICADO`.
+### 5.2 Como cada combinação se comporta
 
-Por isso a implantação precisa ser coordenada, com o app já publicado e
-disponível para atualização antes de o servidor subir.
+| Situação | O que o servidor faz | O que a pessoa vê |
+|---|---|---|
+| app antigo (protocolo 1) manda comando sem autenticar | recusa com `codigo:"ATUALIZACAO_OBRIGATORIA"` + `protocoloMinimo`, **sem executar nada** | "atualize o aplicativo para continuar jogando online" |
+| app manda `auth` com protocolo < 2 (ou sem o campo) | `{tipo:"atualizacaoObrigatoria"}` e fecha a conexão — **antes** de tocar no token | mesma mensagem |
+| app novo × servidor antigo | o servidor antigo responde `"tipo desconhecido: auth"` | o app entra em `servidorDesatualizado`: "o servidor ainda não foi atualizado — tente de novo mais tarde" |
+| app novo × servidor antigo **mudo** | — | o app desiste em 15s e tenta de novo pelo backoff, em vez de ficar pendurado |
+| app novo × servidor novo | autentica | joga |
+
+O ponto que resolve o pedido "cliente velho não opera anonimamente": um cliente
+do protocolo 1 nunca manda `auth`. Esse é o assinatura dele. Por isso o primeiro
+comando de jogador de uma conexão que **nunca tentou autenticar** leva
+`ATUALIZACAO_OBRIGATORIA` em vez de um erro genérico — e nenhum comando executa.
+
+**O que NÃO foi feito, e por quê.** Não existe modo em que o app novo consiga
+jogar contra o servidor antigo. Qualquer ponte assim exigiria o app voltar a
+declarar `jogadorId`, que é a vulnerabilidade sendo corrigida. O que dá para
+garantir — e está garantido — é que o app **falhe de forma explícita e
+diagnosticável** em vez de travar, e que volte a funcionar sozinho assim que o
+servidor subir. Uma janela de indisponibilidade do online é inevitável; a
+alternativa seria manter a falha de segurança aberta durante a janela.
+
+### 5.3 Ordem segura de rollout
+
+Nada disso foi feito nesta OS.
+
+1. Configurar `FIREBASE_PROJECT_ID` no Railway. **Antes** de qualquer deploy —
+   sem ele o servidor novo sobe recusando todo mundo.
+2. Publicar o app novo nas lojas e esperar a adoção. Enquanto o servidor antigo
+   estiver no ar, o app novo mostra "servidor em atualização" no online; o resto
+   do app (jogo local, torneios, perfil) segue funcionando.
+3. Implantar o servidor. A partir daqui: app novo joga; app antigo mostra
+   "atualize o aplicativo" e **não consegue mais jogar anonimamente**.
+4. Portar ou aposentar `app.html` / `mesa-online*.html`. Eles continuam no
+   protocolo 1 e ficam sem online — não têm Firebase Auth. Trabalho próprio.
+
+A janela entre 2 e 3 é a de indisponibilidade do online para quem já atualizou.
+Quanto mais adoção antes do passo 3, menor o incômodo — mas **a segurança não
+depende da ordem**: em qualquer momento depois do passo 3, ninguém joga sem
+credencial verificada.
+
+### 5.4 Efeito na integração com `enforcement/visao-espectador`
+
+A ponte de versão **não muda a ordem recomendada** (autenticação → espectador).
+Ela vive no preâmbulo de `processar`, antes do `switch`; `assistirMesa` entra
+como mais um `case` e herda a fronteira de graça. Se o espectador entrasse
+primeiro, `assistirMesa` seria um comando pré-autenticação e teria de ser
+retrabalhado depois.
 
 ---
 

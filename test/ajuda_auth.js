@@ -14,7 +14,7 @@ const crypto = require("crypto");
 
 const bundle = require("../server.js");
 
-const { criarServidor, AUTH } = bundle.require("servidor");
+const { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO } = bundle.require("servidor");
 const { criarContas } = bundle.require("contas");
 const { criarVerificadorFirebase, FALHA } = bundle.require("auth_firebase");
 
@@ -74,9 +74,43 @@ function emitirToken({
   return h + "." + p + "." + b64url(assinatura);
 }
 
-/** Relógio controlável, para provar expiração sem esperar uma hora. */
+/**
+ * Relógio controlável — e também o AGENDADOR do servidor.
+ *
+ * Os dois juntos porque a expiração da sessão depende dos dois andando em
+ * sincronia: avançar o relógio tem que disparar o timer que vence a credencial,
+ * senão o teste provaria uma coisa e o servidor faria outra. Nada de espera
+ * real: `avancarS(3600)` atravessa uma hora inteira na hora.
+ */
 function relogio(inicio = T0) {
-  return { agoraMs: inicio, avancarS(s) { this.agoraMs += s * 1000; return this; } };
+  const tarefas = [];
+  return {
+    agoraMs: inicio,
+    agendarEm(ms, fn) {
+      const tarefa = { quando: this.agoraMs + ms, fn, cancelada: false };
+      tarefas.push(tarefa);
+      return () => { tarefa.cancelada = true; };
+    },
+    avancarS(s) { return this.avancarMs(s * 1000); },
+    avancarMs(ms) {
+      const alvo = this.agoraMs + ms;
+      // dispara em ordem cronológica; um timer pode reagendar outro no caminho
+      // (é o que a carência de renovação faz), então o laço reavalia sempre.
+      for (;;) {
+        let prox = null;
+        for (const t of tarefas) {
+          if (t.cancelada || t.quando > alvo) continue;
+          if (!prox || t.quando < prox.quando) prox = t;
+        }
+        if (!prox) break;
+        prox.cancelada = true;
+        this.agoraMs = Math.max(this.agoraMs, prox.quando);
+        prox.fn();
+      }
+      this.agoraMs = alvo;
+      return this;
+    },
+  };
 }
 
 /**
@@ -98,9 +132,13 @@ function verificadorDeTeste({ chaves, tempo, projectId = PROJETO, falharBusca = 
 }
 
 /** Servidor de salas com código de mesa determinístico, bots imediatos e o
- *  cofre de contas REAL só que em memória (nada é escrito em disco). */
+ *  cofre de contas REAL só que em memória (nada é escrito em disco).
+ *
+ *  Passando `tempo`, o relógio e o agendador do servidor passam a ser os do
+ *  teste — é assim que a expiração da sessão fica provável. */
 function novoServidor(opts = {}) {
   let n = 0;
+  const { tempo, ...resto } = opts;
   return criarServidor(
     Object.assign(
       {
@@ -108,7 +146,13 @@ function novoServidor(opts = {}) {
         agendar: (fn) => fn(),
         contas: criarContas({ persistir: false }),
       },
-      opts
+      tempo
+        ? {
+            agora: () => tempo.agoraMs,
+            agendarEm: (ms, fn) => tempo.agendarEm(ms, fn),
+          }
+        : {},
+      resto
     )
   );
 }
@@ -124,10 +168,15 @@ function cliente(srv) {
     get derrubada() { return derrubada; },
     get conexao() { return srv.conexoes[id]; },
     get estadoAuth() { return srv.conexoes[id] && srv.conexoes[id].estadoAuth; },
+    get expiraEm() { return srv.conexoes[id] && srv.conexoes[id].expiraEm; },
     /** Autentica pela fronteira do transporte (cabeçalho do upgrade). */
-    autentica(token) { return srv.autenticar(id, token); },
+    autentica(token, protocolo = PROTOCOLO_ATUAL) { return srv.autenticar(id, token, protocolo); },
+    /** Igual, mas SEM valor padrão: é como se o cliente tivesse omitido o campo. */
+    autenticaCru(token, protocolo) { return srv.autenticar(id, token, protocolo); },
     /** Autentica pela primeira mensagem do protocolo (caminho do navegador). */
-    autenticaPorMensagem(token) { return srv.processar(id, { tipo: "auth", token }); },
+    autenticaPorMensagem(token, protocolo = PROTOCOLO_ATUAL) {
+      return srv.processar(id, { tipo: "auth", token, protocolo });
+    },
     envia(msg) { return srv.processar(id, msg); },
     ultimo(tipo) {
       for (let i = recebidas.length - 1; i >= 0; i--) if (recebidas[i].tipo === tipo) return recebidas[i];
@@ -142,6 +191,8 @@ module.exports = {
   AUTH,
   FALHA,
   PROJETO,
+  PROTOCOLO_ATUAL,
+  PROTOCOLO_MINIMO,
   T0,
   bundle,
   cliente,

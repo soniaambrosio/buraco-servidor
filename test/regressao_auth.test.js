@@ -17,7 +17,7 @@ const CHAVE = novoParDeChaves("kid-reg-1");
 
 function servidorAutenticado() {
   const tempo = relogio();
-  return novoServidor({ verificarToken: verificadorDeTeste({ chaves: CHAVE, tempo }) });
+  return novoServidor({ tempo, verificarToken: verificadorDeTeste({ chaves: CHAVE, tempo }) });
 }
 
 /** Conexão já autenticada como `uid`. */
