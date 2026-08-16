@@ -3565,6 +3565,173 @@ module.exports = {
 
   };
 
+  __fabricas["outbox"] = function (module, exports, require) {
+// servidor/outbox.js — OUTBOX DURÁVEL DE ENCERRAMENTOS.
+//
+// Guarda o envelope autoritativo de cada partida encerrada até que alguém o
+// entregue. Nesta versão NINGUÉM entrega: não há rede aqui, de propósito. O
+// transporte autenticado Railway→Functions é outra OS, e separar as duas coisas
+// é o que permite provar durabilidade e idempotência sem depender de rede.
+//
+// POR QUE UM ARQUIVO POR PARTIDA, e não um único log:
+//   * criação idempotente vira uma pergunta de existência (`existsSync`), sem
+//     ler-modificar-escrever, que é onde duas liquidações simultâneas se
+//     atropelariam;
+//   * um envelope corrompido não leva os outros junto;
+//   * o reinício do processo não precisa reconstruir índice nenhum — os
+//     pendentes são os arquivos que estão lá.
+//
+// ATOMICIDADE: grava `.tmp` e renomeia, o MESMO idioma que `contas.js` já usa
+// para o cofre. `rename` no mesmo sistema de arquivos é atômico, então nunca
+// existe um arquivo de envelope pela metade — ou ele está inteiro, ou não está.
+//
+// O QUE NÃO MORA AQUI: token, credencial, URL de destino, resposta de Functions
+// e qualquer coisa de economia. A outbox registra um FATO; ela não paga nada.
+
+const fs = require("fs");
+const path = require("path");
+
+/** Estados de um registro. Só `pendente` é escrito nesta OS — os outros existem
+ *  para o transporte futuro e estão nomeados aqui para que ele não os invente
+ *  com outro nome. */
+const ESTADO = Object.freeze({
+  PENDENTE: "pendente",
+  ENTREGUE: "entregue",
+  FALHOU: "falhou",
+});
+
+/** Erro de leitura de um registro corrompido. Tipo próprio para que o chamador
+ *  distinga "não existe" (normal) de "existe e está ilegível" (grave). */
+class RegistroCorrompido extends Error {
+  constructor(partidaId, causa) {
+    super("registro de encerramento ilegível: " + partidaId + " (" + causa + ")");
+    this.name = "RegistroCorrompido";
+    this.partidaId = partidaId;
+  }
+}
+
+/**
+ * Cria a outbox em `dir` (padrão: DADOS_DIR/encerramentos).
+ *
+ * `persistir:false` mantém tudo em memória — os testes de mesa não precisam
+ * tocar em disco, e o servidor sem volume gravável continua jogando.
+ */
+function criarOutbox(opts = {}) {
+  const persistir = opts.persistir !== false;
+  const base = opts.dir
+    || path.join(process.env.DADOS_DIR || path.join(__dirname, "..", "dados"), "encerramentos");
+  const agora = opts.agora || (() => new Date().toISOString());
+  const memoria = new Map();
+
+  let prontoParaDisco = false;
+  if (persistir) {
+    try {
+      fs.mkdirSync(base, { recursive: true });
+      prontoParaDisco = true;
+    } catch (e) {
+      // Sem disco gravável a partida continua: a outbox cai para memória e diz
+      // isso alto. Derrubar a mesa porque o volume não montou seria trocar o
+      // jogo pelo acessório.
+      console.warn("[outbox] sem diretório gravável, seguindo em memória:", e.message);
+    }
+  }
+
+  const arquivoDe = (partidaId) => path.join(base, partidaId + ".json");
+
+  /** Um `partidaId` só pode virar nome de arquivo se for inofensivo. UUID passa;
+   *  qualquer coisa com barra, ponto-ponto ou nulo, não. É travessia de caminho
+   *  fechada na origem, mesmo o id nunca vindo do cliente. */
+  function idValido(partidaId) {
+    return typeof partidaId === "string" && /^[A-Za-z0-9._-]{8,128}$/.test(partidaId)
+      && !partidaId.includes("..");
+  }
+
+  function existe(partidaId) {
+    if (memoria.has(partidaId)) return true;
+    if (!prontoParaDisco) return false;
+    try { return fs.existsSync(arquivoDe(partidaId)); } catch (_) { return false; }
+  }
+
+  /**
+   * Registra um envelope. IDEMPOTENTE: o segundo registro do mesmo `partidaId`
+   * não reescreve nada e devolve `{criado:false}`.
+   *
+   * Devolve `{criado, partidaId, estado}`. Nunca lança por já existir — repetir
+   * uma liquidação é caminho normal (retry, reprocessamento), não erro.
+   */
+  function registrar(envelope) {
+    if (!envelope || !idValido(envelope.partidaId)) {
+      return { criado: false, erro: "partidaId inválido", estado: null };
+    }
+    const partidaId = envelope.partidaId;
+    if (existe(partidaId)) {
+      return { criado: false, partidaId, estado: ESTADO.PENDENTE, jaExistia: true };
+    }
+    const quando = agora();
+    const registro = {
+      partidaId,
+      versaoContrato: envelope.versaoContrato,
+      estado: ESTADO.PENDENTE,
+      tentativas: 0,
+      criadoEm: quando,
+      atualizadoEm: quando,
+      envelope,
+    };
+    if (prontoParaDisco) {
+      const alvo = arquivoDe(partidaId);
+      const tmp = alvo + ".tmp";
+      try {
+        fs.writeFileSync(tmp, JSON.stringify(registro));
+        fs.renameSync(tmp, alvo);
+      } catch (e) {
+        // FALHA DE ESCRITA NÃO VIRA ENTREGA. O registro não é marcado como
+        // gravado, e o chamador recebe o erro para registrar no log. Guardar em
+        // memória aqui mentiria sobre durabilidade.
+        try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+        return { criado: false, partidaId, estado: null, erro: e.message };
+      }
+    } else {
+      memoria.set(partidaId, registro);
+    }
+    return { criado: true, partidaId, estado: ESTADO.PENDENTE };
+  }
+
+  /** Lê um registro. `null` se não existe; lança [RegistroCorrompido] se existe
+   *  e não é JSON válido — silenciar isso faria um envelope perdido parecer um
+   *  envelope inexistente. */
+  function ler(partidaId) {
+    if (memoria.has(partidaId)) return memoria.get(partidaId);
+    if (!prontoParaDisco) return null;
+    const alvo = arquivoDe(partidaId);
+    if (!fs.existsSync(alvo)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(alvo, "utf8"));
+    } catch (e) {
+      throw new RegistroCorrompido(partidaId, e.message);
+    }
+  }
+
+  /** Ids pendentes. Depois de um reinício, é a lista de arquivos que sobrou. */
+  function pendentes() {
+    if (!prontoParaDisco) {
+      return [...memoria.values()].filter((r) => r.estado === ESTADO.PENDENTE).map((r) => r.partidaId);
+    }
+    try {
+      return fs.readdirSync(base)
+        .filter((n) => n.endsWith(".json"))
+        .map((n) => n.slice(0, -5));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  return { registrar, ler, pendentes, existe, dir: base, ESTADO, RegistroCorrompido };
+}
+
+module.exports = { criarOutbox, ESTADO, RegistroCorrompido };
+
+  };
+
   __fabricas["salas"] = function (module, exports, require) {
 // servidor/salas.js — GERENCIADOR DE SALAS (multiplayer M2)
 // Mesa privada por CÓDIGO, até 4 pessoas, assentos vazios viram BOT.
@@ -3733,6 +3900,11 @@ function criarGerenciador(opts = {}) {
   // cofre de contas (servidor/contas.js). Opcional: sem ele, a mesa roda igual,
   // só não persiste estatística nenhuma (útil pra testes puros de mesa).
   const contas = opts.contas || null;
+  // [PRODUTOR] Outbox de encerramentos. Opcional pelo mesmo critério do cofre:
+  // sem ela a mesa roda igual, só não produz envelope. Os testes de mesa que
+  // não se importam com encerramento não precisam tocar em disco.
+  const outbox = opts.outbox || null;
+  const agoraIso = opts.agoraIso || (() => new Date().toISOString());
   const gerarCodigo = opts.gerarCodigo || gerarCodigoPadrao;
   const LIMITE_BOTS = opts.limiteAvanco || 5000; // trava anti-loop do avanço
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
@@ -3769,6 +3941,7 @@ function criarGerenciador(opts = {}) {
       tipoPartida,
       partidaId: null,
       participantes: null,
+      envelopeEncerramento: null,
     };
     return { codigo, assento: 0 };
   }
@@ -3815,6 +3988,7 @@ function criarGerenciador(opts = {}) {
     // dele existe UMA partida, com um id que não se repete nem numa revanche na
     // mesma sala, porque a revanche passa por este mesmo caminho.
     sala.partidaId = novoPartidaId();
+    sala.envelopeEncerramento = null;
     // Mapa assento → identidade, congelado no início. Congelado de propósito:
     // durante a partida um assento pode virar bot (queda/AFK) e a conexão pode
     // trocar, mas o TITULAR daquele assento não muda. Sem este retrato, quem
@@ -3832,6 +4006,21 @@ function criarGerenciador(opts = {}) {
     if (!sala || !sala.jogo || sala.liquidada) return null;
     if (!sala.jogo.encerrada) return null;
     sala.liquidada = true;
+
+    // [PRODUTOR] O envelope é capturado AQUI, antes de qualquer coisa de
+    // economia, e a ordem importa por dois motivos.
+    //
+    // 1. `sala.liquidada` já está travado acima, então este bloco roda no
+    //    máximo uma vez por partida — a mesma trava que impede pagar duas
+    //    vezes impede envelopar duas vezes.
+    // 2. Fica ANTES do `if (!contas) return null`. O fato autoritativo não pode
+    //    depender de existir cofre local: um servidor sem carteira ainda tem
+    //    partidas que acabaram, e são elas que a conquista vai ler.
+    //
+    // O estado já está consolidado neste ponto — `contarPontos` somou o placar,
+    // marcou `encerrada` e gravou `assentoQueBateuFinal` — e não muda mais.
+    produzirEncerramento(sala);
+
     if (!contas) return null;
     const jogo = sala.jogo;
     const jogadores = [];
@@ -3851,6 +4040,73 @@ function criarGerenciador(opts = {}) {
       console.error("[salas] liquidar falhou:", e.message);
     }
     return sala.resumoFinal;
+  }
+
+  /** Captura o envelope autoritativo e o entrega à outbox, uma vez.
+   *
+   *  NÃO paga nada e NÃO chama rede. A outbox registra um fato; quem aplica
+   *  economia é `registrarPartida`, e as duas coisas continuam separadas de
+   *  propósito — cortar a economia local para a autoridade do Firestore vai
+   *  exigir homologação e ativação coordenadas, senão o jogador recebe duas
+   *  vezes: uma pelo cofre daqui e outra por quem consumir o envelope.
+   *
+   *  Falha de persistência NÃO derruba a liquidação: a partida acabou de
+   *  verdade, e perder o pagamento do jogador porque o disco falhou seria
+   *  trocar o certo pelo acessório. O que a falha faz é ficar no log e NÃO
+   *  marcar entrega — o evento continua devendo. */
+  function produzirEncerramento(sala) {
+    if (!sala.partidaId) {
+      // Partida sem identidade não deveria existir: `iniciarPartida` sempre
+      // cunha uma. Se chegou aqui, algo montou a sala por fora — falha alto no
+      // log e não inventa id, que só criaria um evento órfão.
+      console.error("[encerramento] sala sem partidaId; envelope nao produzido", {
+        codigo: sala.codigo,
+      });
+      return null;
+    }
+    const envelope = montarEnvelopeEncerramento(sala, agoraIso());
+    sala.envelopeEncerramento = envelope;
+
+    // Log operacional: identificador técnico da partida e códigos. Sem uid, sem
+    // apelido, sem e-mail, sem carta e sem o mapa de participantes.
+    const base = {
+      partidaId: envelope.partidaId,
+      versaoContrato: envelope.versaoContrato,
+      motivo: envelope.motivoEncerramento,
+      tipoPartida: envelope.tipoPartida,
+      valida: envelope.validaParaConquistas,
+    };
+
+    if (!envelope.validaParaConquistas) {
+      // Inelegível não é erro: é o desfecho normal de mesa simulada, de partida
+      // sem vencedor e de encerramento por caminho não reconhecido. O código do
+      // motivo vai junto para responder "por que não contou?" sem reabrir nada.
+      console.info("[encerramento] inelegivel", Object.assign({}, base, {
+        codigoMotivo: envelope.motivoEncerramento !== MOTIVO_META
+          ? "motivo_nao_reconhecido"
+          : (!TIPOS_VALIDOS_PARA_CONQUISTA.has(envelope.tipoPartida)
+              ? "tipo_nao_conta"
+              : "sem_vencedor"),
+      }));
+    }
+
+    if (!outbox) return envelope;
+
+    let r;
+    try {
+      r = outbox.registrar(envelope);
+    } catch (e) {
+      console.error("[encerramento] falha de persistencia", Object.assign({}, base, { erro: e.message }));
+      return envelope;
+    }
+    if (r.erro) {
+      console.error("[encerramento] falha de persistencia", Object.assign({}, base, { erro: r.erro }));
+    } else if (r.jaExistia) {
+      console.info("[encerramento] envelope ja existente", base);
+    } else {
+      console.info("[encerramento] envelope criado, persistencia pendente", base);
+    }
+    return envelope;
   }
 
   function aplicarJogada({ codigo, assento, jogada } = {}) {
@@ -4045,7 +4301,7 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair, liquidar, outbox };
 }
 
 module.exports = {
@@ -4896,6 +5152,7 @@ const fs = require("fs");
 const path = require("path");
 const { criarServidor } = require("./servidor");
 const { criarContas } = require("./contas");
+const { criarOutbox } = require("./outbox"); // [PRODUTOR]
 const { criarVerificadorFirebase } = require("./auth_firebase"); // [PATCH WS-AUTH]
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -5045,7 +5302,19 @@ function iniciar(porta, opts = {}) {
     console.warn("[auth] FIREBASE_PROJECT_ID não configurado — NENHUMA conexão vai autenticar.");
   }
   const verificarToken = opts.verificarToken || criarVerificadorFirebase({ projectId });
-  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas, verificarToken });
+  // [PRODUTOR] Outbox de encerramentos, ao lado do cofre em DADOS_DIR. Ela NÃO
+  // é servida por HTTP: as rotas deste servidor são `/health`, `/avatar/<id>` e
+  // o PUBLIC_DIR opcional — e PUBLIC_DIR é resolvido para um diretório próprio,
+  // com a checagem `startsWith` que impede sair dele. O diretório de dados não
+  // aparece em nenhuma dessas rotas, e não passa a aparecer por existir a
+  // outbox.
+  const outbox = criarOutbox();
+  const servidor = criarServidor({
+    agendar: (fn) => setTimeout(fn, RESPIRO_MS),
+    contas,
+    verificarToken,
+    outbox,
+  });
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
