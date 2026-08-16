@@ -4989,6 +4989,34 @@ function criarServidor(opts = {}) {
     return ger.visaoPara({ codigo: c.codigo, papel: papelDe(c), assento: c.assento });
   }
 
+  /** [VERSAO] O evento `estado` COMPLETO para uma conexão: a visão que ela pode
+   *  receber, mais o par (versaoEstado, eventoId) da emissão.
+   *
+   *  Existe como função única porque o servidor emite `estado` em dois lugares
+   *  — o broadcast e o snapshot de quem começa a assistir — e os dois têm de
+   *  carimbar igual. Montar o objeto à mão nos dois deixaria um deles para trás
+   *  no primeiro ajuste do contrato.
+   *
+   *  ORDEM: `visaoDaConexao` primeiro, porque é ela que passa pela porta de
+   *  projeção e é lá que o carimbo é atribuído; `metadadosDe` depois, lendo o
+   *  carimbo que acabou de valer. Invertido, o primeiro envio de cada mutação
+   *  sairia com o par anterior.
+   *
+   *  Os campos são IRMÃOS de `visao`, não filhos: `visao` é o recorte que o
+   *  papel autoriza, e a versão é da mesa, igual para todos os papéis. Enfiá-la
+   *  dentro da visão a faria passar pela lista de permissão do espectador e
+   *  sumir para quem assiste — que é justamente quem mais precisa dela.
+   *
+   *  Mesa sem estado autoritativo (`metadadosDe` null) emite versão 0 e
+   *  `eventoId` null. Zero nunca é emitido por mesa viva — o carimbo acima já
+   *  garante o mínimo 1 —, então o cliente pode tratar 0/null como "não há
+   *  estado", sem confundir com "primeira versão". */
+  function eventoEstado(c) {
+    const visao = visaoDaConexao(c);
+    const meta = ger.metadadosDe(c.codigo) || { versaoEstado: 0, eventoId: null };
+    return { tipo: "estado", visao, versaoEstado: meta.versaoEstado, eventoId: meta.eventoId };
+  }
+
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
@@ -5090,7 +5118,13 @@ function criarServidor(opts = {}) {
         c.codigo = msg.codigo;
         c.assento = null; // explícito: assistir NUNCA concede assento
         enviarPara(id, { tipo: "assistindo", codigo: c.codigo });
-        return enviarPara(id, { tipo: "estado", visao: visaoDaConexao(c) });
+        // [VERSAO] Entrar para assistir NÃO é mutação da mesa: nada em `sala`
+        // muda aqui (o que muda é a conexão). O carimbo vigente é reaproveitado
+        // tal e qual, então quem chega recebe a MESMA versão que os assentos já
+        // têm — e não uma versão nova que faria todo mundo achar que houve
+        // jogada. É também por este caminho que a reconexão de quem não tem
+        // assento volta a ver a mesa, e é por isso que ela não cria versão.
+        return enviarPara(id, eventoEstado(c));
       }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
@@ -5268,7 +5302,13 @@ function criarServidor(opts = {}) {
       // — porque é ela que passa pela porta única de projeção: jogador recebe a
       // própria visão privada, espectador recebe a pública. Chamar `ger.visao`
       // direto aqui devolveria visão de assento para quem não tem assento.
-      c.enviar({ tipo: "estado", visao: visaoDaConexao(c) });
+      //
+      // [VERSAO] O laço é síncrono e nada muta a sala dentro dele, então as
+      // quatro visões de assento e as de espectador saem todas com o MESMO par
+      // (versaoEstado, eventoId): a primeira conexão do laço carimba, as
+      // demais encontram a impressão inalterada e reaproveitam. Uma mutação
+      // gera uma versão — não uma por destinatário.
+      c.enviar(eventoEstado(c));
     }
   }
 
