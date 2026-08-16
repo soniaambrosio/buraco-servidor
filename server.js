@@ -3579,12 +3579,74 @@ module.exports = {
 
 const J = require("../motor/jogo");
 const { jogarTurnoBot } = require("./bot_motor");
+const crypto = require("crypto");
 
 const NOMES_BOT = ["Renato", "Cláudia", "Mateus", "Sofia"];
 
 /** Código padrão tipo BURACO-4821. (Math.random é ok em Node normal.) */
 function gerarCodigoPadrao() {
   return "BURACO-" + Math.floor(1000 + Math.random() * 9000);
+}
+
+/** Natureza da mesa, decidida pelo SERVIDOR. Nunca vem do cliente.
+ *
+ *  `publica` e `privada` são partidas reais e contam para conquista pessoal —
+ *  a privada fica fora do ranking por ser combinável, mas quem jogou jogou.
+ *  `simulada` é o default CONSERVADOR de qualquer mesa cuja natureza não tenha
+ *  sido declarada pelo servidor: na dúvida, não conta. */
+const TIPOS_DE_PARTIDA = ["publica", "privada", "simulada"];
+const TIPO_PADRAO = "privada";
+
+/** Tipos que valem para conquista. Lista fechada e positiva: um tipo novo
+ *  criado amanhã não entra sozinho — precisa ser escrito aqui, de propósito. */
+const TIPOS_VALIDOS_PARA_CONQUISTA = new Set(["publica", "privada"]);
+
+/** Identificador imutável de UMA partida.
+ *
+ *  Gerado pelo servidor, sempre. Não é o código da sala (que se repete entre
+ *  partidas e é escolhido para ser digitável), nem derivado de horário ou de
+ *  UIDs concatenados — os dois colidem e os dois vazam informação. `randomUUID`
+ *  é criptográfico e não precisa de coordenação entre processos. */
+function novoPartidaId() {
+  return crypto.randomUUID();
+}
+
+/** Retrato imutável de quem ocupa cada assento, tirado no início da partida.
+ *
+ *  O `uid` de humano vem de `sala.assentos[i].jogadorId`, que o despachante
+ *  preenche com `c.jogadorId` — gravado por `vincularIdentidade` a partir do
+ *  `sub` do token verificado, e IMUTÁVEL (`writable:false`). Nenhum campo de
+ *  mensagem alcança este mapa: `jogadorId` alegado num payload é recusado antes,
+ *  por `identidadeDivergente`.
+ *
+ *  Bot não tem uid, e não ganha um por acidente: o campo é preenchido só quando
+ *  `tipo === "humano"`. Espectador não aparece — ele não ocupa assento, e o mapa
+ *  é por assento.
+ *
+ *  Apelido NÃO entra. Ele é escolhido pelo jogador, muda no meio da partida e
+ *  não identifica ninguém; guardá-lo aqui convidaria a inferir identidade por
+ *  nome, que é exatamente o que este mapa existe para tornar desnecessário. */
+function mapaDeParticipantes(sala) {
+  const lista = [];
+  for (let i = 0; i < 4; i++) {
+    const a = sala.assentos[i];
+    const humano = !!(a && a.tipo === "humano");
+    lista.push(Object.freeze({
+      assento: i,
+      uid: humano && a.jogadorId ? String(a.jogadorId) : null,
+      dupla: i % 2 === 0 ? "nos" : "eles",
+      tipo: humano ? "humano" : "bot",
+    }));
+  }
+  return Object.freeze(lista);
+}
+
+/** UID do titular de um assento, segundo o mapa congelado. `null` para bot,
+ *  assento fora de 0..3 ou partida sem mapa (não deveria acontecer). */
+function uidDoAssento(sala, assento) {
+  if (!sala || !sala.participantes || !Number.isInteger(assento)) return null;
+  const p = sala.participantes[assento];
+  return p ? p.uid : null;
 }
 
 /** Cria um gerenciador de salas em memória. `opts.gerarCodigo` permite injetar
@@ -3599,6 +3661,17 @@ function criarGerenciador(opts = {}) {
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
   // controla o ritmo (jogarUmBot), pra dar o "respiro" entre jogadas na tela.
   const autoBots = opts.autoBots !== false;
+  // [PRODUTOR] Natureza das mesas deste gerenciador. Vem da CONFIGURAÇÃO do
+  // servidor, nunca de mensagem — é por isso que o parâmetro está aqui, na
+  // construção, e não em `criarMesa({...})`: o despachante monta `criarMesa` a
+  // partir de `msg`, e um campo que morasse lá seria escolhível pelo cliente.
+  //
+  // Padrão `privada` porque é a verdade da base: toda mesa hoje nasce de um
+  // código compartilhado. Valor fora da enumeração vira `simulada`, que não
+  // conta — na dúvida sobre a natureza, não se concede nada.
+  const tipoPartida = TIPOS_DE_PARTIDA.includes(opts.tipoPartida)
+    ? opts.tipoPartida
+    : (opts.tipoPartida === undefined ? TIPO_PADRAO : "simulada");
 
   function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
     let codigo, tentativas = 0;
@@ -3614,6 +3687,11 @@ function criarGerenciador(opts = {}) {
       liquidada: false,   // já contabilizou o resultado no cofre?
       resumoFinal: null,  // resumo por jogador (deltas de moedas/xp) pra tela de fim
       log: [],
+      // [PRODUTOR] Identidade da partida: só existe depois de `iniciarPartida`.
+      // A sala existe antes e sobrevive depois; a partida, não.
+      tipoPartida,
+      partidaId: null,
+      participantes: null,
     };
     return { codigo, assento: 0 };
   }
@@ -3655,6 +3733,16 @@ function criarGerenciador(opts = {}) {
     sala.jogo = J.criarJogo({ assentos: assentosJogo, modalidade: sala.modalidade, metaPontos: sala.metaPontos });
     sala.iniciada = true;
     sala.liquidada = false; sala.resumoFinal = null;
+    // [PRODUTOR] A partida nasce AQUI, e é aqui que ela ganha identidade. Antes
+    // deste ponto existe uma sala (código digitável, reaproveitável); a partir
+    // dele existe UMA partida, com um id que não se repete nem numa revanche na
+    // mesma sala, porque a revanche passa por este mesmo caminho.
+    sala.partidaId = novoPartidaId();
+    // Mapa assento → identidade, congelado no início. Congelado de propósito:
+    // durante a partida um assento pode virar bot (queda/AFK) e a conexão pode
+    // trocar, mas o TITULAR daquele assento não muda. Sem este retrato, quem
+    // caiu no meio perderia o crédito do que fez, e quem entrou depois herdaria.
+    sala.participantes = mapaDeParticipantes(sala);
     if (autoBots) avancarBots(sala); // se a vez começar num bot, ele já joga
     liquidar(sala); // caso raro: partida que já encerra de cara (meta minúscula em teste)
     return { ok: true, codigo };
@@ -4497,7 +4585,16 @@ function criarServidor(opts = {}) {
         // devolvem privilégio nenhum.
         const salaE = ger.salas[msg.codigo];
         if (!salaE) return enviarPara(id, { tipo: "erro", motivo: "mesa não encontrada" });
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        // [PRODUTOR] A atribuição `c.jogadorId = msg.jogadorId || ...` que morava
+        // aqui foi REMOVIDA. Ela vinha da folha do espectador, escrita quando o
+        // transporte não autenticava, e hoje é duplamente morta: `jogadorId`
+        // divergente já é recusado por `identidadeDivergente` antes de chegar
+        // neste ponto, e a propriedade é `writable:false` desde
+        // `vincularIdentidade` — a atribuição era um no-op silencioso.
+        //
+        // Deixá-la seria pior do que inútil: sugere que uma mensagem pode
+        // definir identidade, que é exatamente o que o mapa de participantes
+        // existe para tornar impossível.
         c.codigo = msg.codigo;
         c.assento = null; // explícito: assistir NUNCA concede assento
         enviarPara(id, { tipo: "assistindo", codigo: c.codigo });
