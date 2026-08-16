@@ -47,6 +47,25 @@
 // Nenhuma regra do Buraco, pontuação, baralho, economia ou moderação foi tocada.
 // Sem merge e sem deploy. Ver docs/WS-AUTH-IDENTIDADE.md.
 // ===================================================================================
+// EXCEÇÃO DOCUMENTADA — VERSIONAMENTO DA VISÃO AUTORITATIVA
+// (branch claude/versionamento-visao-autoritativa-v1)
+// Mesmo motivo das anteriores: a fonte `cliente/` continua ausente. O bundle foi
+// editado à mão para fechar o risco residual da ligação do motor canônico à Casca
+// V2 — o evento `estado` saía SEM nenhuma marca de emissão, e o cliente não tinha
+// como reconhecer visão repetida, antiga ou reordenada. Trechos marcados com
+// `// [VERSAO]`:
+//   • módulo `salas`: `impressaoDoEstado` + `carimbarEstado` (ponto ÚNICO de
+//     atribuição de `versaoEstado`/`eventoId`), carimbo na porta única de
+//     projeção `visaoPara`, e leitura por `metadadosDe`;
+//   • módulo `servidor`: `eventoEstado(c)` — a única forma de montar o evento
+//     `estado`, usada pelos dois emissores (broadcast e snapshot de espectador).
+// Os campos novos são ADITIVOS e irmãos de `visao`: nada foi removido ou
+// renomeado, PROTOCOLO_MINIMO/ATUAL não mudaram, e nenhum campo novo é exigido do
+// cliente. Nenhuma regra do Buraco, pontuação, encerramento, economia ou
+// moderação foi tocada; o aplicativo Flutter não foi alterado.
+// Testes: `test/versao.test.js` (24 provas). Sem merge e sem deploy.
+// Ver docs/VERSIONAMENTO-VISAO-V1.md.
+// ===================================================================================
 (function () {
   var __cache = {};
   var __fabricas = {};
