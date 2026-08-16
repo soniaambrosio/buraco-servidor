@@ -1723,6 +1723,11 @@ function criarJogo({ assentos, modalidade = "sbtl", metaPontos = 3000 } = {}) {
     // só some numa partida nova.
     rodadasVulneravel: { nos: 0, eles: 0 },
     encerrada: false,        // partida encerrada (bateu a meta)
+    // [PRODUTOR] Assento da batida que ENCERROU A PARTIDA (0..3), ou null se a
+    // partida acabou sem batida. Diferente de `assentoQueBateu`, que é por
+    // rodada e some na distribuição seguinte: este sobrevive porque é o fato
+    // que o envelope de encerramento carrega.
+    assentoQueBateuFinal: null,
     // campos por rodada (preenchidos em distribuirRodada):
     maos: null,
     monte: null,
@@ -1770,6 +1775,13 @@ function distribuirRodada(jogo) {
   jogo.turnosRodada = 0;          // válvula de segurança anti-livelock (ver passarVez)
   jogo.rodadaEncerrada = false;
   jogo.duplaQueBateu = null;
+  // [PRODUTOR] Zerado junto da dupla, e pelo mesmo motivo: sem isto, a batida de
+  // uma rodada intermediária ficaria pendurada no estado e seria lida, no fim da
+  // partida, como se tivesse sido a batida final.
+  //
+  // `assentoQueBateuFinal` NÃO é zerado aqui de propósito: ele só existe quando
+  // a partida acabou, e depois disso não se distribui rodada nenhuma.
+  jogo.assentoQueBateu = null;
   jogo.pontosRodada = null;
   return jogo;
 }
@@ -2103,7 +2115,10 @@ function aoZerarMaoBaixando(jogo, assento) {
     return { pegouMorto: true };
   }
   if (duplaPodeBater(jogo, dupla)) {
-    encerrarRodada(jogo, dupla);
+    // [PRODUTOR] BATIDA DIRETA (mão zerou baixando). O assento vai junto, e só
+    // chega aqui depois de `duplaPodeBater` — a canastra exigida pela
+    // modalidade — e depois de esgotado o morto da dupla, logo acima.
+    encerrarRodada(jogo, dupla, assento);
     return { bateu: true };
   }
   return null;
@@ -2292,8 +2307,11 @@ function descartar(jogo, assento, idCarta) {
       passarVez(jogo);
       return { ok: true, descarte: carta, pegouMorto: true };
     }
-    // BATIDA FINAL (tem limpa, garantido pela checagem acima) — encerra a rodada
-    encerrarRodada(jogo, dupla);
+    // BATIDA FINAL (tem limpa, garantido pela checagem acima) — encerra a rodada.
+    // [PRODUTOR] O assento acompanha: a checagem `podeBatidaFinal` +
+    // `duplaPodeBater` já rodou antes do descarte ser aceito, então chegar aqui
+    // com este assento É a prova de que a batida dele foi legal.
+    encerrarRodada(jogo, dupla, assento);
     return { ok: true, descarte: carta, bateu: true };
   }
   passarVez(jogo);
@@ -2389,12 +2407,34 @@ function encerrarRodadaPorEsgotamento(jogo) {
 
 /** Encerra a rodada, conta os pontos das duas duplas e soma no placar. Se
  *  alguma dupla bateu a meta, a PARTIDA encerra. `duplaQueBateu` = "nos"|"eles"
- *  (bônus de batida) ou null (esgotamento). */
-function encerrarRodada(jogo, duplaQueBateu) {
+ *  (bônus de batida) ou null (esgotamento).
+ *
+ *  [PRODUTOR] `assentoQueBateu` = 0..3 de QUEM bateu, ou null quando a rodada
+ *  acabou sem batida (baralho esgotado). Os dois caminhos de batida já tinham o
+ *  assento em escopo e o descartavam aqui — a dupla não identifica a pessoa, e
+ *  perguntas individuais ("foi você quem bateu?") não têm resposta a partir do
+ *  lado. Deduzir premiaria o parceiro que não bateu.
+ *
+ *  É PROVA DE LEGALIDADE, e não só de autoria: o assento só chega até aqui
+ *  depois de o caminho chamador ter aprovado a batida pela regra da modalidade
+ *  (`duplaPodeBater`) e pelo morto da dupla. Por isso não existe — e não deve
+ *  passar a existir — um booleano `batidaLegal` ao lado: seria um segundo lugar
+ *  onde a mesma verdade poderia divergir.
+ *
+ *  `assentoQueBateuFinal` é gravado SÓ quando esta rodada encerra a PARTIDA. É
+ *  o que separa "bateu numa rodada" de "bateu a rodada que acabou com o jogo" —
+ *  e uma rodada intermediária nunca o preenche. */
+function encerrarRodada(jogo, duplaQueBateu, assentoQueBateu = null) {
   if (jogo.rodadaEncerrada) return; // idempotente
   jogo.rodadaEncerrada = true;
   jogo.duplaQueBateu = duplaQueBateu;
+  jogo.assentoQueBateu = Number.isInteger(assentoQueBateu) ? assentoQueBateu : null;
   contarPontos(jogo);
+  // DEPOIS da contagem, porque é ela que decide se a meta caiu. Antes disso não
+  // se sabe se esta rodada foi a última.
+  if (jogo.encerrada && jogo.assentoQueBateuFinal == null) {
+    jogo.assentoQueBateuFinal = jogo.assentoQueBateu;
+  }
 }
 
 /** Valor de cada carta na CONTAGEM (idêntico ao HTML): JOKER=50, Ás=15,
