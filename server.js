@@ -3828,16 +3828,34 @@ function novoPartidaId() {
 // mudança e versiona; e a recusa que NÃO muda nada não versiona.
 // ===========================================================================
 
-/** Campos que NÃO entram na impressão do estado.
+/** Campos da sala que NÃO são estado autoritativo, e por isso não entram na
+ *  impressão. São dois grupos, e só dois:
  *
- *  São o próprio carimbo: incluí-los faria a impressão mudar por causa da
- *  impressão anterior, e a versão avançaria a cada leitura, para sempre.
+ *  1. O PRÓPRIO CARIMBO (`versaoEstado`, `eventoId`, `impressaoEstado`).
+ *     Incluí-los faria a impressão mudar por causa da impressão anterior, e a
+ *     versão avançaria a cada leitura, para sempre.
+ *
+ *  2. ESCRITURAÇÃO DE EMISSÃO (`fimEmitido`). É a trava que garante que o
+ *     evento `fim` sai uma vez só — ela registra que uma NOTIFICAÇÃO foi
+ *     enviada, não que a partida mudou. O estado do encerramento em si
+ *     (`liquidada`, `resumoFinal`, `envelopeEncerramento`) é autoritativo, é
+ *     gravado por `liquidar` ANTES do broadcast, e continua versionando
+ *     normalmente. Sem esta exclusão, mandar o `fim` fabricaria uma versão
+ *     nova logo depois da versão do encerramento — e §5 é explícita: nada que
+ *     não seja mutação da partida pode fingir ser versão nova.
  *
  *  A lista é de EXCLUSÃO, e é assim de propósito. Um campo autoritativo novo
  *  acrescentado à sala amanhã passa a ser versionado sozinho, sem ninguém
  *  precisar lembrar de registrá-lo aqui. Uma lista de inclusão falharia para o
- *  lado errado: o campo novo mudaria sem gerar versão. */
-const CAMPOS_FORA_DA_IMPRESSAO = new Set(["versaoEstado", "eventoId", "impressaoEstado"]);
+ *  lado errado: o campo novo mudaria sem gerar versão.
+ *
+ *  Em compensação, ACRESCENTAR algo aqui é um ato deliberado, e o conteúdo
+ *  exato da lista está fixado por teste (VER-23): incluir um campo que é estado
+ *  de verdade derruba a suíte em vez de silenciar uma mutação. */
+const CAMPOS_FORA_DA_IMPRESSAO = new Set([
+  "versaoEstado", "eventoId", "impressaoEstado", // o carimbo
+  "fimEmitido",                                   // escrituração de emissão
+]);
 
 /** Impressão do estado autoritativo da sala.
  *
