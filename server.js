@@ -17,6 +17,18 @@
 // Se a pasta-fonte `cliente/` for recuperada, RETROPORTAR estas mudanças para a fonte
 // e REGERAR o bundle. Nenhuma outra regra/área foi tocada. Sem deploy.
 // ===================================================================================
+// EXCEÇÃO DOCUMENTADA — AUTENTICAÇÃO DO HANDSHAKE (branch seguranca/ws-auth-identidade)
+// Mesmo motivo acima (fonte `cliente/` ausente): o bundle foi editado à mão para
+// fechar o P0 de identidade — o handshake WebSocket não autenticava ninguém e o
+// `jogadorId` era o que o cliente DIZIA ser. Trechos marcados com `// [PATCH WS-AUTH]`:
+//   • módulo NOVO `auth_firebase` (verificação de Firebase ID Token, sem deps);
+//   • módulo `servidor`: máquina de estados de autenticação, identidade vinculada
+//     e imutável na conexão, e fim da leitura de `msg.jogadorId`;
+//   • módulo `ws_server`: credencial no upgrade HTTP (Authorization: Bearer) e
+//     injeção do verificador real.
+// Nenhuma regra do Buraco, pontuação, baralho, economia ou moderação foi tocada.
+// Sem merge e sem deploy. Ver docs/WS-AUTH-IDENTIDADE.md.
+// ===================================================================================
 (function () {
   var __cache = {};
   var __fabricas = {};
@@ -3575,6 +3587,225 @@ module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
 
   };
 
+  __fabricas["auth_firebase"] = function (module, exports, require) {
+// [PATCH WS-AUTH] servidor/auth_firebase.js — VERIFICAÇÃO DE FIREBASE ID TOKEN
+// Módulo NOVO (OS "Autenticação do handshake WebSocket e vinculação segura de
+// identidade"). Verifica criptograficamente um ID Token do Firebase Auth SEM
+// nenhuma dependência npm — o repositório inteiro é Node puro e o deploy roda
+// `npm start` sem `npm install`, então `firebase-admin` não é uma opção aqui.
+//
+// O que é verificado (é o mesmo conjunto que o Admin SDK aplica em
+// verifyIdToken, MENOS a checagem de revogação — ver DECISÃO 2 abaixo):
+//   • header.alg === "RS256" e header.kid presente  (nada de "none"/HS256:
+//     aceitar outro alg é o clássico ataque de confusão de algoritmo);
+//   • assinatura RSA-SHA256 conferida contra o certificado x509 PÚBLICO do
+//     Google correspondente ao kid;
+//   • aud === FIREBASE_PROJECT_ID;
+//   • iss === https://securetoken.google.com/<FIREBASE_PROJECT_ID>;
+//   • exp no futuro, iat/auth_time não no futuro (tolerância de relógio);
+//   • sub não vazio  → é ELE o uid autenticado.
+//
+// DECISÃO 1 — SEM SEGREDO. Verificar um ID Token exige só a chave PÚBLICA do
+// Google e o project id (que não é segredo). Nenhuma service account, nenhuma
+// private key, nada para versionar. A única variável nova é FIREBASE_PROJECT_ID.
+//
+// DECISÃO 2 — REVOGAÇÃO FORA DESTA CORREÇÃO (risco residual declarado).
+// Checar token revogado exige credencial administrativa (ler `validSince` do
+// usuário), o que traria service account para o runtime. Nesta OS verifica-se
+// assinatura + expiração + audience + issuer. Consequência aceita: um ID Token
+// já emitido continua válido até expirar (Firebase: 1h) mesmo se a sessão for
+// revogada nesse intervalo. Ver docs/WS-AUTH-IDENTIDADE.md.
+//
+// DECISÃO 3 — FAIL CLOSED. Qualquer erro (rede, certificado, parsing, projeto
+// não configurado) resulta em FALHA de autenticação. Não existe fallback para
+// identidade declarada pelo cliente e não existe modo legado.
+
+const crypto = require("crypto");
+const https = require("https");
+
+// Certificados x509 públicos que assinam os ID Tokens do Firebase Auth.
+const URL_CERTIFICADOS =
+  "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+const TOLERANCIA_RELOGIO_S = 60;   // desvio de relógio aceito entre nós e o Google
+const TTL_PADRAO_CERTS_MS = 60 * 60 * 1000;
+
+// Códigos de falha. São para LOG e TESTE — nunca vão inteiros para o cliente
+// (§19: não facilitar enumeração de "por que" a autenticação falhou).
+const FALHA = {
+  SEM_PROJETO: "SEM_PROJETO",
+  SEM_TOKEN: "SEM_TOKEN",
+  TOKEN_MALFORMADO: "TOKEN_MALFORMADO",
+  ALG_NAO_SUPORTADO: "ALG_NAO_SUPORTADO",
+  SEM_KID: "SEM_KID",
+  KID_DESCONHECIDO: "KID_DESCONHECIDO",
+  ASSINATURA_INVALIDA: "ASSINATURA_INVALIDA",
+  EXPIRADO: "EXPIRADO",
+  EMITIDO_NO_FUTURO: "EMITIDO_NO_FUTURO",
+  AUDIENCE_INVALIDO: "AUDIENCE_INVALIDO",
+  ISSUER_INVALIDO: "ISSUER_INVALIDO",
+  SEM_SUJEITO: "SEM_SUJEITO",
+  CERTIFICADOS_INDISPONIVEIS: "CERTIFICADOS_INDISPONIVEIS",
+};
+
+function ehBase64Url(s) {
+  return typeof s === "string" && s.length > 0 && /^[A-Za-z0-9_-]+$/.test(s);
+}
+
+function base64UrlParaBuffer(s) {
+  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+/** Quebra o JWT em header/payload/assinatura. Devolve null se não for um JWT
+ *  compacto bem formado — sem lançar, para o chamador tratar como falha comum. */
+function partesDoToken(token) {
+  if (typeof token !== "string") return null;
+  const p = token.split(".");
+  if (p.length !== 3) return null;
+  if (!ehBase64Url(p[0]) || !ehBase64Url(p[1]) || !ehBase64Url(p[2])) return null;
+  let header, payload;
+  try {
+    header = JSON.parse(base64UrlParaBuffer(p[0]).toString("utf8"));
+    payload = JSON.parse(base64UrlParaBuffer(p[1]).toString("utf8"));
+  } catch (_) { return null; }
+  if (!header || typeof header !== "object") return null;
+  if (!payload || typeof payload !== "object") return null;
+  return {
+    header,
+    payload,
+    assinatura: base64UrlParaBuffer(p[2]),
+    conteudoAssinado: p[0] + "." + p[1],
+  };
+}
+
+/** Busca os certificados públicos do Google (GET simples, sem dependência). */
+function buscarCertificadosHttps() {
+  return new Promise((ok, falha) => {
+    const req = https.get(URL_CERTIFICADOS, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        return falha(new Error("HTTP " + res.statusCode));
+      }
+      let corpo = "";
+      res.setEncoding("utf8");
+      res.on("data", (d) => { corpo += d; });
+      res.on("end", () => {
+        try {
+          const certs = JSON.parse(corpo);
+          const cc = String(res.headers["cache-control"] || "");
+          const m = cc.match(/max-age=(\d+)/);
+          ok({ certs, ttlMs: m ? Number(m[1]) * 1000 : TTL_PADRAO_CERTS_MS });
+        } catch (e) { falha(e); }
+      });
+    });
+    req.setTimeout(5000, () => req.destroy(new Error("timeout")));
+    req.on("error", falha);
+  });
+}
+
+/** Cache dos certificados respeitando o max-age do Google. Uma busca em voo é
+ *  compartilhada por todas as conexões (não faz N requisições em rajada). */
+function criarCacheDeCertificados({ buscar, agora } = {}) {
+  const _buscar = buscar || buscarCertificadosHttps;
+  const _agora = agora || (() => Date.now());
+  let certs = null;
+  let validoAte = 0;
+  let emVoo = null;
+
+  return function obter() {
+    if (certs && _agora() < validoAte) return Promise.resolve(certs);
+    if (emVoo) return emVoo;
+    emVoo = Promise.resolve()
+      .then(_buscar)
+      .then((r) => {
+        certs = (r && r.certs) || {};
+        validoAte = _agora() + ((r && r.ttlMs) || TTL_PADRAO_CERTS_MS);
+        emVoo = null;
+        return certs;
+      })
+      .catch((e) => { emVoo = null; throw e; });
+    return emVoo;
+  };
+}
+
+/**
+ * Cria o verificador de credencial da conexão.
+ *
+ *   const verificar = criarVerificadorFirebase({ projectId: "meu-projeto" });
+ *   const r = await verificar(token);
+ *   // r = { ok: true, uid: "..." }  |  { ok: false, codigo: FALHA.* }
+ *
+ * `buscarCertificados` e `agora` existem para os TESTES injetarem um par de
+ * chaves próprio e um relógio controlado. Não são caminho de produção e não
+ * desligam verificação nenhuma — o teste ainda assina de verdade em RS256.
+ */
+function criarVerificadorFirebase({ projectId, buscarCertificados, agora } = {}) {
+  const obterCerts = criarCacheDeCertificados({ buscar: buscarCertificados, agora });
+  const _agora = agora || (() => Date.now());
+  const issuerEsperado = "https://securetoken.google.com/" + projectId;
+
+  return function verificar(token) {
+    if (!projectId) return Promise.resolve({ ok: false, codigo: FALHA.SEM_PROJETO });
+    if (token == null || token === "") return Promise.resolve({ ok: false, codigo: FALHA.SEM_TOKEN });
+
+    const t = partesDoToken(token);
+    if (!t) return Promise.resolve({ ok: false, codigo: FALHA.TOKEN_MALFORMADO });
+    if (t.header.alg !== "RS256") return Promise.resolve({ ok: false, codigo: FALHA.ALG_NAO_SUPORTADO });
+    if (!t.header.kid || typeof t.header.kid !== "string") {
+      return Promise.resolve({ ok: false, codigo: FALHA.SEM_KID });
+    }
+
+    return obterCerts().then(
+      (certs) => {
+        const cert = certs[t.header.kid];
+        if (!cert) return { ok: false, codigo: FALHA.KID_DESCONHECIDO };
+
+        let assinaturaOk = false;
+        try {
+          assinaturaOk = crypto
+            .createVerify("RSA-SHA256")
+            .update(t.conteudoAssinado)
+            .verify(cert, t.assinatura);
+        } catch (_) { assinaturaOk = false; }
+        if (!assinaturaOk) return { ok: false, codigo: FALHA.ASSINATURA_INVALIDA };
+
+        // Só depois da assinatura conferida é que as claims valem alguma coisa.
+        const p = t.payload;
+        const agoraS = Math.floor(_agora() / 1000);
+        if (typeof p.exp !== "number" || p.exp <= agoraS - TOLERANCIA_RELOGIO_S) {
+          return { ok: false, codigo: FALHA.EXPIRADO };
+        }
+        if (typeof p.iat !== "number" || p.iat > agoraS + TOLERANCIA_RELOGIO_S) {
+          return { ok: false, codigo: FALHA.EMITIDO_NO_FUTURO };
+        }
+        if (typeof p.auth_time === "number" && p.auth_time > agoraS + TOLERANCIA_RELOGIO_S) {
+          return { ok: false, codigo: FALHA.EMITIDO_NO_FUTURO };
+        }
+        if (p.aud !== projectId) return { ok: false, codigo: FALHA.AUDIENCE_INVALIDO };
+        if (p.iss !== issuerEsperado) return { ok: false, codigo: FALHA.ISSUER_INVALIDO };
+        if (typeof p.sub !== "string" || p.sub === "" || p.sub.length > 128) {
+          return { ok: false, codigo: FALHA.SEM_SUJEITO };
+        }
+        // `expiraEm` sai daqui em MILISSEGUNDOS porque a conexão precisa dele:
+        // token válido no handshake NÃO compra sessão eterna. Quem manda na
+        // validade da conexão é o `exp` do token, não o instante do aperto de mão.
+        return { ok: true, uid: p.sub, expiraEm: p.exp * 1000 };
+      },
+      // rede/certificado fora do ar → NÃO autentica (fail closed)
+      () => ({ ok: false, codigo: FALHA.CERTIFICADOS_INDISPONIVEIS })
+    );
+  };
+}
+
+module.exports = {
+  criarVerificadorFirebase,
+  criarCacheDeCertificados,
+  partesDoToken,
+  FALHA,
+  URL_CERTIFICADOS,
+};
+
+  };
+
   __fabricas["servidor"] = function (module, exports, require) {
 // servidor/servidor.js — SERVIDOR DE SALAS (protocolo), multiplayer M2
 // Despachante de mensagens INDEPENDENTE DE TRANSPORTE. Fala o protocolo do
@@ -3590,8 +3821,55 @@ module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
 //   const id = servidor.conectar(enviar)  // enviar(msgObj) manda pro cliente
 //   servidor.processar(id, msgObj)         // recebe uma mensagem do cliente
 //   servidor.desconectar(id)               // cliente caiu/saiu
+//
+// [PATCH WS-AUTH] IDENTIDADE — leia antes de mexer aqui.
+// A conexão nasce SEM identidade. O cliente não escolhe quem ele é: ele
+// APRESENTA uma credencial, o servidor VERIFICA, e o servidor DERIVA o uid.
+//
+//   CONECTADO_NAO_AUTENTICADO  →  AUTENTICANDO  →  AUTENTICADO
+//                                      ↓ (falha)
+//                                   recusado + conexão fechada
+//
+// Enquanto não estiver AUTENTICADO, o único tipo aceito é "auth". Todo o resto
+// (mesa, jogada, perfil, avatar, carteira) é recusado sem efeito colateral.
+// Depois de AUTENTICADO, `c.uidAutenticado` e `c.jogadorId` são gravados como
+// propriedades NÃO-GRAVÁVEIS: nenhum comando posterior troca a identidade da
+// conexão, e nenhum `msg.jogadorId` é lido em lugar nenhum deste arquivo.
 
 const { criarGerenciador } = require("./salas");
+
+// [PATCH WS-AUTH] estados de autenticação da conexão
+//
+//   CONECTADO_NAO_AUTENTICADO → AUTENTICANDO → AUTENTICADO
+//                                                   ↓ passou o `exp` do token
+//                                          CREDENCIAL_EXPIRADA
+//                                             ↓ auth com token novo do MESMO uid
+//                                              AUTENTICADO
+//                                             ↓ carência estourada / outro uid
+//                                            conexão fechada
+const AUTH = {
+  NAO_AUTENTICADO: "CONECTADO_NAO_AUTENTICADO",
+  AUTENTICANDO: "AUTENTICANDO",
+  AUTENTICADO: "AUTENTICADO",
+  EXPIRADA: "CREDENCIAL_EXPIRADA",
+};
+
+// [PATCH WS-AUTH] VERSÃO DO PROTOCOLO DE CONEXÃO.
+//   1 = protocolo antigo, sem autenticação (identidade declarada pelo cliente).
+//   2 = este: a conexão apresenta credencial e o servidor deriva a identidade.
+// O mínimo é 2 e não vai baixar: aceitar 1 seria exatamente o fallback que
+// reabriria a confiança em `jogadorId` vindo do cliente.
+const PROTOCOLO_ATUAL = 2;
+const PROTOCOLO_MINIMO = 2;
+
+// Carência para renovar a credencial de uma conexão que expirou em pleno uso.
+// Curta de propósito: é só o tempo de o cliente pedir um token novo ao SDK.
+const CARENCIA_RENOVACAO_MS = 30000;
+
+// [PATCH WS-AUTH] Campos de identidade que o cliente PODE mandar por hábito ou
+// por má-fé. Nenhum deles autentica nada; se vierem divergindo da identidade
+// vinculada, o comando é RECUSADO (a divergência indica protocolo manipulado).
+const CAMPOS_DE_IDENTIDADE = ["jogadorId", "uid", "playerId", "usuarioId", "ownerId"];
 
 function criarServidor(opts = {}) {
   // autoBots:false → o servidor controla o ritmo dos bots (respiro). `agendar`
@@ -3600,18 +3878,194 @@ function criarServidor(opts = {}) {
   const ger = criarGerenciador(Object.assign({}, opts, { autoBots: false }));
   const contas = opts.contas || null; // cofre de contas (opcional)
   const agendar = opts.agendar || ((fn) => fn());
-  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId }
+  // [PATCH WS-AUTH] verificador de credencial. SEM PADRÃO PERMISSIVO: se não
+  // for injetado, toda autenticação falha e nenhum comando de jogador roda.
+  // É de propósito — não existe "servidor sem auth" nem modo legado.
+  const verificarToken = opts.verificarToken || (() => Promise.resolve({ ok: false, codigo: "SEM_VERIFICADOR" }));
+  // [PATCH WS-AUTH] §12 — UID (Firebase) x jogadorId (domínio). Hoje o cofre de
+  // contas é chaveado pelo próprio uid: a relação é identidade, mas ela é
+  // decidida AQUI, no servidor, e nunca informada pelo cliente. Se um dia houver
+  // tabela de perfis, é só injetar outra derivação — o resto do arquivo não muda.
+  const jogadorIdDoUid = opts.jogadorIdDoUid || ((uid) => uid);
+  // [PATCH WS-AUTH] relógio e agendador injetáveis: a expiração da sessão
+  // precisa ser provável em teste sem esperar uma hora de verdade.
+  const agora = opts.agora || (() => Date.now());
+  const agendarEm = opts.agendarEm || ((ms, fn) => {
+    const t = setTimeout(fn, ms);
+    if (t.unref) t.unref();
+    return () => clearTimeout(t);
+  });
+  const carenciaMs = opts.carenciaRenovacaoMs != null ? opts.carenciaRenovacaoMs : CARENCIA_RENOVACAO_MS;
+  const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId, uidAutenticado, estadoAuth, expiraEm }
   let seq = 0;
 
-  function conectar(enviar) {
+  function conectar(enviar, opcoes = {}) {
     const id = "c" + ++seq;
-    conexoes[id] = { id, enviar, codigo: null, assento: null, jogadorId: null };
+    conexoes[id] = {
+      id, enviar, codigo: null, assento: null,
+      // [PATCH WS-AUTH] nasce sem identidade nenhuma
+      jogadorId: null,
+      uidAutenticado: null,
+      estadoAuth: AUTH.NAO_AUTENTICADO,
+      expiraEm: null,        // instante (ms) em que a credencial desta conexão morre
+      _cancelarExpiracao: null,
+      // Um cliente do protocolo 1 nunca manda `auth`. Este marcador é o que
+      // distingue "app velho falando o dialeto antigo" de "app novo que ainda
+      // não autenticou" — e é o que permite responder ATUALIZACAO_OBRIGATORIA
+      // em vez de um erro genérico que o app velho não sabe explicar.
+      tentouAutenticar: false,
+      fechar: typeof opcoes.fechar === "function" ? opcoes.fechar : null,
+    };
     return id;
+  }
+
+  // [PATCH WS-AUTH] Grava a identidade derivada do token na conexão, de forma
+  // IMUTÁVEL (§10). Depois disto, `c.jogadorId = qualquer coisa` não tem efeito.
+  function vincularIdentidade(c, uid) {
+    const jid = String(jogadorIdDoUid(uid));
+    Object.defineProperty(c, "uidAutenticado", { value: String(uid), writable: false, configurable: false, enumerable: true });
+    Object.defineProperty(c, "jogadorId", { value: jid, writable: false, configurable: false, enumerable: true });
+    c.estadoAuth = AUTH.AUTENTICADO;
+  }
+
+  /** [PATCH WS-AUTH] (Re)arma a validade da conexão a partir do `exp` do token.
+   *  A sessão morre quando o token morre — ficar de pé não renova nada. */
+  function armarExpiracao(c, expiraEm) {
+    if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} }
+    c.expiraEm = expiraEm;
+    c.estadoAuth = AUTH.AUTENTICADO;
+    const falta = Math.max(0, expiraEm - agora());
+    c._cancelarExpiracao = agendarEm(falta, () => expirar(c));
+  }
+
+  /** [PATCH WS-AUTH] A credencial venceu. A conexão NÃO continua valendo: ela
+   *  para de receber estado, para de aceitar comando e ganha uma carência curta
+   *  para apresentar um token novo DO MESMO uid. Estourou a carência, cai.
+   *
+   *  Renovar no lugar de derrubar direto é o caminho menos destrutivo: derrubar
+   *  a cada hora entregaria o assento de quem está numa partida longa ao bot
+   *  (o servidor não tem retomada de assento). A fronteira não afrouxa — durante
+   *  a carência o único tipo aceito é `auth`, igual ao estado inicial. */
+  function expirar(c) {
+    if (!conexoes[c.id] || c.estadoAuth !== AUTH.AUTENTICADO) return;
+    c.estadoAuth = AUTH.EXPIRADA;
+    c._cancelarExpiracao = agendarEm(carenciaMs, () => {
+      if (conexoes[c.id] && c.estadoAuth === AUTH.EXPIRADA) {
+        console.warn("[auth] conexão " + c.id + " encerrada: credencial expirada e não renovada");
+        try { c.enviar({ tipo: "authFalhou", motivo: "credencial recusada" }); } catch (_) {}
+        if (c.fechar) { try { c.fechar(); } catch (_) {} }
+        desconectar(c.id);
+      }
+    });
+    try {
+      c.enviar({ tipo: "authExpirou", motivo: "credencial expirada", carenciaMs });
+    } catch (_) {}
+  }
+
+  /** [PATCH WS-AUTH] Recebe a credencial, verifica e vincula. Devolve uma
+   *  Promise para os testes conseguirem esperar; os chamadores de transporte
+   *  podem ignorar. NUNCA registra o token em log (§19). */
+  function autenticar(id, token, protocolo) {
+    const c = conexoes[id];
+    if (!c) return Promise.resolve(false);
+    c.tentouAutenticar = true;
+
+    // PONTE DE VERSÃO — antes de olhar a credencial. Cliente velho demais leva
+    // uma resposta que ele consegue explicar para a pessoa, e nenhum detalhe de
+    // autenticação vaza para ele.
+    const v = protocolo == null ? 1 : Number(protocolo);
+    if (!Number.isFinite(v) || v < PROTOCOLO_MINIMO) {
+      console.warn("[auth] conexão " + c.id + " recusada: protocolo " + v + " < " + PROTOCOLO_MINIMO);
+      try {
+        c.enviar({
+          tipo: "atualizacaoObrigatoria",
+          codigo: "ATUALIZACAO_OBRIGATORIA",
+          motivo: "atualize o aplicativo para continuar jogando online",
+          protocoloMinimo: PROTOCOLO_MINIMO,
+          protocoloServidor: PROTOCOLO_ATUAL,
+        });
+      } catch (_) {}
+      if (c.fechar) { try { c.fechar(); } catch (_) {} }
+      return Promise.resolve(false);
+    }
+
+    if (c.estadoAuth === AUTH.AUTENTICANDO) {
+      enviarPara(id, { tipo: "authFalhou", motivo: "credencial recusada" });
+      return Promise.resolve(false);
+    }
+    // Reapresentar credencial numa conexão já autenticada (ou expirada) não
+    // troca identidade. Mesmo uid → renova a validade. Outro uid → é tentativa
+    // de troca: recusa e derruba a conexão.
+    if (c.estadoAuth === AUTH.AUTENTICADO || c.estadoAuth === AUTH.EXPIRADA) {
+      return Promise.resolve()
+        .then(() => verificarToken(token))
+        .then((r) => {
+          if (!conexoes[id]) return false;
+          if (r && r.ok && String(r.uid) === c.uidAutenticado && Number.isFinite(r.expiraEm)) {
+            armarExpiracao(c, r.expiraEm);
+            enviarPara(id, { tipo: "autenticado", jogadorId: c.jogadorId, protocolo: PROTOCOLO_ATUAL });
+            return true;
+          }
+          recusar(c, r && r.ok ? "TROCA_DE_IDENTIDADE" : "RENOVACAO_RECUSADA");
+          return false;
+        })
+        .catch(() => { recusar(c, "ERRO_INTERNO"); return false; });
+    }
+
+    c.estadoAuth = AUTH.AUTENTICANDO;
+    return Promise.resolve()
+      .then(() => verificarToken(token))
+      .then((r) => {
+        if (!conexoes[id]) return false;            // caiu durante a verificação
+        if (!r || !r.ok || !r.uid) {
+          recusar(c, (r && r.codigo) || "CREDENCIAL_INVALIDA");
+          return false;
+        }
+        // Verificador que não diz até quando o token vale não autentica: sem
+        // isso a conexão viveria para sempre, que é justamente o que não pode.
+        if (!Number.isFinite(r.expiraEm)) {
+          recusar(c, "SEM_EXPIRACAO");
+          return false;
+        }
+        vincularIdentidade(c, r.uid);
+        armarExpiracao(c, r.expiraEm);
+        if (contas) contas.obterOuCriar(c.jogadorId, null);
+        enviarPara(id, { tipo: "autenticado", jogadorId: c.jogadorId, protocolo: PROTOCOLO_ATUAL });
+        return true;
+      })
+      .catch(() => { recusar(c, "ERRO_INTERNO"); return false; });
+  }
+
+  /** [PATCH WS-AUTH] Fail closed: volta ao estado não autenticado, avisa o
+   *  cliente com motivo GENÉRICO (§19 — nada de expirado/assinatura/audience
+   *  para o cliente enumerar) e derruba a conexão. O código detalhado fica só
+   *  no log do servidor, e o token jamais é registrado. */
+  function recusar(c, codigo) {
+    if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} c._cancelarExpiracao = null; }
+    if (c.estadoAuth === AUTH.NAO_AUTENTICADO && !c.fechar) return;
+    c.estadoAuth = AUTH.NAO_AUTENTICADO;
+    console.warn("[auth] conexão " + c.id + " recusada: " + codigo);
+    try { c.enviar({ tipo: "authFalhou", motivo: "credencial recusada" }); } catch (_) {}
+    if (c.fechar) { try { c.fechar(); } catch (_) {} }
+  }
+
+  /** [PATCH WS-AUTH] §11 — o ataque principal. Token do jogador A com
+   *  `jogadorId: B` no comando não pode virar ação do B. Aqui a identidade
+   *  declarada é comparada com a vinculada e a divergência RECUSA o comando. */
+  function identidadeDivergente(c, msg) {
+    for (const campo of CAMPOS_DE_IDENTIDADE) {
+      const v = msg[campo];
+      if (v == null || v === "") continue;
+      if (String(v) !== c.jogadorId && String(v) !== c.uidAutenticado) return campo;
+    }
+    return null;
   }
 
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
+    // [PATCH WS-AUTH] não deixa timer de expiração pendurado numa conexão morta
+    if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} c._cancelarExpiracao = null; }
     if (c.codigo != null && c.assento != null) {
       const cod = c.codigo;
       ger.sair({ codigo: cod, assento: c.assento });
@@ -3631,10 +4085,43 @@ function criarServidor(opts = {}) {
     if (!c) return;
     if (!msg || !msg.tipo) return enviarPara(id, { tipo: "erro", motivo: "mensagem sem tipo" });
 
+    // [PATCH WS-AUTH] FRONTEIRA DE AUTENTICAÇÃO. Antes de AUTENTICADO só passa
+    // a própria autenticação. Nada de mesa, jogada, perfil, avatar, carteira ou
+    // qualquer coisa pertencente a um jogador — e sem efeito colateral nenhum.
+    if (msg.tipo === "auth") return autenticar(id, msg.token, msg.protocolo);
+    // Guarda preguiçosa da expiração: o relógio pode ter passado do `exp` sem o
+    // agendador ter rodado ainda (processo suspenso, teste com relógio falso).
+    // Comando não espera timer — a validade é conferida no ato.
+    if (c.estadoAuth === AUTH.AUTENTICADO && c.expiraEm != null && agora() >= c.expiraEm) {
+      expirar(c);
+    }
+    if (c.estadoAuth === AUTH.EXPIRADA) {
+      return enviarPara(id, { tipo: "erro", motivo: "credencial expirada", codigo: "CREDENCIAL_EXPIRADA" });
+    }
+    if (c.estadoAuth !== AUTH.AUTENTICADO) {
+      // Cliente que NUNCA tentou autenticar está falando o protocolo antigo:
+      // é app desatualizado, não app novo fora de ordem. A resposta diz isso.
+      if (!c.tentouAutenticar) {
+        return enviarPara(id, {
+          tipo: "erro",
+          codigo: "ATUALIZACAO_OBRIGATORIA",
+          motivo: "atualize o aplicativo para continuar jogando online",
+          protocoloMinimo: PROTOCOLO_MINIMO,
+        });
+      }
+      return enviarPara(id, { tipo: "erro", motivo: "conexão não autenticada", codigo: "NAO_AUTENTICADO" });
+    }
+    // [PATCH WS-AUTH] identidade declarada no comando ≠ identidade da conexão
+    const divergente = identidadeDivergente(c, msg);
+    if (divergente) {
+      console.warn("[auth] conexão " + c.id + ": campo '" + divergente + "' divergente da identidade vinculada");
+      return enviarPara(id, { tipo: "erro", motivo: "identidade divergente", codigo: "IDENTIDADE_DIVERGENTE" });
+    }
+
     switch (msg.tipo) {
       case "criarMesa": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        // [PATCH WS-AUTH] c.jogadorId vem do token verificado, não da mensagem.
+        if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo; c.assento = r.assento;
@@ -3642,8 +4129,9 @@ function criarServidor(opts = {}) {
         return broadcastSala(r.codigo);
       }
       case "entrarMesa": {
-        c.jogadorId = msg.jogadorId || c.jogadorId || null;
-        if (contas && c.jogadorId) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        // [PATCH WS-AUTH] idem: identidade da conexão, nunca da mensagem. É por
+        // aqui que a reconexão volta pra mesa — e ela só chega aqui autenticada.
+        if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
@@ -3652,7 +4140,8 @@ function criarServidor(opts = {}) {
       }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
-        const jid = msg.jogadorId || c.jogadorId;
+        // [PATCH WS-AUTH] só a PRÓPRIA conta: o jid é o da conexão autenticada.
+        const jid = c.jogadorId;
         if (!contas || !jid) return enviarPara(id, { tipo: "perfil", conta: null });
         const conta = contas.obterOuCriar(jid, msg.apelido);
         return enviarPara(id, { tipo: "perfil", conta: Object.assign({ posicao: contas.posicaoNoRanking(jid) }, conta) });
@@ -3663,7 +4152,8 @@ function criarServidor(opts = {}) {
       }
       case "definirAvatar": {
         // foto própria (upload), avatar da galeria, ou remover (voltar ao padrão)
-        const jid = msg.jogadorId || c.jogadorId;
+        // [PATCH WS-AUTH] o avatar alterado é sempre o da conexão autenticada.
+        const jid = c.jogadorId;
         if (!contas || !jid) return enviarPara(id, { tipo: "avatar", conta: null });
         contas.obterOuCriar(jid, msg.apelido);
         let r;
@@ -3756,7 +4246,9 @@ function criarServidor(opts = {}) {
     const placar = sala.jogo && sala.jogo.placar;
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      if (c.codigo === codigo && c.assento != null) {
+      // [PATCH WS-AUTH] o resumo carrega carteira (moedas, XP): só vai para
+      // conexão com credencial VÁLIDA agora, não meramente válida um dia.
+      if (c.codigo === codigo && c.assento != null && c.estadoAuth === AUTH.AUTENTICADO) {
         c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar });
       }
     }
@@ -3768,16 +4260,21 @@ function criarServidor(opts = {}) {
   function broadcastSala(codigo) {
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      if (c.codigo === codigo && c.assento != null) {
+      // [PATCH WS-AUTH] a visão do assento é informação do jogador; conexão com
+      // credencial vencida para de recebê-la na hora, sem esperar comando dela.
+      if (c.codigo === codigo && c.assento != null && c.estadoAuth === AUTH.AUTENTICADO) {
         c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
       }
     }
   }
 
-  return { conectar, desconectar, processar, broadcastSala, ger, conexoes };
+  // [PATCH WS-AUTH] `autenticar` é exposto porque o transporte pode receber a
+  // credencial ANTES da primeira mensagem do protocolo (Authorization no
+  // upgrade HTTP) — ver ws_server.
+  return { conectar, desconectar, processar, autenticar, broadcastSala, ger, conexoes };
 }
 
-module.exports = { criarServidor };
+module.exports = { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO };
 
   };
 
@@ -3799,6 +4296,7 @@ const fs = require("fs");
 const path = require("path");
 const { criarServidor } = require("./servidor");
 const { criarContas } = require("./contas");
+const { criarVerificadorFirebase } = require("./auth_firebase"); // [PATCH WS-AUTH]
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const OP = { CONT: 0x0, TEXT: 0x1, BIN: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa };
@@ -3911,6 +4409,15 @@ function criarConexao(socket, handlers) {
   return { enviarTexto, fechar, get vivo() { return vivo; } };
 }
 
+/** [PATCH WS-AUTH] Extrai o token de um `Authorization: Bearer <token>`.
+ *  Devolve null (e nunca lança) para qualquer coisa que não seja exatamente
+ *  isso. O valor NÃO é registrado em log em lugar nenhum (§19). */
+function bearerDoCabecalho(valor) {
+  if (typeof valor !== "string") return null;
+  const m = valor.match(/^Bearer\s+(\S+)$/i);
+  return m ? m[1] : null;
+}
+
 function iniciar(porta) {
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
@@ -3918,7 +4425,16 @@ function iniciar(porta) {
   // COFRE de contas: persiste em DADOS_DIR (no Railway, um Volume montado; local,
   // ./dados). Se não houver disco gravável, cai pra memória e o jogo roda igual.
   const contas = criarContas();
-  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas });
+  // [PATCH WS-AUTH] Verificador de credencial da conexão. FIREBASE_PROJECT_ID é
+  // o id do projeto Firebase (NÃO é segredo — nenhuma service account, nenhuma
+  // private key entra aqui). Sem ele, toda autenticação falha e o servidor não
+  // aceita comando de jogador nenhum: é fail closed de propósito.
+  const projectId = process.env.FIREBASE_PROJECT_ID || "";
+  if (!projectId) {
+    console.warn("[auth] FIREBASE_PROJECT_ID não configurado — NENHUMA conexão vai autenticar.");
+  }
+  const verificarToken = criarVerificadorFirebase({ projectId });
+  const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas, verificarToken });
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
@@ -3961,6 +4477,17 @@ function iniciar(porta) {
     );
     socket.setNoDelay(true);
 
+    // [PATCH WS-AUTH] §8 — a credencial vem no cabeçalho do upgrade, que é a
+    // fronteira mais forte que esta stack oferece: o token não passa por URL
+    // nem por query string, então não cai em log de acesso, proxy ou métrica.
+    // A leitura é EXCLUSIVAMENTE do header; `req.url` nunca é consultado para
+    // identidade — se alguém mandar ?token=..., é simplesmente ignorado.
+    const tokenDoHandshake = bearerDoCabecalho(req.headers["authorization"]);
+    // A versão do protocolo acompanha a credencial na MESMA fronteira. Sem ela
+    // o cliente é tratado como protocolo 1 (antigo) e leva ATUALIZACAO_OBRIGATORIA
+    // — a ponte de versão não tem porta dos fundos.
+    const protocoloDoHandshake = Number(req.headers["x-bmv-protocolo"]) || 1;
+
     let idConn = null;
     const conn = criarConexao(socket, {
       message: (str) => {
@@ -3969,7 +4496,16 @@ function iniciar(porta) {
       },
       close: () => { if (idConn) { servidor.desconectar(idConn); idConn = null; } },
     });
-    idConn = servidor.conectar((msg) => conn.enviarTexto(JSON.stringify(msg)));
+    idConn = servidor.conectar(
+      (msg) => conn.enviarTexto(JSON.stringify(msg)),
+      // fail closed: credencial recusada derruba a conexão em vez de deixá-la
+      // aberta tentando de novo.
+      { fechar: () => conn.fechar(1008) }
+    );
+    // Clientes que não conseguem mandar cabeçalho no upgrade (navegador) ficam
+    // em CONECTADO_NAO_AUTENTICADO e autenticam pela primeira mensagem
+    // ({tipo:"auth", token}); até lá nenhum comando de jogador roda.
+    if (tokenDoHandshake) servidor.autenticar(idConn, tokenDoHandshake, protocoloDoHandshake);
   });
 
   http_server.listen(porta, () => {
@@ -3981,11 +4517,22 @@ function iniciar(porta) {
 
 if (require.main === module) iniciar();
 
-module.exports = { iniciar, encodeFrame };
+module.exports = { iniciar, encodeFrame, bearerDoCabecalho };
 
   };
 
 
-  // sobe o servidor WebSocket (usa a porta de PORT, padrão 8080)
-  __require("ws_server").iniciar();
+  // [PATCH WS-AUTH] Fronteira de teste.
+  // Executado como programa (`node server.js`, que é o comando do Railway) o
+  // comportamento é EXATAMENTE o de antes: sobe o WebSocket na porta de PORT.
+  // Carregado com `require(...)` — só os testes fazem isso — ele NÃO abre porta
+  // nenhuma e apenas expõe o registro interno de módulos, para que a suíte possa
+  // montar conexões falsas sem subir rede. Sem esta saída, `require` deste
+  // arquivo iniciaria um listener e a suíte não teria como rodar.
+  if (require.main === module) {
+    // sobe o servidor WebSocket (usa a porta de PORT, padrão 8080)
+    __require("ws_server").iniciar();
+  } else {
+    module.exports = { require: __require };
+  }
 })();
