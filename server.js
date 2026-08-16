@@ -3790,6 +3790,115 @@ function novoPartidaId() {
   return crypto.randomUUID();
 }
 
+// ===========================================================================
+// [VERSAO] VERSIONAMENTO DA VISÃO AUTORITATIVA
+//
+// O problema: o evento `estado` saía sem nenhuma marca de emissão. Duas visões
+// idênticas no fio eram indistinguíveis de uma visão repetida, e uma visão
+// atrasada (reenvio, reconexão, corrida entre conexões) chegava sem nada que
+// permitisse ao cliente recusá-la. O cliente Dart já tinha uma heurística de
+// "este estado pode substituir o anterior?" — sem base formal nenhuma.
+//
+// A solução: todo evento `estado` carrega o par (versaoEstado, eventoId).
+//
+//   versaoEstado  inteiro monotônico, atribuído pelo servidor, que avança
+//                 EXATAMENTE uma vez por mutação autoritativa consolidada;
+//   eventoId      identificador opaco, estável enquanto a versão for a mesma.
+//
+// POR QUE IMPRESSÃO DE ESTADO, E NÃO UM CONTADOR NOS PONTOS DE MUTAÇÃO.
+//
+// Um contador exigiria um `++` em cada lugar que muta a mesa, e esses lugares
+// não são um só: `entrarMesa`, `iniciarPartida`, `aplicarJogada`, `avancarBots`,
+// `jogarUmBot`, `sair`, `liquidar` — e ainda `afkBot`/`afkVoltar`, que mexem em
+// `sala.jogo.assentos[i].tipo` de DENTRO do despachante, fora deste arquivo.
+// Esquecer um `++` produziria o pior defeito possível: um estado novo emitido
+// com a versão velha, que o cliente descartaria como repetido. O erro seria
+// silencioso e nenhum teste de regra o pegaria.
+//
+// A impressão inverte o risco. Ela pergunta ao próprio estado se ele mudou, e
+// por isso cobre de graça toda mutação — inclusive as duas que acontecem fora
+// do gerenciador, e inclusive as que alguém escrever amanhã. O modo de falhar
+// deixa de ser "não incrementou" e passa a ser "incrementou à toa", que é
+// visível e inofensivo: o cliente processa uma visão que ele já tinha.
+//
+// Ela também acerta um caso que o contador erraria. Uma jogada RECUSADA pode
+// mudar o estado — o foul de abertura vulnerável devolve as cartas para a mão,
+// e `aplicarJogada` retransmite antes de responder o erro. Contar "comandos
+// aceitos" daria a mesma versão para dois estados diferentes. A impressão vê a
+// mudança e versiona; e a recusa que NÃO muda nada não versiona.
+// ===========================================================================
+
+/** Campos que NÃO entram na impressão do estado.
+ *
+ *  São o próprio carimbo: incluí-los faria a impressão mudar por causa da
+ *  impressão anterior, e a versão avançaria a cada leitura, para sempre.
+ *
+ *  A lista é de EXCLUSÃO, e é assim de propósito. Um campo autoritativo novo
+ *  acrescentado à sala amanhã passa a ser versionado sozinho, sem ninguém
+ *  precisar lembrar de registrá-lo aqui. Uma lista de inclusão falharia para o
+ *  lado errado: o campo novo mudaria sem gerar versão. */
+const CAMPOS_FORA_DA_IMPRESSAO = new Set(["versaoEstado", "eventoId", "impressaoEstado"]);
+
+/** Impressão do estado autoritativo da sala.
+ *
+ *  Não é hash criptográfico de segurança — é detecção de mudança. Só precisa
+ *  ser estável para o mesmo estado e diferente para estados diferentes.
+ *
+ *  `log` entra pela CONTAGEM, não pelo conteúdo: ele só cresce (uma linha por
+ *  turno de bot), nunca é reescrito, e serializá-lo inteiro a cada emissão
+ *  custaria proporcionalmente ao tamanho da partida sem detectar nada que o
+ *  tamanho já não detecte.
+ *
+ *  Falha de serialização NÃO é silenciada e NÃO devolve a impressão anterior:
+ *  devolve um valor único, que força o carimbo a avançar. Entre "repetir a
+ *  versão de um estado que talvez tenha mudado" e "avançar a versão de um
+ *  estado que talvez não tenha mudado", só o segundo é seguro — o cliente
+ *  reprocessa uma visão igual, em vez de descartar uma visão nova. */
+function impressaoDoEstado(sala) {
+  try {
+    const projecao = {};
+    for (const chave of Object.keys(sala).sort()) {
+      if (CAMPOS_FORA_DA_IMPRESSAO.has(chave)) continue;
+      projecao[chave] = chave === "log" ? (sala.log ? sala.log.length : 0) : sala[chave];
+    }
+    return crypto.createHash("sha1").update(JSON.stringify(projecao)).digest("hex");
+  } catch (e) {
+    console.error("[versao] impressao do estado falhou; versao sera avancada por seguranca · mesa=" +
+      sala.codigo + " erro=" + e.message);
+    return "indeterminada-" + crypto.randomUUID();
+  }
+}
+
+/** PONTO ÚNICO DE ATRIBUIÇÃO DA VERSÃO. Nenhum outro lugar escreve
+ *  `versaoEstado` ou `eventoId` — nem o despachante, nem a conexão, nem o
+ *  transporte.
+ *
+ *  Atômico porque é síncrono: o Node roda uma única linha de execução, e entre
+ *  ler a impressão e gravar o carimbo não existe ponto de suspensão. Duas
+ *  conexões não conseguem carimbar em paralelo nem produzir versão regressiva —
+ *  a segunda encontra o carimbo da primeira já gravado.
+ *
+ *  Idempotente: chamar de novo sem mutação no meio devolve o MESMO par. É o que
+ *  faz as quatro visões de assento e a visão de espectador saírem carimbadas
+ *  igual, e é o que faz reenvio e reconexão reaproveitarem a versão vigente em
+ *  vez de inventarem uma.
+ *
+ *  `eventoId` é `randomUUID`, e não algo derivado da versão ou da partida, por
+ *  dois motivos: não pode colidir com o de outra partida (nem numa revanche na
+ *  mesma sala) e não pode ser parseável — id derivado convida o cliente a ler
+ *  dentro dele, e aí o formato vira contrato. Sendo opaco, não carrega uid,
+ *  token, carta, mão nem qualquer coisa do estado: é sorteado, não calculado. */
+function carimbarEstado(sala) {
+  if (!sala) return null;
+  const atual = impressaoDoEstado(sala);
+  if (sala.impressaoEstado !== atual) {
+    sala.impressaoEstado = atual;
+    sala.versaoEstado = (sala.versaoEstado || 0) + 1;
+    sala.eventoId = crypto.randomUUID();
+  }
+  return { versaoEstado: sala.versaoEstado, eventoId: sala.eventoId };
+}
+
 /** Retrato imutável de quem ocupa cada assento, tirado no início da partida.
  *
  *  O `uid` de humano vem de `sala.assentos[i].jogadorId`, que o despachante
@@ -3942,6 +4051,19 @@ function criarGerenciador(opts = {}) {
       partidaId: null,
       participantes: null,
       envelopeEncerramento: null,
+      // [VERSAO] Carimbo da visão autoritativa. Nasce em zero e SEM eventoId:
+      // zero significa "nenhum estado autoritativo foi emitido ainda", e não
+      // "primeira versão". O primeiro carimbo — no primeiro envio de estado —
+      // já entrega versão 1, então nenhuma visão sai com versaoEstado 0.
+      //
+      // A versão NÃO reinicia na revanche. A sala é reaproveitável (mesmo
+      // código digitável) e a partida não; manter o contador subindo pela vida
+      // da sala elimina a única janela em que dois estados diferentes poderiam
+      // exibir o mesmo número. `eventoId` sorteado fecha o resto: nem entre
+      // partidas, nem entre salas, dois eventos colidem.
+      versaoEstado: 0,
+      eventoId: null,
+      impressaoEstado: null,
     };
     return { codigo, assento: 0 };
   }
@@ -4196,12 +4318,39 @@ function criarGerenciador(opts = {}) {
   // visão de assento com campos removidos.
   // =========================================================================
 
-  /** Papel → serializador. É a ÚNICA porta de estado da mesa. */
+  /** Papel → serializador. É a ÚNICA porta de estado da mesa.
+   *
+   *  [VERSAO] E é por ser única que ela também é onde o estado é CARIMBADO.
+   *  Nenhuma visão sai desta camada sem passar por aqui, então nenhuma visão
+   *  escapa do carimbo — e o carimbo é lido logo depois por `metadadosDe`,
+   *  sobre a mesma sala, no mesmo passo síncrono.
+   *
+   *  A ordem importa: carimba ANTES de serializar. Os dois serializadores só
+   *  leem o estado (montam objetos novos; `injetarAvatares` escreve na visão,
+   *  nunca na sala), então serializar não muda a impressão e a visão entregue é
+   *  exatamente a que o carimbo descreve. */
   function visaoPara({ codigo, papel, assento } = {}) {
+    if (salas[codigo]) carimbarEstado(salas[codigo]);
     if (papel === "jogador" && Number.isInteger(assento)) return visao(codigo, assento);
     if (papel === "espectador") return visaoEspectador(codigo);
     // Sem papel reconhecido não existe payload de estado. Fail-closed.
     return { erro: "sem acesso a esta mesa" };
+  }
+
+  /** [VERSAO] O carimbo VIGENTE da mesa, para o despachante montar o envelope.
+   *
+   *  Só LÊ — quem atribui é `carimbarEstado`, chamado pela porta de projeção.
+   *  Manter a leitura separada da atribuição é o que garante que as quatro
+   *  visões de assento e a do espectador saiam com o mesmo par: a primeira
+   *  chamada de `visaoPara` do laço carimba, as seguintes encontram a impressão
+   *  igual e reaproveitam.
+   *
+   *  Mesa inexistente devolve `null`. Não se inventa versão para estado que não
+   *  existe — quem chama decide o que fazer com a ausência. */
+  function metadadosDe(codigo) {
+    const sala = salas[codigo];
+    if (!sala) return null;
+    return { versaoEstado: sala.versaoEstado || 0, eventoId: sala.eventoId || null };
   }
 
   /** Avatares são PÚBLICOS (a mesa inteira desenha a foto de quem joga). */
@@ -4301,7 +4450,7 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair, liquidar, outbox };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox };
 }
 
 module.exports = {
@@ -4311,6 +4460,9 @@ module.exports = {
   montarEnvelopeEncerramento, mapaDeParticipantes, novoPartidaId,
   VERSAO_CONTRATO_ENCERRAMENTO, MOTIVO_META, MOTIVO_DESCONHECIDO,
   TIPOS_DE_PARTIDA, TIPOS_VALIDOS_PARA_CONQUISTA,
+  // [VERSAO] Expostos para a suíte afirmar idempotência e detecção de mudança
+  // direto na primitiva, sem ter que montar servidor e conexão para cada caso.
+  carimbarEstado, impressaoDoEstado, CAMPOS_FORA_DA_IMPRESSAO,
 };
 
   };
