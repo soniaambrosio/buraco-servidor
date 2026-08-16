@@ -3597,6 +3597,18 @@ function gerarCodigoPadrao() {
 const TIPOS_DE_PARTIDA = ["publica", "privada", "simulada"];
 const TIPO_PADRAO = "privada";
 
+/** Versão do contrato do envelope de encerramento. */
+const VERSAO_CONTRATO_ENCERRAMENTO = 1;
+
+/** Único motivo de encerramento que este servidor sabe produzir.
+ *
+ *  O motor encerra a partida em UM lugar só (`contarPontos`, quando o placar
+ *  cruza a meta). Abandono, WO, expulsão e anulação NÃO existem aqui — e
+ *  inventá-los seria criar vocabulário sem código por trás. Encerramento que
+ *  chegue por outro caminho vira [MOTIVO_DESCONHECIDO], que é inelegível. */
+const MOTIVO_META = "meta_alcancada";
+const MOTIVO_DESCONHECIDO = "desconhecido";
+
 /** Tipos que valem para conquista. Lista fechada e positiva: um tipo novo
  *  criado amanhã não entra sozinho — precisa ser escrito aqui, de propósito. */
 const TIPOS_VALIDOS_PARA_CONQUISTA = new Set(["publica", "privada"]);
@@ -3647,6 +3659,71 @@ function uidDoAssento(sala, assento) {
   if (!sala || !sala.participantes || !Number.isInteger(assento)) return null;
   const p = sala.participantes[assento];
   return p ? p.uid : null;
+}
+
+/** O envelope autoritativo de encerramento de UMA partida.
+ *
+ *  Capturado UMA vez, em `liquidar`, depois de o estado final estar consolidado
+ *  — placar somado, `encerrada` marcada, `assentoQueBateuFinal` gravado. Antes
+ *  disso qualquer retrato estaria incompleto; depois, o estado não muda mais.
+ *
+ *  DETERMINÍSTICO para o mesmo encerramento: todos os campos saem do estado
+ *  canônico, e o único não-determinístico (`encerradaEm`) é carimbado uma vez e
+ *  guardado com o envelope, não recalculado a cada leitura.
+ *
+ *  O QUE NÃO ENTRA, e é decisão e não esquecimento: mão, carta, monte, morto,
+ *  token, e-mail e apelido. O envelope responde "quem venceu, quem bateu e se
+ *  isso vale" — nada disso precisa de carta nem de nome.
+ *
+ *  `uidQueBateuFinal` é DERIVADO do assento pelo mapa congelado. Nunca vem de
+ *  campo de mensagem, e nunca de `sala.assentos` no momento da captura: aquele
+ *  vira bot quando alguém cai, e quem bateu antes de cair continua sendo quem
+ *  bateu. */
+function montarEnvelopeEncerramento(sala, agoraIso) {
+  const jogo = sala.jogo;
+  const placar = { nos: jogo.placar.nos, eles: jogo.placar.eles };
+  // Vencedor pelo placar canônico. O motor só marca `encerrada` quando alguém
+  // cruza a meta, então empate não chega aqui — mas se chegasse, `null` é a
+  // resposta honesta, e não um desempate inventado neste ponto.
+  let duplaVencedora = null;
+  if (placar.nos > placar.eles) duplaVencedora = "nos";
+  else if (placar.eles > placar.nos) duplaVencedora = "eles";
+
+  const motivo = jogo.encerrada ? MOTIVO_META : MOTIVO_DESCONHECIDO;
+  const assentoFinal = Number.isInteger(jogo.assentoQueBateuFinal)
+    ? jogo.assentoQueBateuFinal
+    : null;
+  const uidFinal = assentoFinal == null ? null : uidDoAssento(sala, assentoFinal);
+
+  // Validade para conquista: TUDO precisa valer. Uma linha por condição, para
+  // que afrouxar qualquer uma seja uma edição visível.
+  const validaParaConquistas =
+    motivo === MOTIVO_META &&
+    TIPOS_VALIDOS_PARA_CONQUISTA.has(sala.tipoPartida) &&
+    duplaVencedora !== null;
+
+  return Object.freeze({
+    versaoContrato: VERSAO_CONTRATO_ENCERRAMENTO,
+    partidaId: sala.partidaId,
+    versaoEstadoFinal: jogo.rodada,
+    encerradaEm: agoraIso,
+    motivoEncerramento: motivo,
+    modalidade: sala.modalidade,
+    tipoPartida: sala.tipoPartida,
+    validaParaConquistas,
+    rodadaFinal: jogo.rodada,
+    meta: jogo.metaPontos,
+    placarFinal: placar,
+    duplaVencedora,
+    duplaQueBateuUltimaRodada: jogo.duplaQueBateu || null,
+    assentoQueBateuFinal: assentoFinal,
+    uidQueBateuFinal: uidFinal,
+    participantes: sala.participantes
+      ? sala.participantes.map((p) => ({
+          assento: p.assento, uid: p.uid, dupla: p.dupla, tipo: p.tipo,
+        }))
+      : [],
+  });
 }
 
 /** Cria um gerenciador de salas em memória. `opts.gerarCodigo` permite injetar
@@ -3971,7 +4048,14 @@ function criarGerenciador(opts = {}) {
   return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair };
 }
 
-module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
+module.exports = {
+  criarGerenciador, gerarCodigoPadrao, NOMES_BOT,
+  // [PRODUTOR] Expostos para a suíte do produtor afirmar o contrato sem
+  // reimplementá-lo: o vocabulário de motivo/tipo é o mesmo que o envelope usa.
+  montarEnvelopeEncerramento, mapaDeParticipantes, novoPartidaId,
+  VERSAO_CONTRATO_ENCERRAMENTO, MOTIVO_META, MOTIVO_DESCONHECIDO,
+  TIPOS_DE_PARTIDA, TIPOS_VALIDOS_PARA_CONQUISTA,
+};
 
   };
 
