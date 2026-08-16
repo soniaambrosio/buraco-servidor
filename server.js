@@ -16,6 +16,24 @@
 // O server.js ANTERIOR está preservado no Git (main / commit be72bb6).
 // Se a pasta-fonte `cliente/` for recuperada, RETROPORTAR estas mudanças para a fonte
 // e REGERAR o bundle. Nenhuma outra regra/área foi tocada. Sem deploy.
+//
+// -----------------------------------------------------------------------------------
+// EXCEÇÃO DOCUMENTADA #2 — ENFORCEMENT DE VISÃO DE ESPECTADOR (P0 de sigilo)
+// Mesma justificativa da exceção acima: a fonte `cliente/` continua AUSENTE — o repo
+// `buraco-servidor` guarda só este bundle (o `buraco-servidor.zip` versionado ao lado
+// contém apenas `server.js` + `package.json`, não a fonte). Verificado nesta OS.
+// Alterações, todas marcadas com `// [PATCH ESPECTADOR]`:
+//   • motor/jogo    — `visaoDoEspectador` (lista de permissão), `segredosDoEspectador`
+//                     (as 4 mãos + monte + mortos) e `vazamentosNaVisao` (varredura
+//                     recursiva). NENHUMA regra de Buraco foi tocada;
+//   • servidor/salas — porta única `visaoPara({codigo, papel, assento})` + tripwire
+//                     que bloqueia o payload se um id secreto escapar;
+//   • servidor/servidor — `papelDe` (papel decidido pelo SERVIDOR), mensagem
+//                     `assistirMesa`, broadcast por papel, `fim` sem carteira para
+//                     quem assiste e recusa genérica em ação de espectador.
+// Contrato de referência: `app/lib/motor/visao_espectador.dart` (repo do app).
+// Testes: `test/espectador.test.js` e `test/regressao.test.js` (`npm test`).
+// O server.js ANTERIOR está preservado no Git (main / commit 1828d42). Sem deploy.
 // ===================================================================================
 // EXCEÇÃO DOCUMENTADA — AUTENTICAÇÃO DO HANDSHAKE (branch seguranca/ws-auth-identidade)
 // Mesmo motivo acima (fonte `cliente/` ausente): o bundle foi editado à mão para
@@ -1811,6 +1829,178 @@ function visaoDoAssento(jogo, assento) {
 }
 
 // ===========================================================================
+// [PATCH ESPECTADOR] VISÃO PÚBLICA — o que quem ASSISTE pode ver.
+//
+// Contrato: `app/lib/motor/visao_espectador.dart` no repo do app
+// (`VisaoEspectador.de` / `VisaoEspectador.segredos`). Esta é a contraparte
+// Node da MESMA regra; a estrutura interna difere, a SUPERFÍCIE não.
+//
+// Por que uma função separada de `visaoDoAssento`, e não um `if (espectador)`
+// lá dentro: o mapa abaixo é uma LISTA DE PERMISSÃO escrita à mão. Um campo
+// secreto novo acrescentado ao assento não vaza para cá por descuido — ele
+// simplesmente NÃO EXISTE nesta função. Num builder compartilhado com uma
+// bandeira, o padrão se inverteria: o campo novo nasceria visível para quem
+// assiste e alguém teria que lembrar de escondê-lo. Aqui, esquecer é omitir;
+// lá, esquecer seria expor.
+//
+// Também não se constrói a visão de assento para depois DELETAR campos: o
+// objeto do assento carrega referências vivas para `jogo.maos` e
+// `jogo.jogosDupla`. Tudo aqui é CÓPIA — nenhum objeto mutável do jogo
+// atravessa a fronteira.
+// ===========================================================================
+
+/** Carta em forma pública. Só é chamada sobre cartas JÁ à vista de todos
+ *  (lixo e jogos baixados) — nunca sobre mão, monte ou morto. */
+function cartaPublica(c) {
+  return { id: c.id, naipe: c.naipe, valor: c.valor, coringa: !!c.eh_coringa };
+}
+
+function cartasPublicas(cs) {
+  return cs.map(cartaPublica);
+}
+
+/** Mínimo que a dupla precisa somar para ABRIR (0 = não vulnerável ou já
+ *  abriu). Espelha `checarAberturaVulneravel`: nível 1 → 75, nível 2 → 90. */
+function minimoParaDescer(jogo, dupla) {
+  if (jogo.abriuValido && jogo.abriuValido[dupla]) return 0;
+  const niv = jogo.rodadasVulneravel[dupla];
+  if (niv <= 0) return 0;
+  return niv === 1 ? 75 : 90;
+}
+
+/**
+ * TUDO o que é secreto para quem assiste: as QUATRO mãos, o monte e os mortos.
+ *
+ * É a diferença exata em relação ao assento, onde a própria mão é legítima.
+ * Existe como função (e não só dentro do teste) porque é a definição que o
+ * despacho consulta antes de mandar qualquer payload a um espectador — uma
+ * segunda cópia dessa lista divergiria na primeira mudança de regra.
+ */
+function segredosDoEspectador(jogo) {
+  const s = new Set();
+  if (!jogo) return s;
+  for (const mao of jogo.maos || []) for (const c of mao) s.add(c.id);
+  for (const c of jogo.monte || []) s.add(c.id);
+  for (const morto of jogo.mortos || []) for (const c of morto) s.add(c.id);
+  return s;
+}
+
+/**
+ * Ids secretos que escaparam para `visao`. Vazio = sem vazamento.
+ *
+ * Varre a estrutura INTEIRA — chaves, strings, listas, objetos aninhados — em
+ * qualquer profundidade. Não procura por nomes de campo conhecidos (`mao` e
+ * companhia): procura pelos IDS. Assim o vazamento é detectado mesmo que o
+ * segredo apareça sob `dados.x.y.z.valor` ou sob uma chave inventada amanhã.
+ */
+function vazamentosNaVisao(visao, segredos) {
+  const achados = new Set();
+  const vistos = new Set();
+  (function varrer(no) {
+    if (no == null) return;
+    if (typeof no === "string") {
+      if (segredos.has(no)) achados.add(no);
+      return;
+    }
+    if (typeof no !== "object") return;
+    if (vistos.has(no)) return; // ciclos
+    vistos.add(no);
+    if (Array.isArray(no)) {
+      for (const item of no) varrer(item);
+      return;
+    }
+    for (const chave of Object.keys(no)) {
+      if (segredos.has(chave)) achados.add(chave); // segredo usado como CHAVE
+      varrer(no[chave]);
+    }
+  })(visao);
+  return achados;
+}
+
+/**
+ * Monta a visão de quem ASSISTE. Não recebe assento: espectador não ocupa
+ * nenhum, não tem mão, não tem parceiro e não tem vez.
+ *
+ * A regra é mais estreita que a do assento: vê SOMENTE o que está na mesa
+ * — lixo, jogos baixados, placar, de quem é a vez — e a CONTAGEM do que está
+ * oculto. A contagem não é vazamento pelo mesmo motivo que vale para o
+ * assento: quantas cartas cada um tem é o que qualquer pessoa em volta da
+ * mesa real conta com os olhos.
+ */
+function visaoDoEspectador(jogo) {
+  return {
+    // Marca o recorte. Cliente e servidor podem AFIRMAR qual visão receberam,
+    // em vez de inferir pela ausência de campos.
+    espectador: true,
+    voceAssento: null,
+
+    // ---- mesa ----
+    modalidade: jogo.modalidade,
+    metaPontos: jogo.metaPontos,
+    rodada: jogo.rodada,
+
+    // ---- turno (de quem é a vez é público; `suaVez` não existe: não há "você") ----
+    vez: jogo.vez,
+    jaComprou: jogo.jaComprou,
+    rodadaEncerrada: jogo.rodadaEncerrada,
+    encerrada: jogo.encerrada,
+
+    // ---- quem está na mesa (público: apelido, tipo, dupla, contagem) ----
+    assentos: jogo.assentos.map((a, i) => ({
+      apelido: a.apelido,
+      tipo: a.tipo,
+      dupla: a.dupla,
+      qtdCartas: jogo.maos[i].length,
+    })),
+
+    // ---- o que está na mesa, à vista de todos ----
+    // O lixo é pilha aberta no ABERTO (todo mundo leu o que passou por ela);
+    // nas outras modalidades só o TOPO é visível. Os jogos baixados são
+    // públicos em qualquer modalidade.
+    lixoTopo: jogo.lixo.length ? cartaPublica(jogo.lixo[jogo.lixo.length - 1]) : null,
+    lixoAberto: jogo.modalidade === "aberto" ? cartasPublicas(jogo.lixo) : null,
+    jogosNos: jogo.jogosDupla.nos.map(cartasPublicas),
+    jogosEles: jogo.jogosDupla.eles.map(cartasPublicas),
+
+    // ---- o que está oculto: SÓ A CONTAGEM ----
+    qtdCartasPorAssento: jogo.maos.map((m) => m.length),
+    monteQtd: jogo.monte.length,
+    lixoQtd: jogo.lixo.length,
+    mortosQtd: jogo.mortos.length,
+    mortosTamanhos: jogo.mortos.map((m) => m.length),
+    mortoPegoNos: !!jogo.mortoPego.nos,
+    mortoPegoEles: !!jogo.mortoPego.eles,
+
+    // ---- pendência do topo: o FATO, nunca o id ----
+    // Que alguém comprou o lixo e está devendo o topo é público — todo mundo
+    // viu. QUAL é a carta, não: ela está na mão de quem comprou. O assento
+    // dono recebe `precisaUsarTopo`; aqui esse campo não existe.
+    obrigacaoTopoPendente: !!jogo.deveUsarTopo,
+
+    // ---- placar e vulnerabilidade, pelas DUAS duplas ----
+    // No assento estes campos são relativos ("minha dupla"). Sem assento, a
+    // forma correta é nomear as duas.
+    placarNos: jogo.placar.nos,
+    placarEles: jogo.placar.eles,
+    rodadasVulneravelNos: jogo.rodadasVulneravel.nos,
+    rodadasVulneravelEles: jogo.rodadasVulneravel.eles,
+    minimoParaDescerNos: minimoParaDescer(jogo, "nos"),
+    minimoParaDescerEles: minimoParaDescer(jogo, "eles"),
+    vulneravelNos: minimoParaDescer(jogo, "nos") > 0,
+    vulneravelEles: minimoParaDescer(jogo, "eles") > 0,
+
+    // ---- desfecho ----
+    // `pontosRodada` só existe depois da rodada apurada e carrega AGREGADOS
+    // (total, bônus, desconto de mão como NÚMERO, contadores de canastra) —
+    // nenhum id de carta. Quem garante isso é o teste, não este comentário.
+    duplaQueBateu: jogo.duplaQueBateu,
+    pontosRodada: jogo.pontosRodada
+      ? JSON.parse(JSON.stringify(jogo.pontosRodada))
+      : null,
+  };
+}
+
+// ===========================================================================
 // JOGADAS — cada função valida e MUTA o jogo. Retorna { ok:true, ... } ou
 // { ok:false, erro:"..." }. É a autoridade: o servidor confia só nisto.
 // Fluxo do turno: 1 COMPRA (monte ou lixo) -> baixar/estender à vontade ->
@@ -2286,6 +2476,11 @@ module.exports = {
   distribuirRodada,
   topoLixo,
   visaoDoAssento,
+  // [PATCH ESPECTADOR] visão pública + definição de segredo + varredura
+  visaoDoEspectador,
+  segredosDoEspectador,
+  vazamentosNaVisao,
+  minimoParaDescer,
   // jogadas
   comprarMonte,
   comprarLixo,
@@ -3530,6 +3725,71 @@ function criarGerenciador(opts = {}) {
     return { jogou: true, assento, resultado: r };
   }
 
+  // =========================================================================
+  // [PATCH ESPECTADOR] PORTA ÚNICA DE SERIALIZAÇÃO
+  //
+  // Ninguém fora daqui monta payload de estado. `visaoPara` recebe o PAPEL já
+  // decidido pelo servidor (nunca declarado pelo cliente, ver servidor.js) e
+  // delega para um serializador dedicado. Os dois não compartilham objeto: a
+  // visão de espectador é construída do zero por lista de permissão, não é a
+  // visão de assento com campos removidos.
+  // =========================================================================
+
+  /** Papel → serializador. É a ÚNICA porta de estado da mesa. */
+  function visaoPara({ codigo, papel, assento } = {}) {
+    if (papel === "jogador" && Number.isInteger(assento)) return visao(codigo, assento);
+    if (papel === "espectador") return visaoEspectador(codigo);
+    // Sem papel reconhecido não existe payload de estado. Fail-closed.
+    return { erro: "sem acesso a esta mesa" };
+  }
+
+  /** Avatares são PÚBLICOS (a mesa inteira desenha a foto de quem joga). */
+  function injetarAvatares(sala, assentosDaVisao) {
+    if (!contas || !assentosDaVisao) return;
+    for (let i = 0; i < assentosDaVisao.length; i++) {
+      const sj = sala.assentos[i];
+      if (!sj || !sj.jogadorId) continue;
+      const c = contas.obter(sj.jogadorId);
+      if (!c) continue;
+      assentosDaVisao[i].jogadorId = sj.jogadorId;
+      assentosDaVisao[i].avatarTipo = c.avatarTipo || null;
+      assentosDaVisao[i].avatarId = c.avatarId || null;
+      assentosDaVisao[i].avatarVer = c.avatarVer || 0;
+    }
+  }
+
+  /** O que quem ASSISTE pode ver. Sem assento, sem mão, sem "você". */
+  function visaoEspectador(codigo) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!sala.jogo) {
+      // Lobby público: quem está sentado, sem `ehVoce` e sem `voceAssento`.
+      return {
+        lobby: true, espectador: true, codigo,
+        modalidade: sala.modalidade, metaPontos: sala.metaPontos,
+        voceAssento: null, criador: false,
+        assentos: sala.assentos.map((a) => a
+          ? { apelido: a.apelido, tipo: a.tipo }
+          : { vazio: true }),
+      };
+    }
+    const v = J.visaoDoEspectador(sala.jogo);
+    injetarAvatares(sala, v.assentos);
+
+    // TRIPWIRE. A lista de permissão acima já é a garantia; isto é a segunda
+    // tranca, para o caso de alguém um dia injetar campo novo por aqui (ou de
+    // um `injetarAvatares` futuro trazer junto algo que não devia). Se um id
+    // secreto aparecer, o payload NÃO sai: falha fechada e registra só a
+    // CONTAGEM — nunca o id, que é justamente o segredo.
+    const escapou = J.vazamentosNaVisao(v, J.segredosDoEspectador(sala.jogo));
+    if (escapou.size > 0) {
+      console.error("[salas] visaoEspectador BLOQUEADA: " + escapou.size +
+        " id(s) secreto(s) na visão pública · mesa=" + codigo + " rodada=" + sala.jogo.rodada);
+      return { erro: "estado indisponível" };
+    }
+    return v;
+  }
+
   /** O que um assento PODE ver (lobby antes de iniciar, ou a visão do jogo). */
   function visao(codigo, assento) {
     const sala = salas[codigo];
@@ -3580,7 +3840,7 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, sair };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -4061,6 +4321,54 @@ function criarServidor(opts = {}) {
     return null;
   }
 
+  // =========================================================================
+  // [PATCH ESPECTADOR] QUEM É QUEM — decisão do SERVIDOR, nunca do cliente.
+  //
+  // O papel sai de UM lugar só: `conexoes[id].assento`. Esse campo é escrito
+  // exclusivamente com o que `ger.criarMesa`/`ger.entrarMesa` DEVOLVEM — isto
+  // é, com o assento que o gerenciador de salas concedeu. Nenhum caminho do
+  // protocolo copia assento de dentro de `msg`.
+  //
+  // Consequência prática: não existe campo de payload capaz de promover uma
+  // conexão. Mandar `souEspectador:false`, `viewerUid`, `playerUid`, `seat`,
+  // `assento`, `papel`, `role`, `modo`, `debug`, `owner` ou o que se inventar
+  // amanhã não muda nada, porque `papelDe` não lê `msg`. O cliente PEDE
+  // operações; o nível de sigilo quem decide é aqui.
+  //
+  // [COMPOSIÇÃO ws-auth + espectador] O LIMITE QUE ESTE BLOCO DECLARAVA MORREU.
+  // A folha do espectador foi escrita quando o transporte não autenticava, e
+  // registrava aqui que `c.jogadorId` era "o que o cliente DISSE que é". Depois
+  // da composição isso deixou de ser verdade: `jogadorId` é gravado por
+  // `vincularIdentidade`, derivado do `sub` do token verificado, e é IMUTÁVEL
+  // (`Object.defineProperty`, writable:false). O P0 de identidade que aquele
+  // parágrafo apontava está fechado — e o comentário foi reescrito em vez de
+  // preservado porque documentação errada é pior que documentação ausente.
+  //
+  // O QUE NÃO MUDOU, e é o ponto do bloco: `papelDe` continua NÃO consultando
+  // `jogadorId`. As duas autoridades ficam separadas de propósito —
+  //     quem você é   -> token verificado (ws-auth)
+  //     o que você vê -> assento concedido pelo gerenciador de salas
+  // Um token válido não compra assento, e por isso autenticar não promove
+  // ninguém de espectador a jogador.
+  // =========================================================================
+
+  /** "jogador" (ocupa assento nesta mesa), "espectador" (está na mesa sem
+   *  assento) ou "nenhum" (não está em mesa alguma). */
+  function papelDe(c) {
+    if (!c || c.codigo == null) return "nenhum";
+    return Number.isInteger(c.assento) ? "jogador" : "espectador";
+  }
+
+  /** Participante = pode AGIR na partida. Espectador nunca é. */
+  function ehParticipante(c) {
+    return papelDe(c) === "jogador";
+  }
+
+  /** Estado que ESTA conexão pode receber. Passa pela porta única de `salas`. */
+  function visaoDaConexao(c) {
+    return ger.visaoPara({ codigo: c.codigo, papel: papelDe(c), assento: c.assento });
+  }
+
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
@@ -4138,6 +4446,23 @@ function criarServidor(opts = {}) {
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
         return broadcastSala(c.codigo);
       }
+      case "assistirMesa": {
+        // [PATCH ESPECTADOR] Entrada de quem só ASSISTE. Não pede assento e
+        // não recebe nenhum: `c.assento` continua null, e é isso — e só isso —
+        // que faz `papelDe` responder "espectador" daqui pra frente.
+        //
+        // Também é o caminho de RECONEXÃO de quem não tem assento na mesa: o
+        // papel é recalculado do zero a cada entrada, então token velho,
+        // versão de estado antiga ou `assento` guardado no cliente não
+        // devolvem privilégio nenhum.
+        const salaE = ger.salas[msg.codigo];
+        if (!salaE) return enviarPara(id, { tipo: "erro", motivo: "mesa não encontrada" });
+        c.jogadorId = msg.jogadorId || c.jogadorId || null;
+        c.codigo = msg.codigo;
+        c.assento = null; // explícito: assistir NUNCA concede assento
+        enviarPara(id, { tipo: "assistindo", codigo: c.codigo });
+        return enviarPara(id, { tipo: "estado", visao: visaoDaConexao(c) });
+      }
       case "perfil": {
         // dados REAIS da conta do jogador (pro Perfil/carteira do app)
         // [PATCH WS-AUTH] só a PRÓPRIA conta: o jid é o da conexão autenticada.
@@ -4170,12 +4495,18 @@ function criarServidor(opts = {}) {
       }
       case "iniciarPartida": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
+        if (!ehParticipante(c)) return recusarEspectador(id);
         const r = ger.iniciarPartida({ codigo: c.codigo, assento: c.assento });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         return avancarComRespiro(c.codigo);
       }
       case "jogada": {
         if (c.codigo == null) return enviarPara(id, { tipo: "erro", motivo: "você não está numa mesa" });
+        // [PATCH ESPECTADOR] Corta ANTES do motor. Não é só questão de
+        // permissão: o motor recusa citando a carta ("o topo é o X", "essa
+        // carta não tem mola"), e esse texto é informação privada. Quem
+        // assiste leva uma recusa genérica, sem detalhe nenhum do estado.
+        if (!ehParticipante(c)) return recusarEspectador(id);
         const r = ger.aplicarJogada({ codigo: c.codigo, assento: c.assento, jogada: msg.jogada });
         if (r && (r.erro || r.ok === false)) {
           // rebroadcast ANTES do erro: uma jogada recusada PODE ter mudado o estado
@@ -4192,6 +4523,7 @@ function criarServidor(opts = {}) {
         // assume (joga por ele até ele voltar). É o que segura a mesa pública quando
         // alguém dorme com o celular (pedido Sônia). Só marca o tipo e destrava o ritmo.
         if (c.codigo == null) return;
+        if (!ehParticipante(c)) return recusarEspectador(id);
         const salaB = ger.salas[c.codigo];
         if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento]) {
           salaB.jogo.assentos[c.assento].tipo = "bot";
@@ -4202,6 +4534,7 @@ function criarServidor(opts = {}) {
         // o jogador voltou: o assento volta a ser HUMANO. O servidor para na vez dele
         // (vezEhBot=false) e espera — ele reassume no próximo turno dele.
         if (c.codigo == null) return;
+        if (!ehParticipante(c)) return recusarEspectador(id);
         const salaV = ger.salas[c.codigo];
         if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento]) {
           salaV.jogo.assentos[c.assento].tipo = "humano";
@@ -4211,7 +4544,10 @@ function criarServidor(opts = {}) {
       case "sair": {
         if (c.codigo != null) {
           const cod = c.codigo;
-          ger.sair({ codigo: cod, assento: c.assento });
+          // [PATCH ESPECTADOR] Espectador não ocupa assento: não há assento a
+          // liberar, e chamar `ger.sair` com assento null mexeria na lista de
+          // assentos da mesa por engano. Ele só se desliga.
+          if (ehParticipante(c)) ger.sair({ codigo: cod, assento: c.assento });
           c.codigo = null; c.assento = null;
           broadcastSala(cod);
         }
@@ -4236,6 +4572,14 @@ function criarServidor(opts = {}) {
     }
   }
 
+  /** [PATCH ESPECTADOR] Recusa para quem assiste: SEM detalhe de estado.
+   *  Um texto do motor ("o topo é o 7 de copas", "essa carta não tem mola")
+   *  revelaria carta que o espectador não pode ver. Motivo genérico, sempre o
+   *  mesmo, independente do que foi pedido — o detalhe fica no log do servidor. */
+  function recusarEspectador(id) {
+    return enviarPara(id, { tipo: "erro", motivo: "você está assistindo a esta mesa" });
+  }
+
   /** Quando a partida encerra, o cofre já liquidou (sala.resumoFinal). Aqui a
    *  gente manda UMA vez pra todo mundo da mesa o "fim" com os ganhos — é o que
    *  a tela usa pra mostrar "+X moedas / subiu de nível". */
@@ -4246,32 +4590,67 @@ function criarServidor(opts = {}) {
     const placar = sala.jogo && sala.jogo.placar;
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      // [PATCH WS-AUTH] o resumo carrega carteira (moedas, XP): só vai para
-      // conexão com credencial VÁLIDA agora, não meramente válida um dia.
-      if (c.codigo === codigo && c.assento != null && c.estadoAuth === AUTH.AUTENTICADO) {
+      if (c.codigo !== codigo) continue;
+      // [COMPOSIÇÃO] As DUAS guardas valem, e nesta ordem. Primeiro a
+      // credencial: o encerramento é estado, e credencial vencida não recebe
+      // estado nenhum — nem o placar, que para o espectador seria o evento
+      // inteiro. Só depois o papel decide QUANTO se envia.
+      //
+      // Trocar a ordem abriria o buraco exato que a composição precisa fechar:
+      // um espectador com credencial vencida ainda receberia `fim`.
+      if (c.estadoAuth !== AUTH.AUTENTICADO) continue;
+      // [PATCH WS-AUTH] o resumo carrega carteira (moedas, XP); [PATCH
+      // ESPECTADOR] e carteira não é estado de mesa. Participante autenticado
+      // leva o resumo; quem só assiste leva o placar, que já estava à vista.
+      if (ehParticipante(c)) {
         c.enviar({ tipo: "fim", resumo: sala.resumoFinal, placar });
+      } else {
+        // [PATCH ESPECTADOR] `resumoFinal` é carteira: moedas, XP e nível POR
+        // JOGADOR. Não é estado de mesa e não é público. Quem assiste recebe
+        // só o desfecho que já estava à vista — o placar.
+        c.enviar({ tipo: "fim", placar });
       }
     }
   }
 
-  /** Manda pra cada conexão da sala a SUA visão (por assento). É o "tempo real":
-   *  toda mudança (jogada humana, jogadas dos bots, entrada de gente) reflete em
-   *  todos. Cada um vê só a própria mão — a dos outros é só contagem. */
+  /** Manda pra cada conexão da sala a visão QUE ELA PODE RECEBER. É o "tempo
+   *  real": toda mudança (jogada humana, jogadas dos bots, entrada de gente)
+   *  reflete em todos. Quem tem assento vê a própria mão — a dos outros é só
+   *  contagem; quem assiste não vê mão nenhuma.
+   *
+   *  [PATCH ESPECTADOR] O papel é recalculado A CADA envio, e é o mesmo
+   *  `papelDe` do snapshot inicial. Por isso não existe evento incremental que
+   *  escape: compra, descarte, batida, morto, nova rodada, encerramento e
+   *  ressincronização passam TODOS por aqui. */
   function broadcastSala(codigo) {
     for (const cid in conexoes) {
       const c = conexoes[cid];
-      // [PATCH WS-AUTH] a visão do assento é informação do jogador; conexão com
-      // credencial vencida para de recebê-la na hora, sem esperar comando dela.
-      if (c.codigo === codigo && c.assento != null && c.estadoAuth === AUTH.AUTENTICADO) {
-        c.enviar({ tipo: "estado", visao: ger.visao(codigo, c.assento) });
-      }
+      if (c.codigo !== codigo) continue;
+      // [COMPOSIÇÃO] Mesma ordem do encerramento, pelo mesmo motivo, e aqui a
+      // consequência é mais forte: sem esta linha, uma conexão NUNCA
+      // autenticada (`estadoAuth` inicial) receberia a visão pública de
+      // espectador só por estar numa sala. O contrato da composição é que
+      // espectador não autenticado não recebe NEM a projeção pública.
+      //
+      // [PATCH WS-AUTH] credencial vencida para de receber na hora, sem
+      // esperar comando dela.
+      if (c.estadoAuth !== AUTH.AUTENTICADO) continue;
+      // [PATCH ESPECTADOR] `visaoDaConexao` — e não `ger.visao(codigo, assento)`
+      // — porque é ela que passa pela porta única de projeção: jogador recebe a
+      // própria visão privada, espectador recebe a pública. Chamar `ger.visao`
+      // direto aqui devolveria visão de assento para quem não tem assento.
+      c.enviar({ tipo: "estado", visao: visaoDaConexao(c) });
     }
   }
 
-  // [PATCH WS-AUTH] `autenticar` é exposto porque o transporte pode receber a
-  // credencial ANTES da primeira mensagem do protocolo (Authorization no
-  // upgrade HTTP) — ver ws_server.
-  return { conectar, desconectar, processar, autenticar, broadcastSala, ger, conexoes };
+  // [COMPOSIÇÃO] A união dos dois contratos de saída, sem perder nenhum:
+  // `autenticar` (folha A) porque o transporte pode receber a credencial ANTES
+  // da primeira mensagem do protocolo (Authorization no upgrade HTTP — ver
+  // ws_server); `papelDe` (folha B) porque a suíte do espectador afirma o papel
+  // decidido pelo servidor. Perder qualquer um dos dois quebraria uma suíte
+  // inteira — e silenciosamente, já que ambos são lidos por testes, não pelo
+  // caminho de produção.
+  return { conectar, desconectar, processar, autenticar, broadcastSala, papelDe, ger, conexoes };
 }
 
 module.exports = { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO };
@@ -4418,7 +4797,7 @@ function bearerDoCabecalho(valor) {
   return m ? m[1] : null;
 }
 
-function iniciar(porta) {
+function iniciar(porta, opts = {}) {
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
   const RESPIRO_MS = Number(process.env.RESPIRO_MS) || 1100; // ritmo dos bots na tela
@@ -4430,10 +4809,21 @@ function iniciar(porta) {
   // private key entra aqui). Sem ele, toda autenticação falha e o servidor não
   // aceita comando de jogador nenhum: é fail closed de propósito.
   const projectId = process.env.FIREBASE_PROJECT_ID || "";
-  if (!projectId) {
+  // [COMPOSIÇÃO] Costura de teste, e SÓ de teste: `opts.verificarToken` permite
+  // que a suíte do transporte real (`test/ws.test.js`) injete um verificador
+  // com certificados de teste. É parametrização da MESMA construção, não uma
+  // segunda autoridade — o verificador injetado é o próprio
+  // `criarVerificadorFirebase`, com as mesmas checagens de assinatura,
+  // algoritmo, kid, audience, issuer e validade.
+  //
+  // Em produção nada muda: `node server.js` chama `iniciar()` sem argumentos, o
+  // caminho continua sendo o do env, e sem FIREBASE_PROJECT_ID o servidor segue
+  // fail-closed. Sem esta costura, a única suíte que prova a fronteira NO FIO
+  // teria de ser desligada — e desligar teste não é opção.
+  if (!projectId && !opts.verificarToken) {
     console.warn("[auth] FIREBASE_PROJECT_ID não configurado — NENHUMA conexão vai autenticar.");
   }
-  const verificarToken = criarVerificadorFirebase({ projectId });
+  const verificarToken = opts.verificarToken || criarVerificadorFirebase({ projectId });
   const servidor = criarServidor({ agendar: (fn) => setTimeout(fn, RESPIRO_MS), contas, verificarToken });
 
   const http_server = http.createServer((req, res) => {
@@ -4522,13 +4912,13 @@ module.exports = { iniciar, encodeFrame, bearerDoCabecalho };
   };
 
 
-  // [PATCH WS-AUTH] Fronteira de teste.
+  // [PATCH WS-AUTH + PATCH ESPECTADOR] Fronteira de teste.
   // Executado como programa (`node server.js`, que é o comando do Railway) o
   // comportamento é EXATAMENTE o de antes: sobe o WebSocket na porta de PORT.
   // Carregado com `require(...)` — só os testes fazem isso — ele NÃO abre porta
   // nenhuma e apenas expõe o registro interno de módulos, para que a suíte possa
-  // montar conexões falsas sem subir rede. Sem esta saída, `require` deste
-  // arquivo iniciaria um listener e a suíte não teria como rodar.
+  // montar salas e conexões falsas sem subir rede. Sem esta saída, `require`
+  // deste arquivo iniciaria um listener e a suíte não teria como rodar.
   if (require.main === module) {
     // sobe o servidor WebSocket (usa a porta de PORT, padrão 8080)
     __require("ws_server").iniciar();
