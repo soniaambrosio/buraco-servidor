@@ -246,6 +246,55 @@ function marcarSegredos(jogo) {
   return marcados;
 }
 
+// [CORREÇÃO UUID] IDENTIDADE OPACA — POR QUE ELA SAI DE CENA ANTES DA TOKENIZAÇÃO.
+//
+// Um id de carta é `c` + dígitos (`c1818`). Um `eventoId` é `crypto.randomUUID()`:
+// 32 dígitos HEXADECIMAIS. Todo dígito decimal é dígito hexadecimal, e `c` é
+// hexadecimal — então `c1818` é uma sequência que um UUID pode conter POR SORTEIO.
+// A varredura antiga procurava por substring cega (`no.includes(s)`) e com isso
+// acusava vazamento onde só houve coincidência: medido nesta base, 60% dos UUIDs
+// contêm algum dos 108 ids vivos de uma partida com o contador ainda baixo.
+//
+// A correção NÃO é ignorar `eventoId`, nem tirar id de carta da auditoria: é
+// separar os dois fatos que a substring confundia —
+//
+//   id presente como DADO   -> `visao.x = "c1818"`, item de lista, chave de objeto,
+//                              `carta.id`. Comparação por VALOR INTEIRO. Exata, e
+//                              sem heurística nenhuma.
+//   id citado em TEXTO      -> "carta c1818 recusada". Comparação por TOKEN
+//                              COMPLETO, não por pedaço de palavra.
+//   sequência DENTRO de uma identidade opaca -> não é nem um nem outro. Um UUID é
+//                              atômico: os 36 caracteres valem juntos, e um recorte
+//                              no meio deles não referencia coisa nenhuma.
+//
+// Por isso a FORMA canônica de UUID é reconhecida como valor — onde quer que ela
+// apareça, e não num campo escolhido a dedo — e sai antes da tokenização. O que ela
+// NÃO ganha é passe livre: se um `eventoId` fosse exatamente um id secreto, ou se um
+// id secreto ficasse colado do lado de fora do UUID, a varredura continua acusando.
+// O poder de detecção fica igual; o que morre é o acaso.
+const FORMA_UUID =
+  /(?<![0-9a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F])/g;
+
+/**
+ * Tokens de um texto livre, já sem as identidades opacas.
+ *
+ * Cada corrida de caracteres de identificador vira token, e uma corrida com hífen
+ * também entrega suas partes: assim `SEGREDO-MAO0-1` casa inteiro (é o id que
+ * `marcarSegredos` carimba) e um `mao0-c1818` ainda entrega `c1818`. O UUID vira
+ * ESPAÇO, não vazio — espaço é separador, então tirá-lo nunca cola dois vizinhos
+ * num token que não existia antes.
+ */
+function tokensDe(texto) {
+  const tokens = new Set();
+  for (const corrida of texto.replace(FORMA_UUID, " ").match(/[A-Za-z0-9_-]+/g) || []) {
+    tokens.add(corrida);
+    if (corrida.includes("-")) {
+      for (const parte of corrida.split("-")) if (parte) tokens.add(parte);
+    }
+  }
+  return tokens;
+}
+
 /**
  * Varredura estrutural: ids secretos que escaparam para `payload`.
  *
@@ -260,10 +309,15 @@ function varrerSegredos(payload, segredos) {
   (function varrer(no, caminho) {
     if (no == null) return;
     if (typeof no === "string") {
-      if (segredos.has(no)) achados.push(caminho + " = " + no);
-      // substring: pega o segredo embutido em texto (mensagem de erro, dica...)
-      for (const s of segredos) {
-        if (no !== s && no.includes(s)) achados.push(caminho + " contém " + s);
+      // (1) DADO: o id inteiro, exatamente. Vale para valor de campo e, pela
+      //     recursão, para item de lista em qualquer profundidade.
+      if (segredos.has(no)) {
+        achados.push(caminho + " = " + no);
+        return;
+      }
+      // (2) TEXTO: o id como token independente dentro de uma frase.
+      for (const token of tokensDe(no)) {
+        if (segredos.has(token)) achados.push(caminho + " cita o token " + token);
       }
       return;
     }
@@ -273,6 +327,12 @@ function varrerSegredos(payload, segredos) {
     if (Array.isArray(no)) {
       no.forEach((item, i) => varrer(item, caminho + "[" + i + "]"));
       return;
+    }
+    // (3) OBJETO DE CARTA: a carta secreta viajando inteira, e não só o id solto.
+    //     A recursão abaixo já pegaria o `.id`; este achado existe para o relatório
+    //     dizer QUE FORMA o vazamento teve — carta inteira é pior que id avulso.
+    if (typeof no.id === "string" && segredos.has(no.id)) {
+      achados.push(caminho + " é OBJETO de carta secreta " + no.id);
     }
     for (const chave of Object.keys(no)) {
       if (segredos.has(chave)) achados.push(caminho + " tem CHAVE secreta " + chave);
@@ -300,6 +360,7 @@ module.exports = {
   espectadorVigiado,
   marcarSegredos,
   varrerSegredos,
+  tokensDe,
   segredosAgora,
   PREFIXO_SEGREDO,
 };
