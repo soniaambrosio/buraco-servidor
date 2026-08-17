@@ -5036,7 +5036,118 @@ function conferirSanidade(idToken, esperado, agoraMs) {
   return { expiraEmMs };
 }
 
+/**
+ * Cria o provedor de ID token do motor.
+ *
+ *   const cred = criarCredencialDoMotor();
+ *   const idToken = await cred.obterIdToken();   // renova sozinho quando precisa
+ *
+ * É a camada de CICLO DE VIDA sobre o cliente REST acima: cache com margem,
+ * coalescência de chamadas simultâneas, rotação do refresh token em memória e
+ * descarte no erro. O cliente REST sabe fazer UMA troca; esta camada sabe
+ * quando fazê-la e quantas vezes.
+ *
+ * `pedirToken`, `agora` e `margemMs` existem para os TESTES: nenhum deles desliga
+ * verificação nenhuma — o teste ainda passa por `interpretarResposta` e
+ * `conferirSanidade` inteiras.
+ */
+function criarCredencialDoMotor(opts = {}) {
+  const leitura = lerConfiguracao(opts.env || process.env);
+  const pedir = opts.pedirToken || pedirTokenHttps;
+  const _agora = opts.agora || (() => Date.now());
+  const margemMs = opts.margemMs === undefined ? MARGEM_RENOVACAO_MS : opts.margemMs;
+
+  // O refresh token vive AQUI, em memória, e nasce do ambiente. Uma rotação
+  // atualiza esta variável e nada mais: nada é gravado, e reiniciar o processo
+  // volta ao segredo do Railway — que é a fonte da verdade.
+  let refreshToken = leitura.ok ? leitura.cfg.refreshToken : null;
+  let idToken = null;
+  let expiraEmMs = 0;
+  let emVoo = null;
+  let renovacoes = 0;
+  let rotacoes = 0;
+
+  function configurada() {
+    return leitura.ok;
+  }
+
+  /** O que o operador pode ver. Nenhum token, nem pedaço. */
+  function estado() {
+    return {
+      configurada: leitura.ok,
+      faltando: leitura.ok ? [] : leitura.faltando.slice(),
+      temToken: idToken !== null,
+      expiraEmMs: idToken !== null ? expiraEmMs : null,
+      renovacoes,
+      rotacoes,
+    };
+  }
+
+  function valido() {
+    return idToken !== null && _agora() + margemMs < expiraEmMs;
+  }
+
+  async function renovar() {
+    const cfg = leitura.cfg;
+    const bruto = await pedir({ apiKey: cfg.apiKey, refreshToken });
+    const r = interpretarResposta(bruto, { uid: cfg.uid, projectId: cfg.projectId });
+    const sanidade = conferirSanidade(r.idToken, { uid: cfg.uid, projectId: cfg.projectId }, _agora());
+
+    if (r.refreshToken && r.refreshToken !== refreshToken) {
+      refreshToken = r.refreshToken;
+      rotacoes++;
+    }
+    idToken = r.idToken;
+    // A expiração que vale é a do PRÓPRIO token, não a que o corpo da resposta
+    // anunciou. Se as duas divergirem, quem verifica lê o `exp` do token.
+    expiraEmMs = sanidade.expiraEmMs;
+    renovacoes++;
+    return idToken;
+  }
+
+  /**
+   * O ID token válido, renovando se preciso.
+   *
+   * COALESCÊNCIA. `emVoo` é atribuído SINCRONAMENTE, antes de qualquer `await`.
+   * É o detalhe que faz cem chamadas simultâneas produzirem UMA renovação: se a
+   * atribuição acontecesse depois de um ponto de suspensão, todas as chamadas
+   * que chegassem no mesmo tique veriam `emVoo === null` e disparariam a sua
+   * própria — o Google devolveria um refresh token novo para cada uma, e as
+   * rotações concorrentes invalidariam umas às outras.
+   */
+  function obterIdToken() {
+    if (!leitura.ok) {
+      return Promise.reject(
+        new ErroCredencialMotor(FALHA.SEM_CONFIGURACAO, leitura.faltando.join(", "))
+      );
+    }
+    if (valido()) return Promise.resolve(idToken);
+    if (emVoo) return emVoo;
+
+    emVoo = renovar().then(
+      (t) => {
+        emVoo = null;
+        return t;
+      },
+      (e) => {
+        emVoo = null;
+        // DESCARTE. O token em memória (se havia) já estava vencido ou perto
+        // disso — foi por isso que se tentou renovar. Mantê-lo faria a próxima
+        // chamada devolver um token que a Function vai recusar, e o defeito
+        // apareceria como "encerramento negado" em vez de "credencial quebrada".
+        idToken = null;
+        expiraEmMs = 0;
+        throw e instanceof ErroCredencialMotor ? e : new ErroCredencialMotor(FALHA.CONEXAO);
+      }
+    );
+    return emVoo;
+  }
+
+  return { obterIdToken, estado, configurada };
+}
+
 module.exports = {
+  criarCredencialDoMotor,
   lerConfiguracao,
   corpoDaRenovacao,
   interpretarResposta,
