@@ -66,6 +66,24 @@
 // Testes: `test/versao.test.js` (24 provas). Sem merge e sem deploy.
 // Ver docs/VERSIONAMENTO-VISAO-V1.md.
 // ===================================================================================
+// EXCEÇÃO DOCUMENTADA — CREDENCIAL RENOVÁVEL DO MOTOR
+// (branch claude/credencial-renovavel-motor-railway-v1)
+// Mesmo motivo das anteriores: a fonte `cliente/` continua ausente. O bundle
+// ganhou UM módulo novo, marcado com `// [CREDENCIAL]`:
+//   • módulo NOVO `credencial_motor` — troca um refresh token por ID tokens do
+//     Firebase pelo endpoint REST do Secure Token, com cache, margem de
+//     renovação, coalescência de chamadas simultâneas e rotação do refresh
+//     token em memória. `https` do Node e mais nada: NENHUMA dependência foi
+//     acrescentada, e `package.json` continua sem `dependencies`.
+// É o simétrico de `auth_firebase`: aquele verifica quem ENTRA, este produz a
+// credencial de quando SAÍMOS — o ID token que o futuro transporte apresentará
+// à Cloud Function `registrarEncerramentoPartida`, que exige `motorDePartidas`.
+// NADA FOI LIGADO: a outbox está intocada, `ws_server` não carrega o módulo, o
+// envelope não foi traduzido e `npm start` faz exatamente o que fazia. Nenhuma
+// regra do Buraco, pontuação, encerramento, economia ou moderação foi tocada.
+// Testes: `test/credencial_motor.test.js`. Sem merge e sem deploy.
+// Ver docs/CREDENCIAL-RENOVAVEL-MOTOR-V1.md.
+// ===================================================================================
 (function () {
   var __cache = {};
   var __fabricas = {};
@@ -4719,6 +4737,320 @@ module.exports = {
   partesDoToken,
   FALHA,
   URL_CERTIFICADOS,
+};
+
+  };
+
+  __fabricas["credencial_motor"] = function (module, exports, require) {
+// [CREDENCIAL] servidor/credencial_motor.js — A CREDENCIAL DE SAÍDA DO MOTOR.
+//
+// Módulo NOVO. É o simétrico exato de `auth_firebase`: aquele verifica a
+// credencial de QUEM ENTRA (o jogador, no handshake); este produz a credencial
+// de QUANDO SAÍMOS — o ID token que o futuro transporte vai apresentar à Cloud
+// Function `registrarEncerramentoPartida`, que exige o claim `motorDePartidas`.
+//
+// O PROBLEMA QUE ELE RESOLVE. A Function só aceita ID token do Firebase, e ID
+// token expira em uma hora. As saídas óbvias eram todas proibidas:
+//
+//   `firebase-admin` no servidor  → este repositório é zero-dependência por
+//                                   decisão documentada, e o deploy roda
+//                                   `npm start` sem `npm install`;
+//   chave de conta de serviço     → segredo de altíssimo poder no Railway, e
+//                                   nada a expira;
+//   custom token guardado         → expira em uma hora e só credencial
+//                                   administrativa o emite: teria de ser
+//                                   renovado à mão, para sempre;
+//   ID token estático             → morre em uma hora.
+//
+// A SAÍDA. Um REFRESH TOKEN, obtido UMA VEZ por
+// `functions/scripts/bootstrap_credencial_motor.js` no repositório do app, e
+// guardado como segredo do Railway. Trocá-lo por um ID token novo exige só a Web
+// API Key do projeto, que não é segredo, e é uma requisição HTTPS — `https` do
+// Node, nada instalado.
+//
+//   POST https://securetoken.googleapis.com/v1/token?key=<API_KEY>
+//   content-type: application/x-www-form-urlencoded
+//   grant_type=refresh_token&refresh_token=<segredo>
+//
+// DECISÃO 1 — FAIL CLOSED. Configuração faltando, resposta estranha, projeto ou
+// UID divergente, claim ausente: tudo recusa. Não existe caminho degradado, e
+// não existe token "provisório". Um servidor que não consegue provar quem é
+// simplesmente não fala com a Function.
+//
+// DECISÃO 2 — NADA EM DISCO, NADA EM LOG. O ID token vive só em memória, e o
+// refresh token só na memória e no ambiente. Nenhum dos dois entra em log,
+// mensagem de erro ou arquivo. Reiniciar o processo volta ao segredo do
+// ambiente, e isso é o desejado: o Railway é a fonte da verdade.
+//
+// DECISÃO 3 — RENOVAÇÃO PREGUIÇOSA, SEM TIMER. O módulo não agenda nada por
+// conta própria. Um `setInterval` manteria o processo vivo, renovaria em
+// servidor ocioso e continuaria batendo no Google depois de a credencial ser
+// revogada. Aqui a renovação acontece quando alguém pede um token — e se
+// ninguém pede, nada acontece.
+//
+// DECISÃO 4 — ESTE MÓDULO NÃO É LIGADO A NADA NESTA ENTREGA. A outbox continua
+// intocada, o envelope continua sem tradução e `ws_server` não o carrega. Ele é
+// infraestrutura pronta para a OS do transporte. `npm start` faz exatamente o
+// que fazia.
+//
+// DECISÃO 5 — A LEITURA LOCAL DO JWT NÃO É AUTORIDADE. O payload é decodificado
+// para conferir que o token que chegou é o que se pediu (sub/aud/iss/exp/claim).
+// A assinatura NÃO é verificada aqui, e não deve ser: quem tem autoridade sobre
+// este token é a Function que o recebe. Implementar verificação criptográfica
+// paralela criaria uma segunda opinião sobre um token que não é nosso para
+// julgar. O parser é o MESMO de `auth_firebase` — um só analisador de JWT no
+// bundle, para os dois não divergirem.
+
+const https = require("https");
+const { partesDoToken } = require("./auth_firebase");
+
+const HOST_TOKEN = "securetoken.googleapis.com";
+const CAMINHO_TOKEN = "/v1/token";
+
+/// Teto do corpo lido. Sem ele, quem responde escolhe quanta memória gastamos.
+const LIMITE_RESPOSTA_BYTES = 64 * 1024;
+const TIMEOUT_MS = 10000;
+
+/// Quanto ANTES da expiração o token é considerado velho.
+///
+/// Cinco minutos, e o número tem razão: entre pedir o token e a Function
+/// verificá-lo há a viagem de rede, a fila do Cloud Functions e a tolerância de
+/// relógio que o Google aplica (até um minuto para cada lado). Um token entregue
+/// no limite chegaria expirado, e o encerramento da partida — que só acontece
+/// uma vez — falharia por alguns segundos de diferença.
+const MARGEM_RENOVACAO_MS = 5 * 60 * 1000;
+
+/// O claim que a Function exige. Mesma grafia de `functions/src/autoridade.ts`.
+const CLAIM = "motorDePartidas";
+
+/// Códigos de falha. São para LOG e TESTE. Nenhum deles carrega token.
+const FALHA = {
+  SEM_CONFIGURACAO: "SEM_CONFIGURACAO",
+  HTTP: "HTTP",
+  TIMEOUT: "TIMEOUT",
+  CONEXAO: "CONEXAO",
+  RESPOSTA_GRANDE: "RESPOSTA_GRANDE",
+  RESPOSTA_INVALIDA: "RESPOSTA_INVALIDA",
+  RESPOSTA_INCOMPLETA: "RESPOSTA_INCOMPLETA",
+  UID_DIVERGENTE: "UID_DIVERGENTE",
+  PROJETO_DIVERGENTE: "PROJETO_DIVERGENTE",
+  TOKEN_ILEGIVEL: "TOKEN_ILEGIVEL",
+  SUJEITO_DIVERGENTE: "SUJEITO_DIVERGENTE",
+  AUDIENCE_INVALIDO: "AUDIENCE_INVALIDO",
+  ISSUER_INVALIDO: "ISSUER_INVALIDO",
+  EXPIRACAO_INVALIDA: "EXPIRACAO_INVALIDA",
+  SEM_AUTORIDADE: "SEM_AUTORIDADE",
+};
+
+/// As variáveis que o Railway precisa ter. Nomes, nunca valores.
+const VARIAVEIS = [
+  "FIREBASE_MOTOR_REFRESH_TOKEN",
+  "FIREBASE_MOTOR_UID",
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_WEB_API_KEY",
+];
+
+/**
+ * Erro tipado e REDIGIDO.
+ *
+ * O `codigo` é para o operador; a mensagem é montada aqui e nunca interpolada a
+ * partir de resposta do servidor remoto. O motivo é concreto: a mensagem de erro
+ * do endpoint de token ecoa o `refresh_token` enviado em alguns casos, e um
+ * `catch` que fizesse `console.error(e)` publicaria a credencial no log do
+ * Railway — de onde ela não sai nunca mais.
+ */
+class ErroCredencialMotor extends Error {
+  constructor(codigo, detalhe) {
+    super("credencial do motor: " + codigo + (detalhe ? " (" + detalhe + ")" : ""));
+    this.name = "ErroCredencialMotor";
+    this.codigo = codigo;
+  }
+}
+
+/** Lê a configuração do ambiente. Fail closed: falta uma, falta tudo. */
+function lerConfiguracao(env) {
+  const fonte = env || {};
+  const faltando = VARIAVEIS.filter((v) => {
+    const valor = fonte[v];
+    return typeof valor !== "string" || valor.length === 0;
+  });
+  if (faltando.length) return { ok: false, faltando };
+  return {
+    ok: true,
+    cfg: {
+      refreshToken: fonte.FIREBASE_MOTOR_REFRESH_TOKEN,
+      uid: fonte.FIREBASE_MOTOR_UID,
+      projectId: fonte.FIREBASE_PROJECT_ID,
+      apiKey: fonte.FIREBASE_WEB_API_KEY,
+    },
+  };
+}
+
+/** O corpo da troca, exatamente como o endpoint espera. */
+function corpoDaRenovacao(refreshToken) {
+  return (
+    "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken)
+  );
+}
+
+/** A requisição REST. Injetável nos testes; em produção é esta. */
+function pedirTokenHttps({ apiKey, refreshToken }) {
+  return new Promise((ok, falha) => {
+    const corpo = corpoDaRenovacao(refreshToken);
+    let req;
+    try {
+      req = https.request(
+        {
+          host: HOST_TOKEN,
+          path: CAMINHO_TOKEN + "?key=" + encodeURIComponent(apiKey),
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "content-length": Buffer.byteLength(corpo),
+          },
+        },
+        (res) => {
+          let bruto = "";
+          let excedeu = false;
+          res.setEncoding("utf8");
+          res.on("data", (d) => {
+            if (excedeu) return;
+            bruto += d;
+            if (bruto.length > LIMITE_RESPOSTA_BYTES) {
+              excedeu = true;
+              res.destroy();
+              falha(new ErroCredencialMotor(FALHA.RESPOSTA_GRANDE));
+            }
+          });
+          res.on("end", () => {
+            if (excedeu) return;
+            ok({ status: res.statusCode, corpo: bruto });
+          });
+          // Conexão cortada no meio do corpo: `end` não dispara, e sem isto a
+          // promessa ficaria pendente para sempre e o chamador travaria.
+          res.on("error", () => {
+            if (!excedeu) falha(new ErroCredencialMotor(FALHA.CONEXAO));
+          });
+        }
+      );
+    } catch (_) {
+      return falha(new ErroCredencialMotor(FALHA.CONEXAO));
+    }
+    req.setTimeout(TIMEOUT_MS, () => req.destroy(new ErroCredencialMotor(FALHA.TIMEOUT)));
+    req.on("error", (e) =>
+      falha(
+        e instanceof ErroCredencialMotor
+          ? e
+          : // A mensagem do erro de rede NÃO é propagada: `e.message` de um
+            // socket pode carregar a URL, e a URL carrega a API key.
+            new ErroCredencialMotor(FALHA.CONEXAO)
+      )
+    );
+    req.end(corpo);
+  });
+}
+
+/** Interpreta a resposta bruta. Separada da rede para o teste alcançá-la. */
+function interpretarResposta({ status, corpo }, esperado) {
+  if (status !== 200) {
+    // Só o status. O corpo de erro do Google pode ecoar o refresh token.
+    throw new ErroCredencialMotor(FALHA.HTTP, String(status));
+  }
+  let json;
+  try {
+    json = JSON.parse(corpo);
+  } catch (_) {
+    throw new ErroCredencialMotor(FALHA.RESPOSTA_INVALIDA);
+  }
+  if (!json || typeof json !== "object") {
+    throw new ErroCredencialMotor(FALHA.RESPOSTA_INVALIDA);
+  }
+
+  const idToken = json.id_token;
+  const expiresIn = Number(json.expires_in);
+  if (
+    typeof idToken !== "string" ||
+    idToken.length === 0 ||
+    typeof json.user_id !== "string" ||
+    typeof json.project_id !== "string" ||
+    !Number.isFinite(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    throw new ErroCredencialMotor(FALHA.RESPOSTA_INCOMPLETA);
+  }
+
+  // O endpoint devolve QUEM é o dono do refresh token. Se não é quem esperamos,
+  // o segredo do Railway pertence a outra identidade — e usá-lo faria o servidor
+  // registrar partida sob autoria alheia.
+  if (json.user_id !== esperado.uid) {
+    throw new ErroCredencialMotor(FALHA.UID_DIVERGENTE);
+  }
+  if (json.project_id !== esperado.projectId) {
+    throw new ErroCredencialMotor(FALHA.PROJETO_DIVERGENTE);
+  }
+
+  return {
+    idToken,
+    expiresInS: expiresIn,
+    // O Firebase PODE devolver um refresh token novo. Quando devolve, é ele que
+    // vale daqui em diante — continuar usando o antigo funcionaria por um tempo
+    // e pararia sem aviso.
+    refreshToken:
+      typeof json.refresh_token === "string" && json.refresh_token.length > 0
+        ? json.refresh_token
+        : null,
+  };
+}
+
+/**
+ * SANIDADE LOCAL do ID token (§7 da OS). NÃO é verificação criptográfica.
+ *
+ * Cada checagem existe por um acidente concreto:
+ *   sub   — o refresh token é de outra identidade;
+ *   aud   — a Web API Key é de outro projeto;
+ *   iss   — a resposta não veio do emissor do nosso projeto;
+ *   exp   — token que já nasce vencido (relógio errado dos dois lados);
+ *   claim — o claim foi revogado desde a última renovação, e o token novo já não
+ *           o carrega. Descobrir isso AQUI, e não na Function, é a diferença
+ *           entre um log claro e um encerramento de partida perdido.
+ */
+function conferirSanidade(idToken, esperado, agoraMs) {
+  const partes = partesDoToken(idToken);
+  if (!partes) throw new ErroCredencialMotor(FALHA.TOKEN_ILEGIVEL);
+  const p = partes.payload;
+
+  if (p.sub !== esperado.uid) throw new ErroCredencialMotor(FALHA.SUJEITO_DIVERGENTE);
+  if (p.aud !== esperado.projectId) throw new ErroCredencialMotor(FALHA.AUDIENCE_INVALIDO);
+  if (p.iss !== "https://securetoken.google.com/" + esperado.projectId) {
+    throw new ErroCredencialMotor(FALHA.ISSUER_INVALIDO);
+  }
+  if (typeof p.exp !== "number" || !Number.isFinite(p.exp)) {
+    throw new ErroCredencialMotor(FALHA.EXPIRACAO_INVALIDA);
+  }
+  const expiraEmMs = p.exp * 1000;
+  if (expiraEmMs <= agoraMs) throw new ErroCredencialMotor(FALHA.EXPIRACAO_INVALIDA);
+  // `=== true` e ESTRITO, igual à guarda do outro lado. Um claim que chegue como
+  // `"true"` ou `1` não autoriza lá, e aceitar aqui só adiaria a recusa.
+  if (p[CLAIM] !== true) throw new ErroCredencialMotor(FALHA.SEM_AUTORIDADE);
+
+  return { expiraEmMs };
+}
+
+module.exports = {
+  lerConfiguracao,
+  corpoDaRenovacao,
+  interpretarResposta,
+  conferirSanidade,
+  pedirTokenHttps,
+  ErroCredencialMotor,
+  FALHA,
+  VARIAVEIS,
+  CLAIM,
+  HOST_TOKEN,
+  CAMINHO_TOKEN,
+  LIMITE_RESPOSTA_BYTES,
+  TIMEOUT_MS,
+  MARGEM_RENOVACAO_MS,
 };
 
   };
