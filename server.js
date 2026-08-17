@@ -4772,10 +4772,10 @@ module.exports = {
 //   content-type: application/x-www-form-urlencoded
 //   grant_type=refresh_token&refresh_token=<segredo>
 //
-// DECISÃO 1 — FAIL CLOSED. Configuração faltando, resposta estranha, projeto ou
-// UID divergente, claim ausente: tudo recusa. Não existe caminho degradado, e
-// não existe token "provisório". Um servidor que não consegue provar quem é
-// simplesmente não fala com a Function.
+// DECISÃO 1 — FAIL CLOSED. Configuração faltando, resposta estranha, UID
+// divergente, `aud`/`iss` de outro projeto, claim ausente: tudo recusa. Não
+// existe caminho degradado, e não existe token "provisório". Um servidor que não
+// consegue provar quem é simplesmente não fala com a Function.
 //
 // DECISÃO 2 — NADA EM DISCO, NADA EM LOG. O ID token vive só em memória, e o
 // refresh token só na memória e no ambiente. Nenhum dos dois entra em log,
@@ -4800,6 +4800,29 @@ module.exports = {
 // paralela criaria uma segunda opinião sobre um token que não é nosso para
 // julgar. O parser é o MESMO de `auth_firebase` — um só analisador de JWT no
 // bundle, para os dois não divergirem.
+//
+// DECISÃO 6 — `project_id` DO ENVELOPE NÃO É O FIREBASE PROJECT ID, E NÃO É
+// AUTORIDADE. A V1 deste módulo comparava `json.project_id` da resposta do Secure
+// Token com `FIREBASE_PROJECT_ID` e recusava na divergência. A homologação
+// independente mediu o campo contra o endpoint e ele veio NUMÉRICO — o *project
+// number* do Google Cloud, e não o id textual do projeto. Com a comparação de pé,
+// `obterIdToken()` lançaria `PROJETO_DIVERGENTE` em toda chamada: o Railway
+// falharia fechado, para sempre, e o defeito só apareceria na ativação.
+//
+// A comparação foi REMOVIDA, e não trocada por uma equivalente contra o número.
+// Ela nunca acrescentou segurança:
+//
+//   • o próprio endpoint já valida o projeto do refresh token contra a API key —
+//     um par incompatível volta como erro HTTP, e o erro HTTP já recusa aqui;
+//   • `user_id` continua conferido, e prende a IDENTIDADE;
+//   • `aud` e `iss` do ID token continuam conferidos, e prendem o PROJETO
+//     TEXTUAL — e esses dois, ao contrário do envelope, estão criptograficamente
+//     ligados ao token que a Function vai verificar.
+//
+// Um envelope pode dizer qualquer coisa; o token, não. Guardar o projeto pelo
+// envelope era guardar pela metade mais fraca. O campo passou a ser INFORMATIVO:
+// não é comparado, não é exigido, e a sua forma — texto, número em texto, número
+// JSON ou ausência — não decide nada.
 
 const https = require("https");
 const { partesDoToken } = require("./auth_firebase");
@@ -4833,7 +4856,10 @@ const FALHA = {
   RESPOSTA_INVALIDA: "RESPOSTA_INVALIDA",
   RESPOSTA_INCOMPLETA: "RESPOSTA_INCOMPLETA",
   UID_DIVERGENTE: "UID_DIVERGENTE",
-  PROJETO_DIVERGENTE: "PROJETO_DIVERGENTE",
+  // NÃO existe PROJETO_DIVERGENTE. O envelope não prende projeto (DECISÃO 6);
+  // quem prende é `aud`/`iss` do token, e a recusa de lá é AUDIENCE_INVALIDO /
+  // ISSUER_INVALIDO. Um código para "o envelope discordou" só voltaria a existir
+  // junto com a comparação que quebrava a credencial.
   TOKEN_ILEGIVEL: "TOKEN_ILEGIVEL",
   SUJEITO_DIVERGENTE: "SUJEITO_DIVERGENTE",
   AUDIENCE_INVALIDO: "AUDIENCE_INVALIDO",
@@ -4968,11 +4994,14 @@ function interpretarResposta({ status, corpo }, esperado) {
 
   const idToken = json.id_token;
   const expiresIn = Number(json.expires_in);
+  // `project_id` NÃO está nesta lista, de propósito. Ver a DECISÃO 6: o campo é
+  // o *project number*, não é comparado com nada, e exigir a forma de um dado que
+  // não decide nada seria só mais um jeito de a credencial inteira falhar
+  // fechada por causa de um campo que o servidor nem lê.
   if (
     typeof idToken !== "string" ||
     idToken.length === 0 ||
     typeof json.user_id !== "string" ||
-    typeof json.project_id !== "string" ||
     !Number.isFinite(expiresIn) ||
     expiresIn <= 0
   ) {
@@ -4982,11 +5011,12 @@ function interpretarResposta({ status, corpo }, esperado) {
   // O endpoint devolve QUEM é o dono do refresh token. Se não é quem esperamos,
   // o segredo do Railway pertence a outra identidade — e usá-lo faria o servidor
   // registrar partida sob autoria alheia.
+  //
+  // Esta é a ÚNICA conferência do envelope. O projeto não se confere aqui: ver a
+  // DECISÃO 6 e, logo abaixo, `conferirSanidade`, onde `aud` e `iss` o prendem
+  // pelo próprio token.
   if (json.user_id !== esperado.uid) {
     throw new ErroCredencialMotor(FALHA.UID_DIVERGENTE);
-  }
-  if (json.project_id !== esperado.projectId) {
-    throw new ErroCredencialMotor(FALHA.PROJETO_DIVERGENTE);
   }
 
   return {
@@ -5010,6 +5040,12 @@ function interpretarResposta({ status, corpo }, esperado) {
  *   aud   — a Web API Key é de outro projeto;
  *   iss   — a resposta não veio do emissor do nosso projeto;
  *   exp   — token que já nasce vencido (relógio errado dos dois lados);
+ *
+ * `aud` e `iss` são, desde a DECISÃO 6, o ÚNICO ponto em que o FIREBASE_PROJECT_ID
+ * textual é exigido — e o certo é que seja aqui: os dois vêm assinados dentro do
+ * token, e são exatamente os campos que a Function verifica do outro lado. O
+ * envelope da resposta não tem voto sobre projeto.
+ *
  *   claim — o claim foi revogado desde a última renovação, e o token novo já não
  *           o carrega. Descobrir isso AQUI, e não na Function, é a diferença
  *           entre um log claro e um encerramento de partida perdido.

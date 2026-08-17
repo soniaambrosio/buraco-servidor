@@ -46,6 +46,16 @@ const PROJETO = "buraco-master-vip-teste";
 const API_KEY = MARCA + "api-key";
 const REFRESH = MARCA + "refresh-inicial";
 
+/// O `project_id` que o envelope do Secure Token devolve.
+///
+/// É NUMÉRICO, e é assim de propósito. A fixture da V1 codificava
+/// `project_id: PROJETO` — ela AFIRMAVA a suposição do módulo em vez de testá-la,
+/// e por isso a suíte inteira passava enquanto a credencial estava quebrada em
+/// produção. A homologação independente mediu o campo contra o endpoint: vem o
+/// *project number*, não o id textual. A fixture agora carrega a forma MEDIDA, e
+/// nenhum caso depende de ela coincidir com `FIREBASE_PROJECT_ID`.
+const NUMERO_PROJETO = "1234567890";
+
 const T0 = Date.UTC(2026, 7, 17, 12, 0, 0);
 const HORA_MS = 3600 * 1000;
 
@@ -125,7 +135,7 @@ function respostaOk({ payload = {}, emitidoEm = T0, refreshToken = REFRESH, extr
           refresh_token: refreshToken,
           id_token: idTokenFalso(payload, emitidoEm),
           user_id: UID,
-          project_id: PROJETO,
+          project_id: NUMERO_PROJETO,
         },
         extra
       )
@@ -509,13 +519,10 @@ describe("CRED/IDENTIDADE", () => {
     assert.equal(e.codigo, FALHA.UID_DIVERGENTE);
   });
 
-  test("CRED-18: project_id divergente é recusado", async () => {
-    const { cred } = credencial({
-      pedirToken: transporte(respostaOk({ extra: { project_id: "outro-projeto" } })),
-    });
-    const e = await falhaDe(cred.obterIdToken());
-    assert.equal(e.codigo, FALHA.PROJETO_DIVERGENTE);
-  });
+  // CRED-18 era "project_id divergente é recusado". A homologação independente
+  // mostrou que esse caso afirmava um contrato inexistente: o campo é o project
+  // NUMBER, nunca coincide com `FIREBASE_PROJECT_ID`, e a recusa tornava a
+  // credencial inoperante. O contrato correto está em CRED/CONTRATO, abaixo.
 
   test("CRED-19: claim ausente no payload é recusado", async () => {
     const { cred } = credencial({
@@ -579,7 +586,7 @@ describe("CRED/IDENTIDADE", () => {
     for (const ruim of ["nao.e.token", "", "a.b.c.d", "a.@@@.c"]) {
       const { cred } = credencial({
         pedirToken: transporte({ status: 200, corpo: JSON.stringify({
-          id_token: ruim, expires_in: "3600", user_id: UID, project_id: PROJETO,
+          id_token: ruim, expires_in: "3600", user_id: UID, project_id: NUMERO_PROJETO,
         }) }),
       });
       const e = await falhaDe(cred.obterIdToken());
@@ -588,6 +595,219 @@ describe("CRED/IDENTIDADE", () => {
         JSON.stringify(ruim) + " → " + e.codigo
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// O CONTRATO DO SECURE TOKEN — a correção, e as barreiras que ela NÃO afrouxou
+// ---------------------------------------------------------------------------
+//
+// A V1 comparava `json.project_id` da resposta com `FIREBASE_PROJECT_ID`. O campo
+// é o *project number* do Google Cloud: numérico, e nunca igual ao id textual.
+// Com a comparação de pé o Railway nunca obteria token — falha fechada, sem risco
+// de segurança e sem funcionar. Este bloco fixa as duas metades da correção:
+//
+//   1. o ENVELOPE não decide projeto — qualquer forma de `project_id` passa;
+//   2. o TOKEN decide, e continua estrito — `aud`, `iss`, `sub`, `exp` e o claim
+//      recusam exatamente como antes.
+//
+// A segunda metade é o que impede a correção de virar afrouxamento: remover uma
+// barreira frouxa só é seguro porque a barreira forte está aqui, medida.
+describe("CRED/CONTRATO", () => {
+  test("CRED-18: project_id NUMÉRICO com aud/iss corretos é ACEITO", async () => {
+    // O caso que a V1 reprovava. É a resposta real do endpoint.
+    const { cred } = credencial({
+      pedirToken: transporte(respostaOk({ extra: { project_id: "1234567890" } })),
+    });
+    const t = await cred.obterIdToken();
+    assert.equal(t, idTokenFalso(), "o token válido tem de atravessar");
+    assert.equal(cred.estado().temToken, true);
+  });
+
+  test("CRED-18b: project_id numérico DIFERENTE, token correto, é ACEITO", async () => {
+    // Comportamento documentado (DECISÃO 6): o envelope não tem voto sobre
+    // projeto. Quem o prende é `aud`/`iss`, que aqui estão certos.
+    for (const numero of ["1234567890", "999", "0", "18446744073709551615"]) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ extra: { project_id: numero } })),
+      });
+      assert.equal(await cred.obterIdToken(), idTokenFalso(), "project_id=" + numero);
+    }
+  });
+
+  test("CRED-18c: project_id TEXTUAL — a forma que a V1 supunha — também é aceito", async () => {
+    // A correção não trocou uma comparação por outra: nem o número nem o texto
+    // decidem. Se um dia o endpoint passar a devolver o id textual, nada quebra.
+    for (const texto of [PROJETO, "outro-projeto-qualquer"]) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ extra: { project_id: texto } })),
+      });
+      assert.equal(await cred.obterIdToken(), idTokenFalso(), "project_id=" + texto);
+    }
+  });
+
+  test("CRED-18d: project_id ausente, nulo ou número JSON não derruba nada", async () => {
+    // O campo deixou de ser exigido: exigir a FORMA de um dado que não decide
+    // nada seria mais um jeito de a credencial inteira falhar fechada por causa
+    // de um campo que o servidor não lê.
+    for (const forma of [undefined, null, 1234567890, {}, []]) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ extra: { project_id: forma } })),
+      });
+      assert.equal(await cred.obterIdToken(), idTokenFalso(), "project_id=" + JSON.stringify(forma));
+    }
+  });
+
+  test("CRED-18e: a comparação REMOVIDA não voltou — nem sob outro nome", async () => {
+    // Rede estrutural contra a mutação "restaurar `project_id === FIREBASE_PROJECT_ID`".
+    // Os casos acima já caem se ela voltar; este diz POR QUE caíram, e pega também
+    // uma restauração escrita com outro código de falha.
+    assert.equal(
+      /json\.project_id\s*!==|json\.project_id\s*===/.test(MODULO),
+      false,
+      "o envelope voltou a decidir projeto"
+    );
+    assert.equal(FALHA.PROJETO_DIVERGENTE, undefined, "o código de falha do envelope ressuscitou");
+    assert.equal(/PROJETO_DIVERGENTE/.test(MODULO), false);
+
+    // E `esperado.projectId` só é lido onde ele PODE decidir: na sanidade do
+    // token. `interpretarResposta` não o consulta mais.
+    const i = MODULO.indexOf("function interpretarResposta");
+    const corpo = MODULO.slice(i, MODULO.indexOf("function conferirSanidade", i));
+    assert.equal(/projectId/.test(corpo), false, "o interpretador do envelope voltou a olhar projeto");
+  });
+
+  test("CRED-18f: aud errado é RECUSADO — a barreira que ficou de pé", async () => {
+    for (const aud of ["outro-projeto", NUMERO_PROJETO, "", undefined, PROJETO + " "]) {
+      const { cred } = credencial({ pedirToken: transporte(respostaOk({ payload: { aud } })) });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.AUDIENCE_INVALIDO, "aud=" + JSON.stringify(aud));
+    }
+  });
+
+  test("CRED-18g: iss errado é RECUSADO", async () => {
+    const casos = [
+      "https://securetoken.google.com/outro-projeto",
+      "https://securetoken.google.com/" + NUMERO_PROJETO,
+      "https://exemplo.invalido/" + PROJETO,
+      "http://securetoken.google.com/" + PROJETO,   // sem TLS
+      "https://securetoken.google.com/" + PROJETO + "/",
+      undefined,
+    ];
+    for (const iss of casos) {
+      const { cred } = credencial({ pedirToken: transporte(respostaOk({ payload: { iss } })) });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.ISSUER_INVALIDO, "iss=" + JSON.stringify(iss));
+    }
+  });
+
+  test("CRED-18h: sub errado é RECUSADO", async () => {
+    for (const sub of ["uid-de-outro", "", undefined, UID + " "]) {
+      const { cred } = credencial({ pedirToken: transporte(respostaOk({ payload: { sub } })) });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.SUJEITO_DIVERGENTE, "sub=" + JSON.stringify(sub));
+    }
+  });
+
+  test("CRED-18i: user_id errado é RECUSADO — o envelope ainda prende IDENTIDADE", async () => {
+    // A correção removeu a conferência de PROJETO no envelope, e só ela. A de
+    // identidade continua: um refresh token de outro usuário no segredo do
+    // Railway faria o servidor registrar partida sob autoria alheia.
+    for (const user of ["uid-de-outro", "", UID + " "]) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ extra: { user_id: user } })),
+      });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.UID_DIVERGENTE, "user_id=" + JSON.stringify(user));
+    }
+  });
+
+  test("CRED-18j: claim ausente, falsa, textual ou numérica é RECUSADA", async () => {
+    const casos = [undefined, false, "true", "TRUE", "false", 1, "1", 0, "0", null, {}, []];
+    for (const errada of casos) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ payload: { [CLAIM]: errada } })),
+      });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.SEM_AUTORIDADE, "claim=" + JSON.stringify(errada));
+    }
+  });
+
+  test("CRED-18k: token expirado é RECUSADO, mesmo com envelope impecável", async () => {
+    const { cred } = credencial({
+      pedirToken: transporte(respostaOk({
+        payload: { exp: Math.floor((T0 - 1000) / 1000) },
+        extra: { project_id: NUMERO_PROJETO, expires_in: "3600" },
+      })),
+    });
+    const e = await falhaDe(cred.obterIdToken());
+    assert.equal(e.codigo, FALHA.EXPIRACAO_INVALIDA);
+    assert.equal(cred.estado().temToken, false);
+  });
+
+  test("CRED-18l: resposta sem ID token é RECUSADA", async () => {
+    for (const forma of [undefined, "", null, 42, {}]) {
+      const { cred } = credencial({
+        pedirToken: transporte(respostaOk({ extra: { id_token: forma } })),
+      });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.RESPOSTA_INCOMPLETA, "id_token=" + JSON.stringify(forma));
+    }
+  });
+
+  test("CRED-18m: par projeto × API key incompatível volta do endpoint e é RECUSADO", async () => {
+    // ESTA é a defesa real que a comparação do envelope fingia ser. O endpoint
+    // valida o projeto do refresh token contra a API key e responde com erro —
+    // não com um `project_id` diferente. Um par incompatível nunca chega a virar
+    // token, e a recusa vem do status, não de uma comparação nossa.
+    const corpos = [
+      '{"error":{"code":400,"message":"PROJECT_NUMBER_MISMATCH"}}',
+      '{"error":{"code":400,"message":"INVALID_REFRESH_TOKEN","errors":[{"reason":"invalid"}]}}',
+      '{"error":{"code":403,"message":"PERMISSION_DENIED: API key not valid"}}',
+    ];
+    for (const corpo of corpos) {
+      const status = corpo.includes('"code":403') ? 403 : 400;
+      const { cred } = credencial({ pedirToken: transporte({ status, corpo }) });
+      const e = await falhaDe(cred.obterIdToken());
+      assert.equal(e.codigo, FALHA.HTTP, corpo);
+      assert.match(e.message, new RegExp(String(status)));
+      // E o corpo do Google NÃO é propagado: ele ecoa o refresh token enviado em
+      // alguns casos, e o log do Railway é para sempre.
+      assert.equal(e.message.includes("PROJECT_NUMBER_MISMATCH"), false);
+      assert.equal(e.message.includes("API key"), false);
+    }
+  });
+
+  test("CRED-18n: nenhuma falha do contrato imprime refresh token, ID token ou API key", async () => {
+    const idToken = idTokenFalso();
+    const cenarios = [
+      ["aud", respostaOk({ payload: { aud: "outro" } })],
+      ["iss", respostaOk({ payload: { iss: "https://exemplo.invalido/x" } })],
+      ["sub", respostaOk({ payload: { sub: "outro" } })],
+      ["user_id", respostaOk({ extra: { user_id: "outro" } })],
+      ["claim", respostaOk({ payload: { [CLAIM]: "true" } })],
+      ["exp", respostaOk({ payload: { exp: Math.floor((T0 - 1000) / 1000) } })],
+      ["sem id_token", respostaOk({ extra: { id_token: undefined } })],
+      ["endpoint 400", { status: 400, corpo: '{"error":{"message":"' + REFRESH + '"}}' }],
+    ];
+
+    const escrito = [];
+    const original = { log: console.log, warn: console.warn, error: console.error };
+    console.log = console.warn = console.error = (...a) => escrito.push(a.join(" "));
+    try {
+      for (const [nome, resposta] of cenarios) {
+        const { cred } = credencial({ pedirToken: transporte(resposta) });
+        const e = await falhaDe(cred.obterIdToken());
+        const texto = String(e.message) + "\n" + String(e.stack || "");
+        assert.equal(texto.includes(MARCA), false, nome + ": vazou segredo marcado");
+        assert.equal(texto.includes(REFRESH), false, nome + ": vazou o refresh token");
+        assert.equal(texto.includes(API_KEY), false, nome + ": vazou a API key");
+        assert.equal(texto.includes(idToken), false, nome + ": vazou o ID token");
+      }
+    } finally {
+      Object.assign(console, original);
+    }
+    assert.deepEqual(escrito, [], "o módulo imprimiu: " + escrito.join(" | "));
   });
 });
 
@@ -655,8 +875,13 @@ describe("CRED/REDE", () => {
   });
 
   test("CRED-29b: resposta 200 sem os campos obrigatórios é recusada", async () => {
-    const completo = { id_token: idTokenFalso(), expires_in: "3600", user_id: UID, project_id: PROJETO };
-    for (const campo of Object.keys(completo)) {
+    const completo = {
+      id_token: idTokenFalso(), expires_in: "3600", user_id: UID, project_id: NUMERO_PROJETO,
+    };
+    // `project_id` NÃO entra: ele é informativo desde a correção do contrato, e a
+    // sua ausência não pode derrubar a credencial. O caso dele é CRED-18d.
+    const OBRIGATORIOS = ["id_token", "expires_in", "user_id"];
+    for (const campo of OBRIGATORIOS) {
       const parcial = Object.assign({}, completo);
       delete parcial[campo];
       const { cred } = credencial({ pedirToken: transporte({ status: 200, corpo: JSON.stringify(parcial) }) });
