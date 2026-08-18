@@ -289,10 +289,16 @@ describe("COST — expiração, renovação e reconexão", () => {
 
     nova.envia({ tipo: "jogada", jogada: { tipo: "comprarMonte" } });
     assert.equal(nova.todas("estado").length, 0);
+    // [OS7] O assento de quem caiu fica RESERVADO durante a graça — e continua
+    // fechado para esta conexão nova, que não tem identidade nenhuma. É a
+    // mesma pergunta de antes ("quem cai não deixa porta aberta"), agora com a
+    // resposta correta: reservado ao TITULAR, não liberado a quem chegar.
+    const sala = srv.ger.salas[codigo];
+    assert.equal(sala.controle[assentoAntigo].estado, "humano_ausente");
     assert.equal(
-      srv.ger.salas[codigo].jogo.assentos[assentoAntigo].tipo,
-      "bot",
-      "o assento de quem caiu virou bot"
+      srv.conexoes[nova.id].assento,
+      null,
+      "conexão sem identidade não pode herdar o assento reservado"
     );
   });
 });

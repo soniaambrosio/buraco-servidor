@@ -123,8 +123,10 @@ async function cliente(srv, uid = "uid-anonimo") {
  * Mesa pronta com `humanos` pessoas sentadas (o resto vira bot ao iniciar).
  * Devolve { srv, codigo, jogadores[], sala }.
  */
-async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3000 } = {}) {
-  const srv = novoServidor();
+async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3000, servidor = {} } = {}) {
+  // [OS7] `servidor` chega cru a `novoServidor`: é por ele que um teste injeta
+  // relógio controlável ou graça própria, sem que os demais mudem de forma.
+  const srv = novoServidor(servidor);
   const jogadores = [];
 
   // Cada conexão autentica com o uid que ela declara. `jogadorId` continua indo

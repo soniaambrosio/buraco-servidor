@@ -161,10 +161,13 @@ describe("P0-02 — UID de terceiro", () => {
     const { srv, codigo, sala } = await mesaComPartida();
     marcarSegredos(sala.jogo);
 
-    // `uid-1` é um participante REAL, sentado. O espectador se apresenta como
-    // ele, e ainda pede o assento dele.
+    // [OS7] `uid-1` é um participante REAL, sentado. Quem se apresenta como
+    // ele é OUTRA PESSOA: a credencial é de `uid-forasteiro` e só o PAYLOAD
+    // mente. É essa a reivindicação que interessa — depois da composição
+    // WS-AUTH, a identidade vem do token, e um teste que autenticasse COM
+    // `uid-1` estaria provando o oposto do que o nome diz.
     const esp = await espectador(srv, codigo, {
-      jogadorId: "uid-1",
+      jogadorId: "uid-forasteiro",
       viewerUid: "uid-1",
       playerUid: "uid-1",
       uid: "uid-1",
@@ -174,15 +177,37 @@ describe("P0-02 — UID de terceiro", () => {
 
     const conexao = srv.conexoes[esp.id];
     assert.equal(conexao.assento, null, "identidade reivindicada não pode conceder assento");
-    assert.equal(srv.papelDe(conexao), "espectador");
+    // [OS7] A recusa ficou MAIS forte, não mais fraca: com a credencial de
+    // `uid-forasteiro` e o payload dizendo `uid-1`, a divergência é barrada
+    // antes da sala — a conexão não vira nem espectador. Afirmar "espectador"
+    // aqui seria afirmar um privilégio que ele deixou de ter.
+    assert.equal(srv.papelDe(conexao), "nenhum", "identidade divergente entrou na sala");
+    assert.equal(conexao.codigo, null, "identidade divergente ficou vinculada à mesa");
 
     // E insistindo pelo caminho de estado e de jogada, com o UID do terceiro:
     esp.envia({ tipo: "assistirMesa", codigo, jogadorId: "uid-1", assento: 2 });
     esp.envia({ tipo: "jogada", jogadorId: "uid-1", assento: 2, jogada: { tipo: "comprarMonte" } });
     esp.envia({ tipo: "entrarMesa", codigo, jogadorId: "uid-1", assento: 2 });
+    // [OS7] E pelo caminho NOVO: a reconexão não é uma porta para o assento de
+    // outro. Sem `jogadorId` no payload, é a credencial que fala — e ela não
+    // é dona de assento nenhum nesta mesa.
+    esp.envia({ tipo: "entrarMesa", codigo });
+    esp.envia({ tipo: "afkVoltar" });
 
     assert.equal(srv.conexoes[esp.id].assento, null);
     exigirTudoLimpo(esp, sala.jogo, "P0-02");
+
+    // [OS7] E o forasteiro COERENTE — credencial e payload na mesma identidade,
+    // que é o que de fato consegue assistir — também não ganha assento por
+    // nenhum caminho, nem pelo da reconexão. É a metade que a recusa acima
+    // deixaria sem prova.
+    const legitimo = await espectador(srv, codigo, { jogadorId: "uid-forasteiro" });
+    assert.equal(srv.papelDe(srv.conexoes[legitimo.id]), "espectador");
+    legitimo.envia({ tipo: "entrarMesa", codigo });
+    legitimo.envia({ tipo: "afkVoltar" });
+    legitimo.envia({ tipo: "jogada", jogada: { tipo: "comprarMonte" } });
+    assert.equal(srv.conexoes[legitimo.id].assento, null, "espectador ganhou assento");
+    exigirTudoLimpo(legitimo, sala.jogo, "P0-02/legítimo");
   });
 
   test("P0-02: o assento pedido no payload é ignorado ao entrar na mesa", async () => {
@@ -326,8 +351,9 @@ describe("ESPEC — cobertura adicional", () => {
     const { srv, codigo, sala, jogadores } = await mesaComPartida();
     marcarSegredos(sala.jogo);
 
-    // O jogador do assento 2 cai. (Regra atual do servidor, fora do escopo
-    // desta OS: o assento vira BOT e não há retomada de assento.)
+    // O jogador do assento 2 cai. [OS7] O assento passa a ficar RESERVADO ao
+    // titular durante a graça — o que esta prova vigia não muda: quem volta
+    // como espectador recebe visão de espectador, e nada além.
     srv.desconectar(jogadores[2].id);
 
     // Ele volta. Sem assento a retomar, volta como quem assiste — e é só isso
@@ -337,12 +363,15 @@ describe("ESPEC — cobertura adicional", () => {
     assert.equal(srv.papelDe(srv.conexoes[devolta.id]), "espectador");
     exigirTudoLimpo(devolta, sala.jogo, "ESPEC-04");
 
-    // E o caminho de sentar de novo continua fechado pela regra da mesa.
-    const tentativa = await cliente(srv, "uid-2");
-    tentativa.envia({ tipo: "entrarMesa", codigo, jogadorId: "uid-2", assento: 2 });
-    assert.ok(tentativa.ultimo("erro"), "não se senta numa partida já começada");
-    assert.equal(tentativa.ultimo("entrou"), null);
-    assert.equal(tentativa.todas("estado").length, 0, "quem não entrou não recebe estado");
+    // [OS7] Sentar numa partida começada continua fechado para QUEM NÃO É O
+    // TITULAR — e essa é a metade que esta prova guarda. A metade nova (o
+    // titular reconecta) tem prova própria em `controlador_assento.test.js`.
+    const intruso = await cliente(srv, "uid-forasteiro");
+    intruso.envia({ tipo: "entrarMesa", codigo, assento: 2 });
+    assert.ok(intruso.ultimo("erro"), "um terceiro sentou numa partida já começada");
+    assert.equal(intruso.ultimo("entrou"), null);
+    assert.equal(intruso.todas("estado").length, 0, "quem não entrou não recebe estado");
+    assert.equal(srv.conexoes[intruso.id].assento, null);
   });
 
   test("ESPEC-05: espectador não ganha privilégio por reconectar", async () => {

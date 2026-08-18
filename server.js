@@ -2900,7 +2900,17 @@ function jogarTurnoBotCore(jogo, assento) {
   // nesse caso: compra do monte e abre da mão quando puder (o cérebro respeita o
   // mínimo nas baixadas). Perde raras aberturas boas via lixo, mas nunca fura a regra.
   const lixoForcariaAberturaFraca = minimoAbertura > 0 && justif;
-  if (plano1.compra.origem === "lixo" && topo && !pegarLixoStranda && !lixoForcariaAberturaFraca) {
+  // [CONTROLADOR §10] TURNO JÁ INICIADO. Se o humano comprou e caiu depois, o
+  // bot que assume entra DEPOIS da compra: a fase do turno é do jogo, não do
+  // controlador, e takeover não reinicia turno. Sem esta guarda o bot tentaria
+  // comprar de novo, `validarVez` recusaria e o turno morreria sem jogada —
+  // a mesa penduraria exatamente no caso que esta OS existe para consertar.
+  //
+  // A obrigação de topo (`deveUsarTopo`) atravessa junto: ela vive no jogo e é
+  // honrada mais abaixo, no mesmo ponto em que já era.
+  if (jogo.jaComprou) {
+    log.push("assumiu o turno já iniciado (compra preservada)");
+  } else if (plano1.compra.origem === "lixo" && topo && !pegarLixoStranda && !lixoForcariaAberturaFraca) {
     const r = J.comprarLixo(jogo, assento);
     if (r.ok) {
       comprouLixo = true;
@@ -3798,6 +3808,41 @@ function gerarCodigoPadrao() {
  *  a privada fica fora do ranking por ser combinável, mas quem jogou jogou.
  *  `simulada` é o default CONSERVADOR de qualquer mesa cuja natureza não tenha
  *  sido declarada pelo servidor: na dúvida, não conta. */
+// ===========================================================================
+// [CONTROLADOR] CONTROLE DE ASSENTO — separado da POSSE (OS 7 §3).
+//
+// POSSE responde "de quem é este assento": vive em `sala.assentos[i]`
+// (`{ tipo, apelido, jogadorId }`), é congelada em `iniciarPartida` e
+// NENHUM caminho desta OS a altera. É ela que `composicaoDoCanal` lê para o
+// chat, e é por isso que uma queda de rede não remexe o canal.
+//
+// CONTROLE responde "quem fornece a próxima intenção deste assento": vive em
+// `sala.controle[i]`, fora de `sala.jogo`. Ficar fora do objeto de jogo é
+// deliberado — o controlador não é regra de Buraco e não pode encostar em mão,
+// monte, lixo, morto, vez, obrigação de topo ou placar (§10).
+//
+// `sala.jogo.assentos[i].tipo` continua existindo e continua alternando entre
+// "humano" e "bot", mas passa a ser DERIVADO: quem decide é `controle`. O
+// motor e o bot leem `tipo`; a autoridade é `controle`.
+// ===========================================================================
+const CONTROLE = Object.freeze({
+  HUMANO_ATIVO: "humano_ativo",      // conectado e no comando
+  HUMANO_AUSENTE: "humano_ausente",  // caiu, assento RESERVADO, ninguém joga
+  BOT_SUBSTITUTO: "bot_substituto",  // bot jogando assento de dono humano
+  BOT_DE_MESA: "bot_de_mesa",        // nasceu bot em iniciarPartida, sem dono
+});
+/** Motivo da perda de controle. Queda NÃO é desistência (§7). */
+const MOTIVO_CONTROLE = Object.freeze({
+  QUEDA: "queda_de_conexao",
+  AFK: "afk",
+  SAIDA: "saida_voluntaria",
+});
+/** Os dois estados em que o assento é jogado por bot. */
+const CONTROLES_DE_BOT = new Set([CONTROLE.BOT_SUBSTITUTO, CONTROLE.BOT_DE_MESA]);
+/** Graça de ausência por QUEDA (§5). Configuração do SERVIDOR: entra por
+ *  `criarGerenciador({ gracaAusenciaMs })`, nunca por mensagem do cliente. */
+const GRACA_AUSENCIA_PADRAO_MS = 15000;
+
 const TIPOS_DE_PARTIDA = ["publica", "privada", "simulada"];
 const TIPO_PADRAO = "privada";
 
@@ -4054,6 +4099,16 @@ function montarEnvelopeEncerramento(sala, agoraIso) {
           assento: p.assento, uid: p.uid, dupla: p.dupla, tipo: p.tipo,
         }))
       : [],
+    // [CONTROLADOR §13] Fato canônico da substituição, para o backend de
+    // ranking consumir. O servidor NÃO calcula rating aqui: ele diz o que
+    // aconteceu. `botAgiu: false` é caiu-e-voltou; `true` é o bot jogou.
+    substituicoes: Array.isArray(sala.substituicoes)
+      ? sala.substituicoes.map((s) => ({
+          assento: s.assento, uid: s.uid, motivo: s.motivo,
+          desdeIso: s.desdeIso, botAgiu: s.botAgiu,
+          humanoVoltou: s.humanoVoltou, voltouEmIso: s.voltouEmIso,
+        }))
+      : [],
   });
 }
 
@@ -4069,6 +4124,14 @@ function criarGerenciador(opts = {}) {
   // não se importam com encerramento não precisam tocar em disco.
   const outbox = opts.outbox || null;
   const agoraIso = opts.agoraIso || (() => new Date().toISOString());
+  // [CONTROLADOR §17] Relógio em milissegundos, injetável. Toda a decisão de
+  // expiração de graça passa por aqui — nenhum `Date.now()` solto no caminho
+  // do controlador, para que a suíte possa afirmar T-1, T e T+1 sem dormir.
+  const agora = opts.agora || (() => Date.now());
+  // [CONTROLADOR §5] Janela de graça da ausência por queda.
+  const gracaAusenciaMs = Number.isFinite(opts.gracaAusenciaMs)
+    ? Math.max(0, opts.gracaAusenciaMs)
+    : GRACA_AUSENCIA_PADRAO_MS;
   const gerarCodigo = opts.gerarCodigo || gerarCodigoPadrao;
   const LIMITE_BOTS = opts.limiteAvanco || 5000; // trava anti-loop do avanço
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
@@ -4126,7 +4189,15 @@ function criarGerenciador(opts = {}) {
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
-    if (sala.iniciada) return { erro: "a partida já começou" };
+    if (sala.iniciada) {
+      // [CONTROLADOR §9] Mesa iniciada não recusa mais em bloco. Se o UID
+      // autenticado é o PROPRIETÁRIO preservado de um assento, isto não é
+      // entrada — é reconexão, e ela tem de passar. Qualquer outro UID
+      // continua recebendo a recusa de sempre.
+      const rec = reconectar({ codigo, jogadorId });
+      if (rec && rec.assento != null) return rec;
+      return { erro: (rec && rec.erro) || "a partida já começou" };
+    }
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
     // caso comum (casal/dupla que quer jogar JUNTA). Só depois enche os adversários
@@ -4171,6 +4242,19 @@ function criarGerenciador(opts = {}) {
     // trocar, mas o TITULAR daquele assento não muda. Sem este retrato, quem
     // caiu no meio perderia o crédito do que fez, e quem entrou depois herdaria.
     sala.participantes = mapaDeParticipantes(sala);
+    // [CONTROLADOR] O controlador nasce COM a partida e espelha a posse do
+    // instante inicial: assento com dono humano nasce sob controle humano;
+    // assento preenchido por bot nasce `bot_de_mesa` e nunca terá dono. A
+    // distinção existe para que "devolver o assento" só seja possível onde há
+    // a quem devolver.
+    sala.controle = sala.assentos.map((a) =>
+      a && a.tipo === "humano" && a.jogadorId
+        ? { estado: CONTROLE.HUMANO_ATIVO, motivo: null, desde: null, retornoPendente: false, terminal: false }
+        : { estado: CONTROLE.BOT_DE_MESA, motivo: null, desde: null, retornoPendente: false, terminal: false }
+    );
+    // [CONTROLADOR §13] Fato competitivo: uma entrada por substituição aberta.
+    // Nasce vazio a cada partida (a revanche passa por aqui).
+    sala.substituicoes = [];
     if (autoBots) avancarBots(sala); // se a vez começar num bot, ele já joga
     liquidar(sala); // caso raro: partida que já encerra de cara (meta minúscula em teste)
     return { ok: true, codigo };
@@ -4325,9 +4409,21 @@ function criarGerenciador(opts = {}) {
         continue;
       }
       const vez = jogo.assentos[jogo.vez];
-      if (!vez || vez.tipo !== "bot") break; // vez de humano: para e espera
-      const r = jogarTurnoBot(jogo, jogo.vez);
-      sala.log.push({ rodada: jogo.rodada, assento: jogo.vez, apelido: vez.apelido, acoes: r.log });
+      if (!vez) break;
+      // [CONTROLADOR §6] FRONTEIRA SEGURA. O retorno de um humano que estava
+      // sob substituição vale AQUI: antes de o bot começar o próximo turno
+      // daquele assento, e nunca no meio de um. Turno já iniciado
+      // (`jaComprou`) não é fronteira — espera o próximo.
+      const ctrlVez = controleDe(sala, jogo.vez);
+      if (ctrlVez && ctrlVez.retornoPendente && !jogo.jaComprou) {
+        aplicarRetorno(sala, jogo.vez);
+        break; // agora é vez de humano: para e espera
+      }
+      // [CONTROLADOR] Quem decide não é mais `tipo`, é `controle`. Assento
+      // `humano_ausente` cai aqui e PARA o laço: durante a graça a mesa espera,
+      // e nenhum bot age por ele (§5.5).
+      if (!assentoEhDeBot(sala, jogo.vez)) break;
+      const r = proporAcaoDoAssento({ codigo: sala.codigo, assento: jogo.vez });
       if (!r.ok && !jogo.rodadaEncerrada) break; // erro inesperado: evita loop
     }
     liquidar(sala); // partida pode ter encerrado numa batida de bot
@@ -4342,7 +4438,8 @@ function criarGerenciador(opts = {}) {
     if (j.encerrada) return false;
     if (j.rodadaEncerrada) return true; // precisa transicionar de rodada
     const v = j.assentos[j.vez];
-    return !!(v && v.tipo === "bot");
+    // [CONTROLADOR] Autoridade é o controlador, não o `tipo` do assento.
+    return !!(v && assentoEhDeBot(sala, j.vez));
   }
 
   /** Executa UM passo do servidor: joga o turno de UM bot, OU transiciona a
@@ -4355,9 +4452,17 @@ function criarGerenciador(opts = {}) {
     if (j.encerrada) { liquidar(sala); return { jogou: false }; }
     if (j.rodadaEncerrada) { J.distribuirRodada(j); return { jogou: false, transicao: true }; }
     const v = j.assentos[j.vez];
-    if (!v || v.tipo !== "bot") return { jogou: false };
+    if (!v) return { jogou: false };
+    // [CONTROLADOR §6] Mesma fronteira segura do laço síncrono: um passo da
+    // cadência com respiro também devolve o assento antes de jogar por ele.
+    const ctrlVez = controleDe(sala, j.vez);
+    if (ctrlVez && ctrlVez.retornoPendente && !j.jaComprou) {
+      aplicarRetorno(sala, j.vez);
+      return { jogou: false, retornoAplicado: true, assento: j.vez };
+    }
+    if (!assentoEhDeBot(sala, j.vez)) return { jogou: false };
     const assento = j.vez;
-    const r = jogarTurnoBot(j, assento);
+    const r = proporAcaoDoAssento({ codigo, assento });
     sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: r.log });
     liquidar(sala); // batida de bot pode ter encerrado a partida
     return { jogou: true, assento, resultado: r };
@@ -4488,8 +4593,241 @@ function criarGerenciador(opts = {}) {
     return v;
   }
 
-  /** Um jogador saiu da sala. No lobby, libera o assento; em jogo, vira bot
-   *  (pra mesa não travar) — decisão simples pro M2. */
+  // =========================================================================
+  // [CONTROLADOR] LEITURA
+  // =========================================================================
+  function controleDe(sala, assento) {
+    if (!sala || !Array.isArray(sala.controle)) return null;
+    return sala.controle[assento] || null;
+  }
+
+  /** O assento pode ser jogado por bot AGORA? É a pergunta que o laço faz. */
+  function assentoEhDeBot(sala, assento) {
+    const c = controleDe(sala, assento);
+    return !!(c && CONTROLES_DE_BOT.has(c.estado));
+  }
+
+  /** O proprietário do assento (posse), ou null se o assento nasceu bot. */
+  function donoDoAssento(sala, assento) {
+    const a = sala && sala.assentos && sala.assentos[assento];
+    if (!a || a.tipo !== "humano" || typeof a.jogadorId !== "string" || !a.jogadorId) return null;
+    return a.jogadorId;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR §13] FATO COMPETITIVO
+  //
+  // O servidor NÃO calcula rating (a autoridade do ranking vive fora dele).
+  // Ele produz o fato: houve substituição, em qual assento, por qual motivo,
+  // quando começou, se o bot chegou a AGIR e se o humano voltou. `botAgiu` é
+  // o campo que separa "caiu e voltou em 3 s" de "o bot jogou por você".
+  // =========================================================================
+  function registrarSubstituicao(sala, assento, motivo) {
+    if (!Array.isArray(sala.substituicoes)) sala.substituicoes = [];
+    const reg = {
+      assento,
+      uid: donoDoAssento(sala, assento),
+      motivo: motivo || null,
+      desdeIso: agoraIso(),
+      botAgiu: false,
+      humanoVoltou: false,
+      voltouEmIso: null,
+    };
+    sala.substituicoes.push(reg);
+    return reg;
+  }
+
+  /** A substituição ainda ABERTA deste assento (o humano não voltou). */
+  function substituicaoAberta(sala, assento) {
+    if (!Array.isArray(sala.substituicoes)) return null;
+    for (let i = sala.substituicoes.length - 1; i >= 0; i--) {
+      const s = sala.substituicoes[i];
+      if (s.assento === assento && !s.humanoVoltou) return s;
+    }
+    return null;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR §11] FRONTEIRA DE PROPOSTA
+  //
+  // ÚNICO ponto por onde uma ação de bot entra na partida. Ele responde à
+  // pergunta de autoridade — "este assento pode propor agora?" — antes de
+  // qualquer regra de Buraco ser tocada, e é o que impede humano e bot de
+  // terem autoridade ao mesmo tempo (§20).
+  //
+  // RESIDUAL DECLARADO PARA A OS 10: o decisor JS ainda APLICA a jogada dentro
+  // de `jogarTurnoBot`, em vez de devolver uma intenção para esta função
+  // validar e aplicar. Separar decisão de aplicação é a OS 10; migrar isso
+  // aqui significaria reescrever o bot JS, que a §12 proíbe. O que esta OS
+  // entrega é o SOQUETE: o gate de autoridade, o registro do fato e o ponto
+  // único de entrada — trocar o decisor depois é trocar a linha marcada.
+  // =========================================================================
+  function proporAcaoDoAssento({ codigo, assento } = {}) {
+    const sala = salas[codigo];
+    if (!sala || !sala.jogo) return { ok: false, erro: "mesa sem partida", log: [] };
+    const jogo = sala.jogo;
+    if (jogo.encerrada) return { ok: false, erro: "a partida já terminou", log: [] };
+    if (jogo.vez !== assento) return { ok: false, erro: "não é a vez deste assento", log: [] };
+    // GATE DE AUTORIDADE. Assento humano — ativo OU ausente em graça — não
+    // aceita proposta de bot. É aqui que a dupla autoridade morre.
+    if (!assentoEhDeBot(sala, assento)) {
+      return { ok: false, erro: "assento não está sob controle de bot", log: [] };
+    }
+    const alvo = jogo.assentos[assento];
+    const r = jogarTurnoBot(jogo, assento); // <-- decisor (OS 10 troca ESTA linha)
+    sala.log.push({ rodada: jogo.rodada, assento, apelido: alvo && alvo.apelido, acoes: r.log });
+    if (r.ok) {
+      // [§13] O bot AGIU por este assento. É o fato que muda o efeito competitivo.
+      const sub = substituicaoAberta(sala, assento);
+      if (sub) sub.botAgiu = true;
+    }
+    return r;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR] TRANSIÇÕES
+  // =========================================================================
+
+  /** O bot assume o assento. Não toca posse, nem nada de `jogo` além do
+   *  `tipo` derivado — a fase do turno atravessa intacta (§10). */
+  function assumirPorBot(sala, assento, motivo) {
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (CONTROLES_DE_BOT.has(ctrl.estado)) return { ok: true, jaEraBot: true };
+    ctrl.estado = CONTROLE.BOT_SUBSTITUTO;
+    ctrl.motivo = motivo || null;
+    ctrl.desde = agora();
+    ctrl.retornoPendente = false;
+    // Saída voluntária é TERMINAL para aquele jogador naquela partida (§7).
+    if (motivo === MOTIVO_CONTROLE.SAIDA) ctrl.terminal = true;
+    const j = sala.jogo;
+    if (j && j.assentos[assento]) {
+      j.assentos[assento].tipo = "bot";
+      if (!j.assentos[assento].apelido) j.assentos[assento].apelido = NOMES_BOT[assento % NOMES_BOT.length];
+    }
+    registrarSubstituicao(sala, assento, motivo);
+    avancarBots(sala); // se era a vez dele, o bot assume — do ponto em que estava
+    return { ok: true, assumido: true };
+  }
+
+  /** Ausência (§5). Queda ganha graça; declaração (AFK, saída) não ganha:
+   *  não há incerteza de rede a proteger quando o próprio jogador avisa. */
+  function ausentar({ codigo, assento, motivo } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!Number.isInteger(assento)) return { erro: "assento inválido" };
+    if (!sala.iniciada) {
+      // No lobby não há partida a segurar: o assento é liberado, como sempre foi.
+      if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
+      return { ok: true, lobby: true };
+    }
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (CONTROLES_DE_BOT.has(ctrl.estado)) return { ok: true, jaEraBot: true };
+    if (motivo === MOTIVO_CONTROLE.QUEDA) {
+      // §5: NÃO vira bot agora. Marca ausente, reserva o assento e conta o tempo.
+      ctrl.estado = CONTROLE.HUMANO_AUSENTE;
+      ctrl.motivo = motivo;
+      ctrl.desde = agora();
+      ctrl.retornoPendente = false;
+      return { ok: true, ausente: true, expiraEm: ctrl.desde + gracaAusenciaMs };
+    }
+    return assumirPorBot(sala, assento, motivo || MOTIVO_CONTROLE.AFK);
+  }
+
+  /** [§5.6 / §17] Expiração da graça, avaliada por RELÓGIO INJETADO e de forma
+   *  PREGUIÇOSA: quem chama é o despachante, a cada mensagem, e o agendamento
+   *  do servidor real — que só existe para a mesa silenciosa não ficar parada.
+   *  Os dois caminhos chamam ESTA função, então não há duas verdades sobre o
+   *  instante do takeover.
+   *
+   *  A comparação é `>=`: em T-1 o assento continua ausente; em T o bot assume.
+   *  Exatamente T é takeover, e isso é escolha declarada, não acaso de ponto
+   *  flutuante. */
+  function verificarAusencias(codigo) {
+    const sala = salas[codigo];
+    if (!sala || !sala.iniciada || !Array.isArray(sala.controle)) return 0;
+    const t = agora();
+    let assumidos = 0;
+    for (let i = 0; i < sala.controle.length; i++) {
+      const c = sala.controle[i];
+      if (!c || c.estado !== CONTROLE.HUMANO_AUSENTE) continue;
+      if (!Number.isFinite(c.desde)) continue;
+      if (t - c.desde < gracaAusenciaMs) continue;
+      assumirPorBot(sala, i, c.motivo || MOTIVO_CONTROLE.QUEDA);
+      assumidos++;
+    }
+    return assumidos;
+  }
+
+  /** Devolve o controle ao humano. Só é chamada em FRONTEIRA SEGURA. */
+  function aplicarRetorno(sala, assento) {
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return;
+    ctrl.estado = CONTROLE.HUMANO_ATIVO;
+    ctrl.motivo = null;
+    ctrl.desde = null;
+    ctrl.retornoPendente = false;
+    if (sala.jogo && sala.jogo.assentos[assento]) sala.jogo.assentos[assento].tipo = "humano";
+    const sub = substituicaoAberta(sala, assento);
+    if (sub) { sub.humanoVoltou = true; sub.voltouEmIso = agoraIso(); }
+  }
+
+  /** Retorno do proprietário (§6). Nunca interrompe ação pela metade. */
+  function retornar({ codigo, assento, jogadorId } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!Number.isInteger(assento)) return { erro: "assento inválido" };
+    const dono = donoDoAssento(sala, assento);
+    if (!dono) return { erro: "assento sem proprietário humano" };
+    // Um UID diferente NUNCA retoma assento alheio, nem que o assento esteja
+    // sob bot. `jogadorId` null seria "sem identidade", e também não passa.
+    if (dono !== jogadorId) return { erro: "assento de outro proprietário" };
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (ctrl.terminal) return { erro: "você saiu desta partida" };
+    if (ctrl.estado === CONTROLE.HUMANO_ATIVO) return { ok: true, jaAtivo: true, botAgiu: false };
+    if (ctrl.estado === CONTROLE.HUMANO_AUSENTE) {
+      // Voltou dentro da graça: nenhum bot chegou a agir por este assento.
+      ctrl.estado = CONTROLE.HUMANO_ATIVO;
+      ctrl.motivo = null;
+      ctrl.desde = null;
+      return { ok: true, retomou: true, botAgiu: false };
+    }
+    // Sob substituição: a troca espera a fronteira do turno.
+    const j = sala.jogo;
+    const sub = substituicaoAberta(sala, assento);
+    const botAgiu = !!(sub && sub.botAgiu);
+    if (j && j.vez === assento && j.jaComprou === true) {
+      // Turno DESTE assento já começou: devolver agora partiria a jogada.
+      ctrl.retornoPendente = true;
+      return { ok: true, pendente: true, botAgiu };
+    }
+    aplicarRetorno(sala, assento);
+    return { ok: true, retomou: true, botAgiu };
+  }
+
+  /** [§9] Reconexão do PROPRIETÁRIO a uma partida já iniciada. Não é entrada
+   *  nova: não escolhe assento, não cria jogador, não aceita apelido como
+   *  identidade. O casamento é UID autenticado × posse preservada. */
+  function reconectar({ codigo, jogadorId } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!sala.iniciada) return { erro: "a partida não começou" };
+    if (typeof jogadorId !== "string" || !jogadorId) {
+      return { erro: "reconexão exige identidade autenticada" };
+    }
+    let alvo = -1;
+    for (let i = 0; i < sala.assentos.length; i++) {
+      if (donoDoAssento(sala, i) === jogadorId) { alvo = i; break; }
+    }
+    if (alvo === -1) return { erro: "a partida já começou" };
+    const r = retornar({ codigo, assento: alvo, jogadorId });
+    if (r.erro) return r;
+    return { codigo, assento: alvo, reconexao: true, pendente: !!r.pendente, botAgiu: !!r.botAgiu };
+  }
+
+  /** Saída VOLUNTÁRIA (§7). Sem graça e sem volta nesta partida. */
   function sair({ codigo, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
@@ -4497,15 +4835,21 @@ function criarGerenciador(opts = {}) {
       if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
       return { ok: true };
     }
-    if (sala.jogo && sala.jogo.assentos[assento]) {
-      sala.jogo.assentos[assento].tipo = "bot";
-      if (!sala.jogo.assentos[assento].apelido) sala.jogo.assentos[assento].apelido = NOMES_BOT[assento % NOMES_BOT.length];
-      avancarBots(sala); // se era a vez dele, o bot assume
-    }
-    return { ok: true };
+    const r = assumirPorBot(sala, assento, MOTIVO_CONTROLE.SAIDA);
+    // Mesmo se o assento já era bot, a saída é terminal para o dono.
+    const ctrl = controleDe(sala, assento);
+    if (ctrl) ctrl.terminal = true;
+    return r.erro ? r : { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox };
+  return {
+    salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots,
+    vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair,
+    liquidar, outbox,
+    // [CONTROLADOR] superfície da OS 7
+    ausentar, retornar, reconectar, verificarAusencias, proporAcaoDoAssento,
+    controleDe, assentoEhDeBot, donoDoAssento, gracaAusenciaMs,
+  };
 }
 
 module.exports = {
@@ -4518,6 +4862,10 @@ module.exports = {
   // [VERSAO] Expostos para a suíte afirmar idempotência e detecção de mudança
   // direto na primitiva, sem ter que montar servidor e conexão para cada caso.
   carimbarEstado, impressaoDoEstado, CAMPOS_FORA_DA_IMPRESSAO,
+  // [CONTROLADOR] Vocabulário exposto para a suíte afirmar o contrato sem
+  // reescrever as strings — teste que redigita "bot_substituto" não detecta
+  // renomeação, só a repete.
+  CONTROLE, MOTIVO_CONTROLE, GRACA_AUSENCIA_PADRAO_MS,
 };
 
   };
@@ -5472,7 +5820,7 @@ module.exports = {
 // propriedades NÃO-GRAVÁVEIS: nenhum comando posterior troca a identidade da
 // conexão, e nenhum `msg.jogadorId` é lido em lugar nenhum deste arquivo.
 
-const { criarGerenciador } = require("./salas");
+const { criarGerenciador, MOTIVO_CONTROLE, CONTROLE } = require("./salas");
 
 // ===========================================================================
 // [CHAT] PRODUTOR DO CANAL — o contexto estável que a autoridade consome.
@@ -6136,6 +6484,35 @@ function criarServidor(opts = {}) {
     return { tipo: "estado", visao, versaoEstado: meta.versaoEstado, eventoId: meta.eventoId };
   }
 
+  /** [CONTROLADOR §6/§15.10] UMA autoridade por assento.
+   *
+   *  Quem acabou de assumir o assento é o dono da vez; qualquer outra conexão
+   *  que ainda o segure é rebaixada a espectador NA HORA. Rebaixar em vez de
+   *  desconectar é deliberado: o socket velho pode ser um aparelho que ainda
+   *  está com a tela aberta, e ele continua podendo ASSISTIR — só não age.
+   *
+   *  A varredura é por (codigo, assento), não por identidade: o que não pode
+   *  existir são duas conexões emitindo intenção pelo MESMO assento, venham
+   *  elas do mesmo UID ou não. */
+  function desalojarOutrasConexoes(dono) {
+    if (!dono || dono.codigo == null || !Number.isInteger(dono.assento)) return 0;
+    let desalojadas = 0;
+    for (const cid in conexoes) {
+      const o = conexoes[cid];
+      if (!o || o === dono) continue;
+      if (o.codigo !== dono.codigo) continue;
+      if (o.assento !== dono.assento) continue;
+      o.assento = null; // continua na sala, mas como quem assiste
+      desalojadas++;
+      enviarPara(cid, {
+        tipo: "erro",
+        codigo: "ASSENTO_ASSUMIDO",
+        motivo: "este assento foi assumido por outra conexão",
+      });
+    }
+    return desalojadas;
+  }
+
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
@@ -6143,9 +6520,22 @@ function criarServidor(opts = {}) {
     if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} c._cancelarExpiracao = null; }
     if (c.codigo != null && c.assento != null) {
       const cod = c.codigo;
-      ger.sair({ codigo: cod, assento: c.assento });
+      const assento = c.assento;
+      // [CONTROLADOR §5] Socket fechado NÃO é desistência. O assento fica
+      // RESERVADO e o proprietário tem a graça para voltar. Só a expiração —
+      // avaliada por `verificarAusencias`, com o relógio do servidor — entrega
+      // o assento ao bot.
+      ger.ausentar({ codigo: cod, assento, motivo: MOTIVO_CONTROLE.QUEDA });
       c.codigo = null; c.assento = null;
       broadcastSala(cod);
+      // A mesa pode ficar em silêncio durante a graça inteira (ninguém fala
+      // porque é a vez do ausente). Este despertar existe só para que o
+      // silêncio não seja eterno — e ele chama a MESMA função preguiçosa, não
+      // uma segunda regra de expiração.
+      agendarEm(ger.gracaAusenciaMs + 1, () => {
+        if (!ger.salas[cod]) return;
+        if (ger.verificarAusencias(cod) > 0) avancarComRespiro(cod);
+      });
     }
     delete conexoes[id];
   }
@@ -6186,6 +6576,10 @@ function criarServidor(opts = {}) {
       }
       return enviarPara(id, { tipo: "erro", motivo: "conexão não autenticada", codigo: "NAO_AUTENTICADO" });
     }
+    // [CONTROLADOR §5.6] Toda mensagem é uma oportunidade de perceber que uma
+    // graça venceu. Fica DEPOIS da fronteira de autenticação e ANTES do
+    // despacho: mensagem de conexão não autenticada não move o controlador.
+    if (c.codigo != null) ger.verificarAusencias(c.codigo);
     // [PATCH WS-AUTH] identidade declarada no comando ≠ identidade da conexão
     const divergente = identidadeDivergente(c, msg);
     if (divergente) {
@@ -6219,7 +6613,15 @@ function criarServidor(opts = {}) {
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
         if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
+        // [CONTROLADOR §15.10] Entrada OU reconexão: em qualquer dos dois a
+        // conexão que assume o assento é a única que pode agir por ele.
+        desalojarOutrasConexoes(c);
+        enviarPara(id, {
+          tipo: "entrou",
+          codigo: c.codigo,
+          assento: r.assento,
+          reconexao: !!r.reconexao,
+        });
         return broadcastSala(c.codigo);
       }
       case "assistirMesa": {
@@ -6310,26 +6712,28 @@ function criarServidor(opts = {}) {
         return avancarComRespiro(c.codigo);
       }
       case "afkBot": {
-        // AFK: o jogador estourou o tempo 2x — o assento dele vira BOT e o servidor
-        // assume (joga por ele até ele voltar). É o que segura a mesa pública quando
-        // alguém dorme com o celular (pedido Sônia). Só marca o tipo e destrava o ritmo.
+        // [CONTROLADOR §8] AFK deixou de ser ORDEM do cliente e virou AVISO.
+        // O cliente diz "estou ausente"; quem decide o que isso significa —
+        // qual assento, qual identidade, qual instante — é o servidor, e ele
+        // decide a partir da conexão autenticada, nunca do payload.
+        //
+        // AFK é DECLARAÇÃO, não queda: o jogador está no aparelho e avisou.
+        // Por isso não ganha a graça de 15 s, que existe para a incerteza de
+        // rede (§5). O assento passa ao bot na hora, e o dono pode voltar.
         if (c.codigo == null) return;
         if (!ehParticipante(c)) return recusarEspectador(id);
-        const salaB = ger.salas[c.codigo];
-        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento]) {
-          salaB.jogo.assentos[c.assento].tipo = "bot";
-        }
-        return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
+        ger.ausentar({ codigo: c.codigo, assento: c.assento, motivo: MOTIVO_CONTROLE.AFK });
+        return avancarComRespiro(c.codigo);
       }
       case "afkVoltar": {
-        // o jogador voltou: o assento volta a ser HUMANO. O servidor para na vez dele
-        // (vezEhBot=false) e espera — ele reassume no próximo turno dele.
+        // [CONTROLADOR §6/§8] Também aviso, não ordem. O servidor confere a
+        // POSSE (UID autenticado × proprietário do assento) e só devolve o
+        // controle em fronteira segura — se o bot está no meio de um turno, o
+        // retorno fica pendente e vale no próximo.
         if (c.codigo == null) return;
         if (!ehParticipante(c)) return recusarEspectador(id);
-        const salaV = ger.salas[c.codigo];
-        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento]) {
-          salaV.jogo.assentos[c.assento].tipo = "humano";
-        }
+        const rv = ger.retornar({ codigo: c.codigo, assento: c.assento, jogadorId: c.jogadorId });
+        if (rv && rv.erro) return enviarPara(id, { tipo: "erro", motivo: rv.erro });
         return broadcastSala(c.codigo);
       }
       case "sair": {
@@ -6353,6 +6757,10 @@ function criarServidor(opts = {}) {
    *  bot (ou transição de rodada), agenda o próximo passo. Com `agendar` imediato
    *  vira um laço síncrono (testes); com setTimeout, os bots jogam um a um na tela. */
   function avancarComRespiro(codigo) {
+    // [CONTROLADOR §5.6] Antes de qualquer coisa: a graça de quem caiu pode ter
+    // vencido enquanto a mesa fazia outra coisa. Preguiçoso de propósito — o
+    // instante do takeover é o relógio, não a chegada de um timer.
+    ger.verificarAusencias(codigo);
     broadcastSala(codigo);
     emitirFimSeAcabou(codigo);
     if (ger.vezEhBot(codigo)) {
