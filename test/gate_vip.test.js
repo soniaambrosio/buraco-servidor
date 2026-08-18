@@ -746,14 +746,49 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
     }
   });
 
-  test("MESA-12: a categoria do processo vem do ambiente, não de mensagem", () => {
-    // §4: origem confiável. O bootstrap lê CATEGORIA_COMPETITIVA do ambiente —
-    // do mesmo lugar de PORT e FIREBASE_PROJECT_ID — e não injeta adaptador.
+  test("MESA-12: a configuração do processo vem do ambiente, não de mensagem", () => {
+    // [COMPOSIÇÃO gate-vip + credencial] ESTE TESTE MUDOU DE AFIRMAÇÃO.
+    //
+    // Ele nascia afirmando que produção NÃO injeta adaptador — verdade enquanto
+    // o autorizador não existia, e a forma de dizer "a entrada VIP falha
+    // fechada porque não há a quem perguntar". A composição criou o adaptador,
+    // então aquela linha virou falsa por decisão, e não por descuido.
+    //
+    // O INVARIANTE PROTEGIDO É O MESMO: a autoridade da admissão vem da
+    // CONFIGURAÇÃO DO PROCESSO, e a ausência de configuração recusa. O que
+    // mudou é onde o fail-closed mora — antes na ausência do adaptador, agora
+    // na ausência de endereço para ele falar (MESA-13).
     const iWs = CODIGO.indexOf('__fabricas["ws_server"]');
     const transporte = CODIGO.slice(iWs);
     assert.ok(/categoriaCompetitiva:\s*process\.env\.CATEGORIA_COMPETITIVA/.test(transporte),
       "a categoria do processo sai do ambiente");
-    assert.ok(!/autorizarEntradaVip/.test(transporte),
-      "produção NÃO injeta adaptador de autorização: entrada VIP falha fechada");
+    assert.ok(/url:\s*process\.env\[VARIAVEL_URL_ADMISSAO\]/.test(transporte),
+      "o endereço do autorizador sai do ambiente, nunca de mensagem");
+    assert.ok(/\bautorizarEntradaVip,/.test(transporte),
+      "e a porta é injetada no gate a partir dali");
+    // Nenhum endereço de produção embutido, e nenhum segredo versionado.
+    assert.ok(!/https?:\/\/(?!localhost|127\.0\.0\.1)[a-z0-9.-]+\.[a-z]{2,}/i.test(transporte),
+      "nenhuma URL de produção embutida no transporte");
+  });
+
+  test("MESA-13: sem endereço configurado não existe adaptador — e a entrada VIP recusa", async () => {
+    // O fail-closed de produção, medido na primitiva que o bootstrap usa: sem
+    // URL utilizável não nasce adaptador, e sem adaptador o gate já sabe
+    // recusar. É por isto que o bootstrap pode injetar `null` sem nenhum `if`.
+    const { criarAdaptadorAdmissaoVip } = bundle.require("admissao_vip");
+    const credencialFalsa = { obterIdToken: () => Promise.resolve("tok") };
+    for (const url of [undefined, null, "", "   ", "nao-e-url", "ftp://x/y", "http://api.exemplo.com/a"]) {
+      assert.equal(criarAdaptadorAdmissaoVip({ url, credencial: credencialFalsa }), null,
+        "endereço inutilizável não vira adaptador: " + JSON.stringify(url));
+    }
+    // E sem credencial também não nasce adaptador, pela mesma razão.
+    assert.equal(criarAdaptadorAdmissaoVip({ url: "https://ok.exemplo.com/a", credencial: null }), null);
+
+    // Fim a fim: processo com mesas VIP e sem autorizador recusa a criação.
+    const srv = novoServidor({ categoriaCompetitiva: "vip_ranqueada" });
+    const c = await cliente(srv, "uid-1");
+    c.envia({ tipo: "criarMesa", apelido: "A" });
+    assert.equal(c.ultimo("erro").codigo, RECUSA_VIP_INDISPONIVEL);
+    assert.equal(Object.keys(srv.ger.salas).length, 0);
   });
 });

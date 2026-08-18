@@ -111,6 +111,38 @@
 // Testes: `test/credencial_motor.test.js`. Sem merge e sem deploy.
 // Ver docs/CREDENCIAL-RENOVAVEL-MOTOR-V1.md.
 // ===================================================================================
+// EXCEÇÃO DOCUMENTADA — COMPOSIÇÃO DO GATE VIP COM A CREDENCIAL, E O ADAPTADOR
+// DE ADMISSÃO (branch integracao/gate-vip-credencial-backend-v1)
+// Mesmo motivo das anteriores: a fonte `cliente/` continua ausente. Esta entrada
+// COMPÕE as duas folhas acima e liga o que faltava entre elas. Um módulo NOVO,
+// marcado com `// [BACKEND]`:
+//   • módulo NOVO `admissao_vip` — a porta ÚNICA pela qual o servidor pergunta a
+//     um backend se um UID autenticado pode ocupar um assento VIP/Ranqueado.
+//     Contrato versionado `admissao-vip-v1`, credencial no cabeçalho, teto de
+//     tempo, teto de corpo, leitura fechada da resposta e coalescência por
+//     `tentativaEntradaId`. `https`/`http` do Node e mais nada: NENHUMA
+//     dependência foi acrescentada;
+//   • módulo `salas`: a admissão passou a ter DOIS regimes. Mesa casual decide
+//     agora, no mesmo caminho síncrono de sempre; mesa VIP decide quando o
+//     backend responder. `concluirAdmissao` é o ponto único que converte
+//     decisão em efeito nos dois, e `desfazerAdmissao` fecha a janela em que
+//     um jogador cai enquanto o backend pensa;
+//   • módulo `servidor`: `concluirPortaDeMesa` conclui as duas portas de mesa
+//     nos dois regimes, e confere que a conexão ainda é a mesma antes de
+//     aplicar a entrada;
+//   • módulo `ws_server`: a credencial canônica é construída UMA vez e o
+//     adaptador nasce dela, com o endereço vindo de URL_AUTORIZACAO_ENTRADA_VIP.
+// FALHA FECHADA em toda aresta: sem URL, sem credencial, credencial revogada,
+// timeout, 429, 5xx, JSON quebrado, contrato de outra versão, `ok` que não é
+// exatamente `true` ou `admissaoId` vazio — tudo recusa ANTES da ocupação. Não
+// existe retry no adaptador: a recuperação é a da credencial canônica e só dela.
+// Casual não busca credencial e não chama backend; espectador e bots não passam
+// por este transporte. Nada é concedido ou consumido: assinatura, passe
+// quinzenal e Firestore continuam fora deste servidor, e o endpoint real NÃO foi
+// provisionado. O contrato de encerramento segue em versaoContrato 1, intocado.
+// Testes: `test/admissao_vip.test.js`. Sem merge e sem deploy.
+// Ver docs/ADMISSAO-VIP-BACKEND-V1.md.
+// ===================================================================================
 (function () {
   var __cache = {};
   var __fabricas = {};
@@ -3938,6 +3970,53 @@ const ADMISSAO_RECONEXAO = "reconexao_ao_proprio_assento";
  *  comeca com ele, e ha teste que afirma isso nos dois sentidos. */
 const PREFIXO_TENTATIVA = "te_";
 
+/** [BACKEND] Um valor que se comporta como promessa.
+ *
+ *  Existe porque a admissao passou a ter DOIS regimes: mesa casual decide
+ *  agora, sem sair do processo; mesa VIP decide depois, quando um backend
+ *  responder. Distinguir os dois por `then` - e nao por uma flag - e o que
+ *  permite que o caminho casual continue percorrendo exatamente as mesmas
+ *  linhas de antes, sem um unico microtask a mais. */
+function ehPromessa(x) {
+  return !!x && (typeof x === "object" || typeof x === "function") && typeof x.then === "function";
+}
+
+/** [BACKEND] Recusa de admissao, no formato que as portas de mesa devolvem. */
+function recusaDaAdmissao(d) {
+  return { erro: d.erro, codigoRecusa: d.codigoRecusa };
+}
+
+/** [BACKEND] PONTO UNICO em que uma decisao de admissao vira EFEITO.
+ *
+ *  Toda ocupacao de assento passa por aqui, nos dois regimes. `escrever` e o
+ *  fecho que sabe gravar o assento daquela porta, e ele SO e chamado com uma
+ *  decisao aprovada - nao existe caminho em que a escrita aconteca antes de o
+ *  veredito existir, e nao existe caminho em que ela aconteca sem veredito.
+ *
+ *  A assimetria e proposital: mesa casual devolve VALOR e mesa VIP devolve
+ *  PROMESSA. Nao e "as vezes assincrono conforme o dado" - e por processo: um
+ *  servidor roda mesas de uma categoria so, fixada na construcao, entao para
+ *  quem chama a porta o regime e constante. Uniformizar tudo em promessa
+ *  custaria um microtask em cada entrada de mesa casual, que e o caminho de
+ *  todo mundo hoje, e quebraria o encadeamento sincrono de quem ja chama. */
+function concluirAdmissao(admissao, escrever) {
+  if (ehPromessa(admissao)) {
+    return admissao.then((d) => (d.ok ? escrever(d) : recusaDaAdmissao(d)));
+  }
+  return admissao.ok ? escrever(admissao) : recusaDaAdmissao(admissao);
+}
+
+/** [BACKEND] Registro de falha do adaptador. SO o codigo, nunca a mensagem.
+ *
+ *  `e.message` de um erro de socket do Node carrega a URL inteira do pedido, e
+ *  a URL pode carregar chave em query. O codigo ja vem redigido da origem e e
+ *  o que o operador precisa. */
+function registrarFalhaDeAdmissao(codigoDaSala, classificacao, e) {
+  const motivo = e && e.codigo ? e.codigo : "ERRO";
+  console.error("[gate-vip] adaptador de admissao falhou · mesa=" + codigoDaSala +
+    " classificacao=" + classificacao + " motivo=" + motivo);
+}
+
 /** Resolve a categoria a partir da CONFIGURACAO. Tres respostas, e so tres:
  *  ausente vira o padrao, valor da enumeracao vira ele mesmo, e qualquer outra
  *  coisa vira `desconhecida` - que nao admite ninguem. */
@@ -4070,6 +4149,21 @@ function avaliarAdmissaoAoAssento({
     : null;
   if (!autorizar) return recusa(RECUSA_VIP_INDISPONIVEL);
 
+  // [BACKEND] A leitura da resposta do adaptador, em UM lugar so - os dois
+  // regimes (agora e depois) caem aqui, para que a regra de aprovacao nao
+  // exista duas vezes e nao divirja no primeiro ajuste.
+  //
+  // O `admissaoId` e CARREGADO, nao exigido. Quem o exige e o adaptador, que e
+  // onde o contrato de transporte mora: o gate e politica, e nao deve saber
+  // que admissoes tem identidade emitida por um backend. Uma porta injetada
+  // que aprove sem id continua aprovando, e o assento fica sem prova - o que e
+  // problema de quem injetou, e nao um buraco desta funcao.
+  const julgar = (r) => {
+    if (!r || r.ok !== true) return recusa(RECUSA_VIP_INDISPONIVEL);
+    const admissaoId = r.admissaoId == null || r.admissaoId === "" ? null : String(r.admissaoId);
+    return decisao({ ok: true, codigoRecusa: null, erro: null, admissaoId });
+  };
+
   let resposta = null;
   try {
     resposta = autorizar({
@@ -4082,12 +4176,19 @@ function avaliarAdmissaoAoAssento({
       classificacao,
     });
   } catch (e) {
-    console.error("[gate-vip] adaptador de admissao falhou · mesa=" + codigoDaSala +
-      " classificacao=" + classificacao + " erro=" + (e && e.message));
+    registrarFalhaDeAdmissao(codigoDaSala, classificacao, e);
     return recusa(RECUSA_VIP_INDISPONIVEL);
   }
-  if (!resposta || resposta.ok !== true) return recusa(RECUSA_VIP_INDISPONIVEL);
-  return decisao({ ok: true, codigoRecusa: null, erro: null });
+  // Adaptador de rede responde DEPOIS. Uma promessa rejeitada - transporte
+  // caido, timeout, backend fora do ar - e recusa, nunca aprovacao: falha
+  // externa nao pode virar entrada liberada.
+  if (ehPromessa(resposta)) {
+    return resposta.then(julgar, (e) => {
+      registrarFalhaDeAdmissao(codigoDaSala, classificacao, e);
+      return recusa(RECUSA_VIP_INDISPONIVEL);
+    });
+  }
+  return julgar(resposta);
 }
 
 // ===========================================================================
@@ -4397,16 +4498,20 @@ function criarGerenciador(opts = {}) {
     // [GATE VIP] Criar mesa E ocupar o assento 0. O gate roda ANTES de a sala
     // existir: recusado, nao ha sala nova, nao ha assento ocupado e nao ha
     // codigo em uso - sortear um codigo nao registra nada em `salas`.
-    const admissao = admitirNoAssento({
+    return concluirAdmissao(admitirNoAssento({
       codigoDaSala: codigo, categoria: categoriaCompetitiva,
       identidadeDaPartida: null, assento: 0, jogadorId, uidAutenticado,
-    });
-    if (!admissao.ok) return { erro: admissao.erro, codigoRecusa: admissao.codigoRecusa };
+    }), function escreverMesaNova(veredito) {
+    // [BACKEND] A prova da admissao fica NO ASSENTO, e so quando existe: mesa
+    // casual nao tem admissao para provar, e o assento dela continua com
+    // exatamente a mesma forma de sempre, campo por campo.
+    const assentoZero = { apelido, tipo: "humano", jogadorId };
+    if (veredito.admissaoId) assentoZero.admissaoId = veredito.admissaoId;
     salas[codigo] = {
       codigo, modalidade, metaPontos,
       aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
       criadorAssento: 0,
-      assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
+      assentos: [assentoZero, null, null, null],
       iniciada: false,
       jogo: null,
       liquidada: false,   // já contabilizou o resultado no cofre?
@@ -4446,6 +4551,7 @@ function criarGerenciador(opts = {}) {
       value: categoriaCompetitiva, writable: false, configurable: false, enumerable: true,
     });
     return { codigo, assento: 0 };
+    });
   }
 
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, uidAutenticado = null, assento } = {}) {
@@ -4469,13 +4575,42 @@ function criarGerenciador(opts = {}) {
     // alvo ja estar decidido - o gate precisa saber QUAL assento seria ocupado.
     // A categoria vem da SALA (congelada na criacao), nao do gerenciador: e a
     // mesa que se esta entrando que manda, e ela nao muda de natureza.
-    const admissao = admitirNoAssento({
+    return concluirAdmissao(admitirNoAssento({
       codigoDaSala: codigo, categoria: sala.categoriaCompetitiva,
       identidadeDaPartida: sala.partidaId, assento: alvo, jogadorId, uidAutenticado,
+    }), function escreverAssento(veredito) {
+      const ocupante = { apelido, tipo: "humano", jogadorId };
+      if (veredito.admissaoId) ocupante.admissaoId = veredito.admissaoId;
+      sala.assentos[alvo] = ocupante;
+      return { assento: alvo, codigo };
     });
-    if (!admissao.ok) return { erro: admissao.erro, codigoRecusa: admissao.codigoRecusa };
-    sala.assentos[alvo] = { apelido, tipo: "humano", jogadorId };
-    return { assento: alvo, codigo };
+  }
+
+  /** [BACKEND] Desfaz uma admissao que foi aprovada e nao pode mais ser usada.
+   *
+   *  Existe por causa de UMA janela que so passou a existir quando a admissao
+   *  virou assincrona: entre o pedido e a resposta do backend, a conexao do
+   *  jogador pode morrer. Sem isto, a aprovacao chegaria depois e sentaria
+   *  ninguem - um assento ocupado por uma conexao que nao existe mais, numa
+   *  mesa que nunca mais encheria.
+   *
+   *  Nao abre caminho de ocupacao nenhum: ele so LIBERA, e reaproveita `sair`
+   *  para os assentos comuns. O assento do criador e o unico caso especial,
+   *  porque `sair` o preserva de proposito (a mesa e dele); ali a sala inteira
+   *  vai embora, que e a verdade - uma mesa recem-criada cujo criador sumiu
+   *  antes de sentar nao tem ninguem dentro.
+   *
+   *  Mesa ja iniciada nao se desfaz: ali a partida existe, e sumir com um
+   *  assento no meio dela seria pior do que o assento ocioso. */
+  function desfazerAdmissao({ codigo, assento } = {}) {
+    const sala = salas[codigo];
+    if (!sala || sala.iniciada) return { ok: false };
+    if (assento === sala.criadorAssento) {
+      delete salas[codigo];
+      return { ok: true, salaRemovida: true };
+    }
+    sair({ codigo, assento });
+    return { ok: true, salaRemovida: false };
   }
 
   function iniciarPartida({ codigo, assento } = {}) {
@@ -4851,7 +4986,7 @@ function criarGerenciador(opts = {}) {
     // [GATE VIP] `categoriaConfigurada` e o que a CONFIGURACAO do processo
     // resolveu para as mesas novas; `categoriaDaSala` e o que cada mesa ja
     // criada carrega. Sao coisas diferentes e ficam com nomes diferentes.
-    categoriaConfigurada: categoriaCompetitiva, categoriaDaSala, admitirNoAssento };
+    categoriaConfigurada: categoriaCompetitiva, categoriaDaSala, admitirNoAssento, desfazerAdmissao };
 }
 
 module.exports = {
@@ -4873,6 +5008,9 @@ module.exports = {
   PREFIXO_TENTATIVA, ERRO_ADMISSAO,
   RECUSA_VIP_INDISPONIVEL, RECUSA_CATEGORIA_DESCONHECIDA,
   ADMISSAO_NOVA, ADMISSAO_RECONEXAO,
+  // [BACKEND] Expostos para a suite afirmar os dois regimes da admissao sem
+  // ter que montar servidor e rede para cada caso.
+  ehPromessa, concluirAdmissao,
 };
 
   };
@@ -5092,6 +5230,355 @@ module.exports = {
   partesDoToken,
   FALHA,
   URL_CERTIFICADOS,
+};
+
+  };
+
+  __fabricas["admissao_vip"] = function (module, exports, require) {
+// servidor/admissao_vip.js — ADAPTADOR UNICO DE AUTORIZACAO DE ENTRADA VIP
+//
+// [BACKEND] A porta - unica - pela qual o servidor pergunta a um backend se um
+// UID autenticado pode ocupar um assento numa mesa VIP/Ranqueada.
+//
+// O QUE ESTE MODULO NAO SABE, e nao pode aprender: o que e uma assinatura, o
+// que e um passe de cortesia, quanto custa entrar, quantos dias duram, quando
+// renova. Ele nao decide admissao - ele TRANSPORTA a pergunta e LE a resposta.
+// A regra comercial mora do outro lado do fio, e e por isso que trocar a regra
+// nao vai exigir tocar em nada daqui.
+//
+// E ele tambem nao ocupa assento. Ele devolve um veredito para o gate, e quem
+// escreve no assento e o gerenciador de salas, depois do veredito. As duas
+// coisas ficam separadas de proposito: um adaptador que soubesse sentar
+// jogador seria um segundo caminho de ocupacao, e o gate existe exatamente
+// para nao haver um segundo.
+//
+// DECISAO 1 - FAIL CLOSED EM TODA ARESTA. URL ausente, URL sem HTTPS, sem
+// credencial, timeout, 429, 5xx, JSON quebrado, contrato de outra versao,
+// `ok` que nao e exatamente `true`, `admissaoId` vazio: tudo recusa. Nao
+// existe caminho degradado e nao existe aprovacao local. O unico jeito de
+// entrar numa mesa VIP e um backend dizer que sim, por escrito e no contrato.
+//
+// DECISAO 2 - SEM RETRY AQUI. Uma tentativa produz no maximo UMA chamada. O
+// retry de credencial ja existe, e e da credencial: `obterIdToken()` renova
+// por margem e coalesce chamadas simultaneas. Repetir aqui criaria uma segunda
+// politica de repeticao sobre a mesma falha - duas politicas que divergem no
+// primeiro ajuste, e que juntas multiplicam a carga sobre um backend que ja
+// esta respondendo 5xx. Falha temporaria recusa a entrada; o jogador tenta de
+// novo, e essa e uma tentativa NOVA, com identidade nova.
+//
+// DECISAO 3 - NADA DE IDENTIDADE NO CORPO ALEM DO UID, E NUNCA O TOKEN. O
+// corpo carrega exatamente os oito campos do contrato. Apelido, avatar,
+// moldura, publicId e perfil NAO entram: o backend decide por identidade
+// autenticada, e tudo o mais seria dado pessoal viajando sem precisar. A
+// credencial vai no cabecalho `authorization`, nunca no corpo e nunca na URL -
+// corpo e URL aparecem em log de proxy, cabecalho de autorizacao e o que todo
+// mundo ja sabe redigir.
+//
+// DECISAO 4 - LOG SO DE CODIGO. O que se registra e um codigo de falha, seco.
+// Nunca o token, nunca o cabecalho, nunca o corpo da resposta, nunca a URL
+// completa (a query e onde chave costuma se esconder) e nunca a mensagem de
+// erro do socket, que em Node carrega a URL inteira dentro de `e.message`.
+//
+// DECISAO 5 - IDEMPOTENCIA PELO VOO. Chamadas SIMULTANEAS com a mesma
+// `tentativaEntradaId` compartilham UMA chamada de rede. Tentativas diferentes
+// nunca compartilham. O adaptador nao cunha identidade de tentativa e nao a
+// reescreve: ela vem do gate, inteira, e viaja igual em toda repeticao tecnica
+// daquele voo. Depois que o voo assenta, a entrada sai do mapa - uma tentativa
+// repetida DEPOIS e uma pergunta nova para o backend, que a deduplica pelo
+// mesmo `tentativaEntradaId` do lado dele. A divisao e essa: aqui se
+// deduplica concorrencia, la se deduplica repeticao.
+
+const https = require("https");
+const http = require("http");
+
+/** Versao do contrato de transporte. Vai no corpo e e exigida na resposta. */
+const CONTRATO = "admissao-vip-v1";
+
+/** Teto de espera. Mais curto que o da credencial de proposito: este pedido
+ *  esta no caminho de alguem que clicou para sentar, e um jogador desiste bem
+ *  antes de dez segundos. Estourar recusa - e recusar e barato, porque a
+ *  entrada nao consumiu nada. */
+const TIMEOUT_MS = 8000;
+
+/** Teto do corpo lido. Existe para que uma resposta enorme (ou um endpoint
+ *  trocado por outra coisa) nao vire memoria do processo. */
+const LIMITE_RESPOSTA_BYTES = 64 * 1024;
+
+/** Codigos de falha. Sao para LOG e TESTE. Nenhum deles carrega token, corpo,
+ *  URL ou identidade - e por isso que eles podem ser registrados. */
+const FALHA = {
+  SEM_URL: "SEM_URL",
+  URL_INVALIDA: "URL_INVALIDA",
+  SEM_HTTPS: "SEM_HTTPS",
+  SEM_CREDENCIAL: "SEM_CREDENCIAL",
+  CREDENCIAL_RECUSADA: "CREDENCIAL_RECUSADA",
+  TIMEOUT: "TIMEOUT",
+  CONEXAO: "CONEXAO",
+  RESPOSTA_GRANDE: "RESPOSTA_GRANDE",
+  RESPOSTA_INVALIDA: "RESPOSTA_INVALIDA",
+  CONTRATO_DESCONHECIDO: "CONTRATO_DESCONHECIDO",
+  SEM_ADMISSAO_ID: "SEM_ADMISSAO_ID",
+  HTTP_429: "HTTP_429",
+  HTTP_5XX: "HTTP_5XX",
+  HTTP: "HTTP",
+  NEGADA: "NEGADA",
+};
+
+/** Nome da variavel de ambiente do endereco. Nome, nunca valor. */
+const VARIAVEL_URL = "URL_AUTORIZACAO_ENTRADA_VIP";
+
+/** Le e valida o endereco do backend.
+ *
+ *  HTTPS e obrigatorio, com UMA excecao estreita: `localhost` e os enderecos de
+ *  loopback, para que uma bancada local possa subir um endpoint de mentira sem
+ *  certificado. A excecao e por HOST, e nao por variavel de ambiente ou flag -
+ *  uma flag de "aceitar http" e exatamente o tipo de coisa que alguem liga em
+ *  producao para destravar um deploy as duas da manha.
+ *
+ *  Credencial embutida na URL (`https://user:senha@host`) e RECUSADA. Ela
+ *  vazaria em todo log que registrasse o endereco, e nao existe motivo
+ *  legitimo para ela aqui: a autenticacao deste transporte e o ID token. */
+function lerEndpoint(valor) {
+  if (typeof valor !== "string" || valor === "") return { ok: false, codigo: FALHA.SEM_URL };
+  let u;
+  try {
+    u = new URL(valor);
+  } catch (_) {
+    return { ok: false, codigo: FALHA.URL_INVALIDA };
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, codigo: FALHA.URL_INVALIDA };
+  if (u.username || u.password) return { ok: false, codigo: FALHA.URL_INVALIDA };
+  const loopback =
+    u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]" || u.hostname === "::1";
+  if (u.protocol === "http:" && !loopback) return { ok: false, codigo: FALHA.SEM_HTTPS };
+  return { ok: true, url: u, host: u.hostname, seguro: u.protocol === "https:" };
+}
+
+/** O corpo do contrato `admissao-vip-v1`.
+ *
+ *  Exatamente estes oito campos, sempre, nesta forma. A lista e fechada e ha
+ *  teste que compara o conjunto de chaves: acrescentar campo aqui deixou de ser
+ *  uma edicao invisivel, porque cada campo novo e dado saindo do servidor.
+ *
+ *  `reconexao` e DERIVADA da classificacao que o gate ja fez - ela nao e
+ *  perguntada ao cliente em lugar nenhum, e o backend precisa dela para nao
+ *  cobrar duas vezes de quem so caiu e voltou. */
+function corpoDaRequisicao(ctx) {
+  const c = ctx || {};
+  return {
+    versaoContrato: CONTRATO,
+    uidAutenticado: c.uidAutenticado,
+    codigoDaSala: c.codigoDaSala,
+    identidadeDaPartida: c.identidadeDaPartida == null ? null : c.identidadeDaPartida,
+    assento: c.assento,
+    categoriaCompetitiva: c.categoriaCompetitiva,
+    tentativaEntradaId: c.tentativaEntradaId,
+    reconexao: c.classificacao === "reconexao_ao_proprio_assento",
+  };
+}
+
+/** Le a resposta do backend de forma FECHADA.
+ *
+ *  A ordem das checagens importa e nao e estetica: status primeiro (um 5xx com
+ *  corpo HTML nao deve nem chegar ao parser), contrato depois (uma resposta de
+ *  outra versao pode ter `ok` significando outra coisa), e so entao o veredito.
+ *
+ *  `ok !== true` estrito: `"true"`, `1` e `{}` nao aprovam. E aprovacao sem
+ *  `admissaoId` tambem nao aprova - sem identidade da admissao nao ha o que
+ *  guardar no assento, nao ha o que reconciliar depois e nao ha como provar,
+ *  amanha, que aquela entrada foi autorizada. */
+function interpretarRespostaAdmissao(bruto) {
+  const status = bruto && bruto.status;
+  if (status === 429) return { ok: false, codigo: FALHA.HTTP_429, temporaria: true };
+  if (typeof status === "number" && status >= 500) return { ok: false, codigo: FALHA.HTTP_5XX, temporaria: true };
+  if (status !== 200) return { ok: false, codigo: FALHA.HTTP, temporaria: false };
+
+  let json = null;
+  try {
+    json = JSON.parse(bruto.corpo);
+  } catch (_) {
+    return { ok: false, codigo: FALHA.RESPOSTA_INVALIDA, temporaria: false };
+  }
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
+    return { ok: false, codigo: FALHA.RESPOSTA_INVALIDA, temporaria: false };
+  }
+  if (json.versaoContrato !== CONTRATO) {
+    return { ok: false, codigo: FALHA.CONTRATO_DESCONHECIDO, temporaria: false };
+  }
+  if (json.ok !== true) {
+    return { ok: false, codigo: FALHA.NEGADA, temporaria: false };
+  }
+  if (typeof json.admissaoId !== "string" || json.admissaoId === "") {
+    return { ok: false, codigo: FALHA.SEM_ADMISSAO_ID, temporaria: false };
+  }
+  return {
+    ok: true,
+    admissaoId: json.admissaoId,
+    codigoDecisao: typeof json.codigoDecisao === "string" ? json.codigoDecisao : null,
+  };
+}
+
+/** Erro tipado e REDIGIDO do transporte. A mensagem e montada aqui e nunca
+ *  interpolada a partir da resposta remota nem de `e.message` de socket - a
+ *  segunda carrega a URL inteira, e a URL pode carregar o que nao deve. */
+class ErroAdmissaoVip extends Error {
+  constructor(codigo) {
+    super("admissao vip: " + codigo);
+    this.name = "ErroAdmissaoVip";
+    this.codigo = codigo;
+  }
+}
+
+/** POST do contrato, com teto de tempo e teto de corpo. */
+function pedirAdmissaoHttps({ endpoint, idToken, corpo, timeoutMs }) {
+  return new Promise((ok, falha) => {
+    const texto = JSON.stringify(corpo);
+    const agente = endpoint.protocol === "https:" ? https : http;
+    let req;
+    try {
+      req = agente.request(
+        {
+          host: endpoint.hostname,
+          port: endpoint.port || undefined,
+          path: endpoint.pathname + endpoint.search,
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(texto),
+            // A credencial vai AQUI, e so aqui. Nunca no corpo, nunca na query.
+            authorization: "Bearer " + idToken,
+          },
+        },
+        (res) => {
+          let dados = "";
+          let excedeu = false;
+          res.setEncoding("utf8");
+          res.on("data", (d) => {
+            if (excedeu) return;
+            dados += d;
+            if (dados.length > LIMITE_RESPOSTA_BYTES) {
+              excedeu = true;
+              res.destroy();
+              falha(new ErroAdmissaoVip(FALHA.RESPOSTA_GRANDE));
+            }
+          });
+          res.on("end", () => {
+            if (excedeu) return;
+            ok({ status: res.statusCode, corpo: dados });
+          });
+          // Conexao cortada no meio do corpo: `end` nao dispara, e sem isto a
+          // promessa ficaria pendente para sempre e o jogador ficaria travado
+          // na tela de entrar na mesa.
+          res.on("error", () => {
+            if (!excedeu) falha(new ErroAdmissaoVip(FALHA.CONEXAO));
+          });
+        }
+      );
+    } catch (_) {
+      return falha(new ErroAdmissaoVip(FALHA.CONEXAO));
+    }
+    req.setTimeout(timeoutMs || TIMEOUT_MS, () => req.destroy(new ErroAdmissaoVip(FALHA.TIMEOUT)));
+    req.on("error", (e) => falha(e instanceof ErroAdmissaoVip ? e : new ErroAdmissaoVip(FALHA.CONEXAO)));
+    req.end(texto);
+  });
+}
+
+/** O ADAPTADOR. Devolve a funcao `autorizarEntradaVip(contexto)` que o gate
+ *  injeta como porta, ou `null` quando nao ha como falar com backend nenhum.
+ *
+ *  `null` e deliberado, e nao um erro: sem endpoint utilizavel ou sem
+ *  credencial, o que existe nao e um adaptador quebrado, e a AUSENCIA de
+ *  adaptador - que e exatamente o estado que o gate ja sabe tratar, recusando
+ *  a entrada VIP. Devolver um adaptador que sempre falha faria a mesma coisa
+ *  por um caminho mais longo, e deixaria em pe a chance de alguem, um dia,
+ *  interpretar a falha dele como transitoria. */
+function criarAdaptadorAdmissaoVip(opts = {}) {
+  const leitura = lerEndpoint(opts.url);
+  const credencial = opts.credencial || null;
+  const pedir = opts.pedir || pedirAdmissaoHttps;
+  const timeoutMs = opts.timeoutMs === undefined ? TIMEOUT_MS : opts.timeoutMs;
+  const registrar =
+    opts.registrar ||
+      ((codigo) => console.warn("[admissao-vip] entrada recusada · motivo=" + codigo));
+
+  if (!leitura.ok) return null;
+  if (!credencial || typeof credencial.obterIdToken !== "function") return null;
+
+  // tentativaEntradaId -> voo em andamento
+  const emVoo = new Map();
+
+  async function executar(contexto) {
+    let idToken;
+    try {
+      idToken = await credencial.obterIdToken();
+    } catch (e) {
+      // A credencial ja tem a sua propria politica de renovacao e de descarte.
+      // Aqui so se registra o codigo dela e se recusa: insistir seria a segunda
+      // politica de repeticao que a DECISAO 2 proibe.
+      registrar(e && e.codigo ? e.codigo : FALHA.SEM_CREDENCIAL);
+      return { ok: false };
+    }
+    let bruto;
+    try {
+      bruto = await pedir({ endpoint: leitura.url, idToken, corpo: corpoDaRequisicao(contexto), timeoutMs });
+    } catch (e) {
+      registrar(e && e.codigo ? e.codigo : FALHA.CONEXAO);
+      return { ok: false };
+    }
+    const r = interpretarRespostaAdmissao(bruto);
+    if (!r.ok) {
+      registrar(r.codigo);
+      return { ok: false };
+    }
+    return { ok: true, admissaoId: r.admissaoId, codigoDecisao: r.codigoDecisao };
+  }
+
+  /** COALESCENCIA POR TENTATIVA. `emVoo.set` acontece SINCRONAMENTE, antes de
+   *  qualquer ponto de suspensao: `executar()` roda ate o primeiro `await` e
+   *  devolve a promessa, e o `.then` e o `.set` sao sincronos depois disso. Se
+   *  a insercao acontecesse depois de um `await`, duas chamadas no mesmo tique
+   *  veriam o mapa vazio e o backend receberia a MESMA tentativa duas vezes -
+   *  que e precisamente o que uma chave de idempotencia existe para evitar. */
+  function autorizarEntradaVip(contexto) {
+    const t = contexto && contexto.tentativaEntradaId;
+    if (typeof t !== "string" || t === "") return Promise.resolve({ ok: false });
+    const voando = emVoo.get(t);
+    if (voando) return voando;
+    const voo = executar(contexto).then(
+      (r) => {
+        emVoo.delete(t);
+        return r;
+      },
+      (e) => {
+        emVoo.delete(t);
+        registrar(e && e.codigo ? e.codigo : FALHA.CONEXAO);
+        return { ok: false };
+      }
+    );
+    emVoo.set(t, voo);
+    return voo;
+  }
+
+  /** O que o operador pode ver. Sem URL completa, sem token, sem identidade. */
+  autorizarEntradaVip.estado = function () {
+    return { configurado: true, host: leitura.host, seguro: leitura.seguro, emVoo: emVoo.size };
+  };
+
+  return autorizarEntradaVip;
+}
+
+module.exports = {
+  criarAdaptadorAdmissaoVip,
+  lerEndpoint,
+  corpoDaRequisicao,
+  interpretarRespostaAdmissao,
+  pedirAdmissaoHttps,
+  ErroAdmissaoVip,
+  CONTRATO,
+  FALHA,
+  VARIAVEL_URL,
+  TIMEOUT_MS,
+  LIMITE_RESPOSTA_BYTES,
 };
 
   };
@@ -5832,6 +6319,50 @@ function criarServidor(opts = {}) {
       ? { tipo: "erro", motivo: r.erro, codigo: r.codigoRecusa }
       : { tipo: "erro", motivo: r.erro };
   }
+  /** [BACKEND] Conclui uma porta de mesa que pode responder AGORA ou DEPOIS.
+   *
+   *  Mesa casual devolve valor e percorre o ramo sincrono - as mesmas linhas
+   *  de sempre, sem microtask nenhum, para que `envia(...)` seguido de ler a
+   *  resposta continue funcionando como funcionava. Mesa VIP devolve promessa
+   *  e so aplica a entrada quando o backend responder.
+   *
+   *  A JANELA QUE ISTO FECHA. Entre o pedido e a resposta o jogador pode cair.
+   *  Aplicar a entrada depois disso deixaria um assento ocupado por uma conexao
+   *  que nao existe mais - uma mesa que nunca mais enche, e que ninguem
+   *  consegue nem assistir direito. Por isso, ao aplicar, confere-se que a
+   *  conexao ainda e a MESMA: se nao for, a admissao aprovada e DESFEITA.
+   *  `conexoes[id] !== c` e a comparacao certa, e nao `!conexoes[id]`: um id
+   *  pode ter sido reaproveitado por outra conexao, e nesse caso a entrada
+   *  tambem nao e daquela pessoa. */
+  function concluirPortaDeMesa(id, c, r, codigoPedido) {
+    if (!ehPromessaDeMesa(r)) return aplicarEntrada(id, c, r, codigoPedido);
+    return r.then(
+      (v) => aplicarEntrada(id, c, v, codigoPedido),
+      (e) => {
+        // Promessa rejeitada e recusa, nunca entrada. O motivo vai redigido:
+        // so o codigo, nunca a mensagem - ver `registrarFalhaDeAdmissao`.
+        console.error("[admissao] porta de mesa falhou · motivo=" + (e && e.codigo ? e.codigo : "ERRO"));
+        return enviarPara(id, { tipo: "erro", motivo: "entrada indisponivel nesta mesa", codigo: "ADMISSAO_VIP_INDISPONIVEL" });
+      }
+    );
+  }
+
+  function ehPromessaDeMesa(x) {
+    return !!x && (typeof x === "object" || typeof x === "function") && typeof x.then === "function";
+  }
+
+  function aplicarEntrada(id, c, r, codigoPedido) {
+    if (r.erro) return enviarPara(id, erroDeAdmissao(r));
+    const codigo = r.codigo || codigoPedido;
+    if (conexoes[id] !== c) {
+      ger.desfazerAdmissao({ codigo, assento: r.assento });
+      return;
+    }
+    c.codigo = codigo;
+    c.assento = r.assento;
+    enviarPara(id, { tipo: "entrou", codigo, assento: r.assento });
+    return broadcastSala(codigo);
+  }
 
   /** Estado que ESTA conexão pode receber. Passa pela porta única de `salas`. */
   function visaoDaConexao(c) {
@@ -5932,20 +6463,14 @@ function criarServidor(opts = {}) {
         // nem categoria, nem tentativa, nem assento.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
-        if (r.erro) return enviarPara(id, erroDeAdmissao(r));
-        c.codigo = r.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
-        return broadcastSala(r.codigo);
+        return concluirPortaDeMesa(id, c, r, null);
       }
       case "entrarMesa": {
         // [PATCH WS-AUTH] idem: identidade da conexão, nunca da mensagem. É por
         // aqui que a reconexão volta pra mesa — e ela só chega aqui autenticada.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });
-        if (r.erro) return enviarPara(id, erroDeAdmissao(r));
-        c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
-        enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
-        return broadcastSala(c.codigo);
+        return concluirPortaDeMesa(id, c, r, msg.codigo);
       }
       case "assistirMesa": {
         // [PATCH ESPECTADOR] Entrada de quem só ASSISTE. Não pede assento e
@@ -6196,6 +6721,11 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { criarServidor } = require("./servidor");
+// [BACKEND] A credencial canonica e o adaptador unico. Este e o UNICO ponto
+// do bundle que carrega os dois — nao existe segundo cliente de credencial
+// e nao existe segundo consumidor de backend de admissao.
+const { criarCredencialDoMotor } = require("./credencial_motor");
+const { criarAdaptadorAdmissaoVip, VARIAVEL_URL: VARIAVEL_URL_ADMISSAO } = require("./admissao_vip");
 const { criarContas } = require("./contas");
 const { criarOutbox } = require("./outbox"); // [PRODUTOR]
 const { criarVerificadorFirebase } = require("./auth_firebase"); // [PATCH WS-AUTH]
@@ -6354,6 +6884,25 @@ function iniciar(porta, opts = {}) {
   // aparece em nenhuma dessas rotas, e não passa a aparecer por existir a
   // outbox.
   const outbox = criarOutbox();
+  // [BACKEND] AUTORIZACAO DE ENTRADA VIP — a unica fiacao externa deste servidor.
+  //
+  // A credencial e a CANONICA (`credencial_motor`), construida uma vez e
+  // compartilhada: e ela que tem cache por margem, coalescencia e rotacao do
+  // refresh token. Um segundo cliente de credencial teria a sua propria
+  // opiniao sobre validade e rotacionaria por conta propria - e duas rotacoes
+  // concorrentes invalidam uma a outra. Por isso ela nasce aqui, e uma so.
+  //
+  // Construir NAO fala com rede e NAO exige as variaveis: sem elas,
+  // `configurada()` responde false e `obterIdToken()` recusa. O servidor sobe
+  // igual, e mesa casual - que e o que existe hoje - nao toca em nada disto.
+  const credencialDoMotor = criarCredencialDoMotor({ env: process.env });
+  // Sem URL utilizavel ou sem credencial, `criarAdaptadorAdmissaoVip` devolve
+  // `null` — e `null` e exatamente o estado que o gate ja sabe tratar: entrada
+  // VIP recusada, fechada, antes da ocupacao do assento.
+  const autorizarEntradaVip = criarAdaptadorAdmissaoVip({
+    url: process.env[VARIAVEL_URL_ADMISSAO],
+    credencial: credencialDoMotor,
+  });
   // [GATE VIP] Natureza COMPETITIVA das mesas deste processo. Vem do ambiente,
   // que e a configuracao confiavel do servidor - do mesmo lugar de PORT e de
   // FIREBASE_PROJECT_ID, e nao de mensagem de cliente. Ausente = `casual`, que
@@ -6365,15 +6914,28 @@ function iniciar(porta, opts = {}) {
     verificarToken,
     outbox,
     categoriaCompetitiva: process.env.CATEGORIA_COMPETITIVA,
-    // Nenhum adaptador de autorizacao VIP e injetado aqui, e isso e a
-    // entrega desta OS: em producao, entrada em mesa nao-casual falha
-    // fechada ate a proxima OS ligar o autorizador de verdade.
+    // [BACKEND] A porta unica do gate. `null` quando nao ha endpoint ou
+    // credencial — e nesse caso a entrada VIP segue falhando fechada, que e
+    // o estado de qualquer processo que ainda nao foi provisionado.
+    autorizarEntradaVip,
   });
   const catConfigurada = servidor.ger.categoriaConfigurada;
   console.log("[gate-vip] categoria competitiva das mesas deste processo: " + catConfigurada);
-  if (catConfigurada !== "casual") {
-    console.warn("[gate-vip] sem adaptador de autorizacao injetado: NENHUMA ocupacao de " +
-      "assento sera admitida neste processo (fail closed).");
+  // [BACKEND] Disponibilidade e HOST. Nunca a URL inteira: o caminho e a query
+  // sao onde chave costuma se esconder, e um log de boot e a coisa mais
+  // copiada e colada que existe num painel de deploy.
+  if (autorizarEntradaVip) {
+    const est = autorizarEntradaVip.estado();
+    console.log("[admissao-vip] autorizacao de entrada: CONFIGURADA · host=" + est.host +
+      " · tls=" + (est.seguro ? "sim" : "nao (loopback)"));
+  } else {
+    console.warn("[admissao-vip] autorizacao de entrada: AUSENTE — entrada em mesa " +
+      "vip_ranqueada falha fechada. (" + VARIAVEL_URL_ADMISSAO + " nao configurada, invalida, " +
+      "ou credencial do motor incompleta.)");
+  }
+  if (catConfigurada !== "casual" && !autorizarEntradaVip) {
+    console.warn("[gate-vip] este processo roda mesas " + catConfigurada + " e NAO tem " +
+      "autorizador: nenhuma ocupacao de assento sera admitida.");
   }
 
   const http_server = http.createServer((req, res) => {

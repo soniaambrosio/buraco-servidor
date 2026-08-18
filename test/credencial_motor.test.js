@@ -794,12 +794,39 @@ describe("CRED/FRONTEIRA", () => {
     assert.equal(pacote.engines.node, ">=20");
   });
 
-  test("CRED-34b: o módulo NÃO foi ligado a nada — a outbox segue intocada", () => {
-    // Esta entrega é infraestrutura. Ligar o transporte é a OS seguinte, e um
-    // acoplamento acidental aqui faria o servidor passar a chamar rede no
-    // encerramento sem ninguém ter decidido isso.
-    assert.equal(/require\("\.\/credencial_motor"\)/.test(FORA_DO_MODULO), false, "ninguém pode carregar o módulo ainda");
-    assert.equal(/criarCredencialDoMotor/.test(FORA_DO_MODULO), false);
+  test("CRED-34b: o módulo tem UM consumidor só, e é a autorização de entrada", () => {
+    // [COMPOSIÇÃO gate-vip + credencial] ESTE TESTE MUDOU DE AFIRMAÇÃO, E A
+    // AFIRMAÇÃO ANTIGA ERA DATADA.
+    //
+    // Ele nasceu dizendo "ninguém pode carregar o módulo ainda": a credencial
+    // era infraestrutura sem consumidor, e um acoplamento acidental faria o
+    // servidor chamar rede sem ninguém ter decidido isso. A composição decidiu.
+    // A credencial passou a ter exatamente UM consumidor — o adaptador de
+    // admissão VIP, ligado no bootstrap do transporte.
+    //
+    // O QUE ELE PROTEGE CONTINUA IGUAL, e é por isso que ele não foi apagado:
+    // que ninguém construa uma SEGUNDA credencial. Duas teriam caches
+    // independentes e rotacionariam o refresh token por conta própria — e duas
+    // rotações concorrentes invalidam uma à outra, derrubando o motor inteiro
+    // de um jeito que só apareceria na ativação.
+    const carregamentos = (FORA_DO_MODULO.match(/require\("\.\/credencial_motor"\)/g) || []).length;
+    assert.equal(carregamentos, 1, "a credencial é carregada em UM lugar só");
+    const construcoes = (FORA_DO_MODULO.match(/criarCredencialDoMotor\(/g) || []).length;
+    assert.equal(construcoes, 1, "e construída UMA vez só — nunca por consumidor");
+
+    // E quem a carrega é o transporte, no bootstrap: não o motor, não as salas,
+    // não a outbox — que continua intocada, como sempre esteve.
+    const iWs = FORA_DO_MODULO.indexOf('__fabricas["ws_server"]');
+    assert.ok(iWs > 0, "achei o módulo de transporte");
+    assert.ok(FORA_DO_MODULO.indexOf('require("./credencial_motor")') > iWs,
+      "quem carrega a credencial é o bootstrap do transporte");
+    for (const modulo of ["outbox", "salas", "contas", "jogo"]) {
+      const i = FORA_DO_MODULO.indexOf('__fabricas["' + modulo + '"]');
+      const fim = FORA_DO_MODULO.indexOf('__fabricas[', i + 10);
+      const fatia = FORA_DO_MODULO.slice(i, fim);
+      assert.equal(/credencial_motor|criarCredencialDoMotor/.test(fatia), false,
+        "o módulo " + modulo + " não conhece a credencial");
+    }
   });
 
   test("CRED-34c: o servidor continua subindo sem nenhuma das variáveis novas", () => {
