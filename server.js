@@ -5202,6 +5202,246 @@ module.exports = {
 
   };
 
+  __fabricas["chat_ponte"] = function (module, exports, require) {
+// [CHAT] servidor/chat_ponte.js — A PONTE PARA A AUTORIDADE DE CHAT.
+//
+// O QUE ESTE MÓDULO É: o único lugar do servidor que fala com
+// `functions-moderacao`. Ele apresenta a credencial renovável do motor, monta a
+// URL da callable, manda o pedido e devolve a resposta CRUA de quem decide.
+//
+// O QUE ESTE MÓDULO NÃO É, e não pode virar: autoridade. Ele não olha bloqueio,
+// não olha sanção, não valida texto, não escolhe destinatários, não cunha
+// `messageId` e não remonta identidade pública. Se um `if` de política aparecer
+// aqui, ele está no lugar errado — a decisão é da Function, e este arquivo só
+// carrega pergunta e resposta.
+//
+// SIMÉTRICO DE `auth_firebase`. Aquele verifica a credencial de QUEM ENTRA; o
+// `credencial_motor` produz a credencial de QUANDO SAÍMOS; este a APRESENTA. A
+// DECISÃO 4 do cabeçalho de `credencial_motor` dizia que o módulo nascia
+// desligado, "infraestrutura pronta para a OS do transporte". É esta OS, e é
+// aqui que ele é ligado — sem segunda credencial, sem chave estática e sem
+// `firebase-admin`.
+//
+// ZERO DEPENDÊNCIA, como o resto do repositório: `https` do Node e nada mais.
+//
+// TESTÁVEL SEM REDE (§28). `opts.chamar` substitui o transporte inteiro. Sem
+// injeção, o padrão é o HTTPS real — e a suíte NUNCA usa o padrão, porque um
+// teste que alcance a internet é um teste que falha no avião.
+
+const https = require("https");
+
+/// Códigos de falha DESTE módulo. Nenhum deles atravessa o fio até o jogador sem
+/// passar pela redação de `servidor.js` (§17): são para log de operador.
+const FALHA_PONTE = {
+  SEM_CREDENCIAL: "PONTE_SEM_CREDENCIAL",
+  SEM_CONFIGURACAO: "PONTE_SEM_CONFIGURACAO",
+  REDE: "PONTE_REDE",
+  TIMEOUT: "PONTE_TIMEOUT",
+  RESPOSTA_ILEGIVEL: "PONTE_RESPOSTA_ILEGIVEL",
+  RECUSA_DA_AUTORIDADE: "PONTE_RECUSA",
+};
+
+/// Teto de resposta. Uma callable de chat responde com uma projeção e uma lista
+/// curta de UIDs; qualquer coisa maior que isto é defeito ou ataque, e ler sem
+/// limite é como se entrega memória a quem responde.
+const LIMITE_RESPOSTA_BYTES = 64 * 1024;
+
+/// Quanto se espera pela autoridade antes de desistir.
+///
+/// TIMEOUT NÃO É APROVAÇÃO (§22 item 19). Ao estourar, este módulo REJEITA — e
+/// quem chama recusa a mensagem. Não existe caminho em que o silêncio da
+/// autoridade se transforme em mensagem entregue.
+const TIMEOUT_MS = 8000;
+
+class ErroPonteDeChat extends Error {
+  constructor(codigo, detalhe) {
+    // A mensagem é montada aqui e NUNCA interpolada a partir do corpo da
+    // resposta remota: o corpo pode conter o texto do jogador, e texto de
+    // jogador não entra em mensagem de erro nem em log.
+    super("ponte de chat: " + codigo);
+    this.name = "ErroPonteDeChat";
+    this.codigo = codigo;
+    // `detalhe` é o código de recusa da autoridade (curto, do vocabulário dela),
+    // nunca o corpo bruto.
+    this.detalhe = detalhe || null;
+  }
+}
+
+/// POST numa callable do Firebase, com o ID token do motor.
+///
+/// O formato do corpo (`{data: ...}`) e o do sucesso (`{result: ...}`) são o
+/// protocolo das callables, e não invenção nossa.
+function chamarHttps({ url, idToken, dados }) {
+  return new Promise((resolve, reject) => {
+    let alvo;
+    try {
+      alvo = new URL(url);
+    } catch (_) {
+      return reject(new ErroPonteDeChat(FALHA_PONTE.SEM_CONFIGURACAO));
+    }
+
+    const corpo = Buffer.from(JSON.stringify({ data: dados }), "utf8");
+    let req;
+    try {
+      req = https.request(
+        {
+          method: "POST",
+          hostname: alvo.hostname,
+          path: alvo.pathname + alvo.search,
+          port: alvo.port || 443,
+          headers: {
+            "content-type": "application/json",
+            "content-length": corpo.length,
+            authorization: "Bearer " + idToken,
+          },
+          timeout: TIMEOUT_MS,
+        },
+        (res) => {
+          const pedacos = [];
+          let total = 0;
+          res.on("data", (d) => {
+            total += d.length;
+            if (total > LIMITE_RESPOSTA_BYTES) {
+              req.destroy();
+              return;
+            }
+            pedacos.push(d);
+          });
+          res.on("end", () => {
+            let json = null;
+            try {
+              json = JSON.parse(Buffer.concat(pedacos).toString("utf8"));
+            } catch (_) {
+              return reject(new ErroPonteDeChat(FALHA_PONTE.RESPOSTA_ILEGIVEL));
+            }
+            resolve({ status: res.statusCode, json });
+          });
+        }
+      );
+    } catch (_) {
+      return reject(new ErroPonteDeChat(FALHA_PONTE.REDE));
+    }
+
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new ErroPonteDeChat(FALHA_PONTE.TIMEOUT));
+    });
+    // A mensagem do erro de rede NÃO é propagada: ela pode carregar host, IP e
+    // caminho, e nada disso ajuda quem lê o log de chat.
+    req.on("error", () => reject(new ErroPonteDeChat(FALHA_PONTE.REDE)));
+    req.end(corpo);
+  });
+}
+
+/**
+ * Cria a ponte.
+ *
+ * @param opts.credencial  o objeto de `credencial_motor` (`obterIdToken`).
+ * @param opts.projectId   projeto do Firebase (para montar a URL).
+ * @param opts.regiao      região das Functions.
+ * @param opts.nomes       nomes das Functions, vindos do contrato compartilhado.
+ * @param opts.chamar      substitui o transporte HTTPS (testes).
+ * @param opts.baseUrl     substitui a origem (emulador).
+ */
+function criarPonteDeChat(opts = {}) {
+  const credencial = opts.credencial || null;
+  const projectId = opts.projectId || process.env.FIREBASE_PROJECT_ID || null;
+  const regiao = opts.regiao || "southamerica-east1";
+  const nomes = opts.nomes || {
+    definirCanal: "definirCanalDeChat",
+    enviarPeloMotor: "enviarMensagemChatPeloMotor",
+  };
+  const chamar = opts.chamar || chamarHttps;
+  const baseUrl =
+    opts.baseUrl || (projectId ? "https://" + regiao + "-" + projectId + ".cloudfunctions.net" : null);
+
+  function configurada() {
+    return Boolean(credencial && credencial.configurada && credencial.configurada() && baseUrl);
+  }
+
+  function urlDe(nome) {
+    return baseUrl + "/" + nome;
+  }
+
+  /// Executa uma chamada autenticada e traduz a resposta.
+  ///
+  /// FALHA FECHADA em todos os caminhos: sem credencial, sem configuração, rede
+  /// caída, timeout, resposta ilegível, recusa da autoridade — todos REJEITAM.
+  /// Não há retorno "provisório" nem degradado.
+  async function invocar(nome, dados) {
+    if (!configurada()) {
+      throw new ErroPonteDeChat(FALHA_PONTE.SEM_CONFIGURACAO);
+    }
+
+    let idToken;
+    try {
+      idToken = await credencial.obterIdToken();
+    } catch (e) {
+      // O código da credencial é útil ao operador e não revela segredo.
+      throw new ErroPonteDeChat(FALHA_PONTE.SEM_CREDENCIAL, e && e.codigo);
+    }
+
+    const r = await chamar({ url: urlDe(nome), idToken, dados });
+
+    if (r && r.status === 200 && r.json && r.json.result !== undefined) {
+      return r.json.result;
+    }
+
+    // Recusa da autoridade. O código dela vem em `details.recusa` — vocabulário
+    // curto e já pensado para ser mostrado. O resto da resposta é descartado.
+    const detalhe =
+      (r && r.json && r.json.error && r.json.error.details && r.json.error.details.recusa) ||
+      (r && r.json && r.json.error && r.json.error.status) ||
+      null;
+    throw new ErroPonteDeChat(FALHA_PONTE.RECUSA_DA_AUTORIDADE, detalhe);
+  }
+
+  /**
+   * Declara (cria ou atualiza) o canal de chat de uma sala.
+   *
+   * O CONTEÚDO VEM DO SERVIDOR, sempre: quem está sentado, qual superfície, se
+   * está aberto. O cliente não participa desta chamada de forma nenhuma.
+   */
+  function definirCanal({ canalId, superficie, participantes, aberto }) {
+    return invocar(nomes.definirCanal, {
+      canalId,
+      superficie,
+      participantes,
+      aberto,
+    });
+  }
+
+  /**
+   * Pede à autoridade que a mensagem exista.
+   *
+   * `autorUid` vai no payload porque o UID autenticado desta chamada é o do
+   * MOTOR, não o do autor — e a autoridade só aceita isso de quem tem o claim
+   * `motorDePartidas`, conferindo ainda que aquele UID ocupa o canal.
+   */
+  function enviarMensagem({ autorUid, intentId, canalId, superficie, conteudo }) {
+    return invocar(nomes.enviarPeloMotor, {
+      autorUid,
+      intentId,
+      canalId,
+      superficie,
+      conteudo,
+    });
+  }
+
+  return { definirCanal, enviarMensagem, configurada };
+}
+
+module.exports = {
+  criarPonteDeChat,
+  chamarHttps,
+  ErroPonteDeChat,
+  FALHA_PONTE,
+  TIMEOUT_MS,
+  LIMITE_RESPOSTA_BYTES,
+};
+
+  };
+
   __fabricas["servidor"] = function (module, exports, require) {
 // servidor/servidor.js — SERVIDOR DE SALAS (protocolo), multiplayer M2
 // Despachante de mensagens INDEPENDENTE DE TRANSPORTE. Fala o protocolo do
@@ -5233,6 +5473,194 @@ module.exports = {
 // conexão, e nenhum `msg.jogadorId` é lido em lugar nenhum deste arquivo.
 
 const { criarGerenciador } = require("./salas");
+
+// ===========================================================================
+// [CHAT] PRODUTOR DO CANAL — o contexto estável que a autoridade consome.
+// ===========================================================================
+//
+// O QUE O SERVIDOR SABE E A AUTORIDADE NÃO: quem está sentado, em que sala, e
+// se a partida acabou. É só isso que ele produz. Bloqueio, sanção, autoria,
+// texto, `messageId` e destinatários continuam sendo decididos por
+// `functions-moderacao` — nada disso é recalculado aqui.
+//
+// VOCABULÁRIO CONGELADO. Os valores abaixo são os do contrato compartilhado
+// `contrato/chat-transporte-v1.json`, que existe idêntico nos dois
+// repositórios. `test/chat_contrato.test.js` afirma que estas constantes batem
+// com o arquivo — se alguém mudar uma e não a outra, a suíte reprova. É o que
+// impede o servidor e a Function de falarem dialetos diferentes.
+
+const crypto = require("crypto");
+
+/** Superfície da mesa. O espectador tem valor próprio e NÃO é usado no envio. */
+const CHAT_SUPERFICIE_MESA = "mesa_de_partida";
+
+/** Papéis dentro do canal. Só `sentado` fala e recebe. */
+const CHAT_PAPEL = {
+  SENTADO: "jogador_sentado",
+  ESPECTADOR: "espectador",
+  FORA: "fora_do_canal",
+};
+
+/** Tipos do fio. */
+const CHAT_FIO = {
+  PEDIDO: "chat_enviar",
+  ENTREGA: "chat_mensagem",
+  RECIBO: "chat_ack",
+};
+
+/** Desfechos do recibo ao remetente. */
+const CHAT_ACK = {
+  ACEITA: "aceita",
+  REPETIDA: "repetida",
+  RECUSADA: "recusada",
+};
+
+/**
+ * Códigos que PODEM atravessar o fio (§17).
+ *
+ * REDIGIDOS DE PROPÓSITO. `indisponivel` cobre bloqueio E sanção de terceiro sem
+ * dizer qual dos dois foi — porque dizer "B te bloqueou" entrega a decisão
+ * pessoal de B a quem ele bloqueou, e dizer "B está suspenso" entrega estado
+ * administrativo de terceiro. `silenciado` é diferente: é sobre o PRÓPRIO
+ * remetente, e ele tem direito de saber por que não consegue falar.
+ */
+const CHAT_RECUSA = {
+  TEXTO_INVALIDO: "texto_invalido",
+  SEM_ASSENTO: "sem_assento",
+  SILENCIADO: "silenciado",
+  INDISPONIVEL: "indisponivel",
+  CANAL_FECHADO: "canal_fechado",
+  INTENCAO_INVALIDA: "intencao_invalida",
+  INTENCAO_REUTILIZADA: "intencao_reutilizada",
+  TENTE_DE_NOVO: "tente_de_novo",
+};
+
+/**
+ * O `canalId` a partir do código da sala.
+ *
+ * DIGEST, e não o código cru, por duas razões:
+ *
+ *  1. O código da sala É A CHAVE DE ENTRADA de uma mesa privada — quem o tem,
+ *     entra. Ele tem 4 dígitos ("BURACO-1234"), então é adivinhável, e a §6
+ *     proíbe segredo no identificador. O `canalId` viaja na projeção e é
+ *     referenciado numa denúncia; não pode ser o convite.
+ *  2. ESTABILIDADE. O digest é função só do código, então ele não muda com
+ *     socket, reconexão, geração de transporte, assento nem partida. Uma queda
+ *     de conexão não cria outro canal — que é exatamente o que a §6 exige.
+ *
+ * NÃO derivado de UID: o código da sala não contém UID.
+ *
+ * 32 hex = 128 bits. O valor não é segredo e não autentica ninguém; ele só
+ * precisa não colidir entre salas.
+ */
+function canalIdDeCodigo(codigo) {
+  return crypto
+    .createHash("sha256")
+    .update("canal-de-chat|" + String(codigo), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
+ * A composição do canal, derivada do ESTADO DA SALA — nunca de conexão.
+ *
+ * FONTE: `sala.assentos[i]`, que é o registro autoritativo de quem ocupa a mesa.
+ * Deliberadamente NÃO é a lista de conexões abertas, e a diferença aparece na
+ * reconexão: `sair` pós-início troca o tipo em `sala.jogo.assentos` (o jogador
+ * vira bot no JOGO) e não toca `sala.assentos`, então uma queda de conexão não
+ * altera a composição do canal. Se a fonte fosse conexão, cada oscilação de rede
+ * remexeria o canal e a §7 seria impossível de cumprir.
+ *
+ * BOT NUNCA ENTRA (§21). Só `tipo === "humano"` com `jogadorId`. Um bot no canal
+ * seria um destinatário sem pessoa, e um passo de distância de bot que conversa.
+ *
+ * ESPECTADOR NÃO ENTRA. Quem assiste não ocupa assento, então não aparece em
+ * `sala.assentos` — a exclusão é por construção, e não por filtro que alguém
+ * pode esquecer.
+ */
+function composicaoDoCanal(sala) {
+  if (!sala || !Array.isArray(sala.assentos)) return [];
+  const fora = [];
+  for (const a of sala.assentos) {
+    if (!a || a.tipo !== "humano") continue;
+    if (typeof a.jogadorId !== "string" || !a.jogadorId) continue;
+    fora.push({ uid: a.jogadorId, papel: CHAT_PAPEL.SENTADO });
+  }
+  return fora;
+}
+
+/**
+ * O canal aceita mensagem?
+ *
+ * `!sala.liquidada`, e a escolha tem base no domínio, não em preferência: quem
+ * gerencia essa marca é `salas.js`, que a liga em `liquidar` (encerramento
+ * autoritativo da partida) e a DESLIGA em `iniciarPartida`. Então o
+ * comportamento na revanche não foi decidido aqui — ele cai do estado que a sala
+ * já mantinha antes desta OS: partida encerrada não recebe fala, e partida nova
+ * na mesma sala volta a receber.
+ *
+ * A sala nunca é destruída neste servidor (não há `delete salas[codigo]`), então
+ * "encerrar definitivamente" é o encerramento da PARTIDA — não a morte da sala.
+ */
+function canalAberto(sala) {
+  return Boolean(sala) && sala.liquidada !== true;
+}
+
+/**
+ * A impressão do canal: o que faz uma sincronização valer a pena.
+ *
+ * Sem isto, `broadcastSala` chamaria a Function em cada jogada — dezenas de
+ * chamadas por partida para declarar o mesmo canal. Com isto, a chamada só sai
+ * quando a composição ou o estado de aceitação MUDA de fato, e a reconexão (que
+ * não muda nenhum dos dois) não gera chamada nenhuma.
+ */
+function impressaoDoCanal(sala) {
+  const uids = composicaoDoCanal(sala)
+    .map((p) => p.uid)
+    .slice()
+    .sort();
+  return (canalAberto(sala) ? "1" : "0") + "|" + uids.join(",");
+}
+
+/**
+ * Traduz a recusa da autoridade num código seguro para o fio (§17).
+ *
+ * LISTA DE PERMISSÃO. Qualquer coisa que não esteja mapeada vira
+ * `tente_de_novo` — nunca o código bruto da autoridade, nunca a mensagem, nunca
+ * o corpo da resposta. É o que impede um código novo lá dentro de virar
+ * vazamento aqui por omissão.
+ *
+ * `contatoRecusado` e `suspensaoImpedeChat` colapsam em respostas diferentes de
+ * propósito: o primeiro pode ser sobre TERCEIRO (bloqueio) e por isso vira
+ * `indisponivel`; o segundo é sobre quem escreve.
+ */
+function redigirRecusaDeChat(recusaDaAutoridade) {
+  switch (recusaDaAutoridade) {
+    case "conteudoVazio":
+    case "conteudoNaoTexto":
+    case "conteudoAcimaDoLimite":
+    case "conteudoComCaractereDeControle":
+      return CHAT_RECUSA.TEXTO_INVALIDO;
+    case "papelSemDireitoDeFala":
+    case "semDestinatarios":
+    case "superficieNaoAceitaChat":
+      return CHAT_RECUSA.SEM_ASSENTO;
+    case "suspensaoImpedeChat":
+      return CHAT_RECUSA.SILENCIADO;
+    case "contatoRecusado":
+      return CHAT_RECUSA.INDISPONIVEL;
+    case "canalFechado":
+    case "canalDesconhecido":
+      return CHAT_RECUSA.CANAL_FECHADO;
+    case "intencaoInvalida":
+      return CHAT_RECUSA.INTENCAO_INVALIDA;
+    case "intencaoReutilizada":
+      return CHAT_RECUSA.INTENCAO_REUTILIZADA;
+    default:
+      return CHAT_RECUSA.TENTE_DE_NOVO;
+  }
+}
+
 
 // [PATCH WS-AUTH] estados de autenticação da conexão
 //
@@ -5278,6 +5706,181 @@ function criarServidor(opts = {}) {
   // for injetado, toda autenticação falha e nenhum comando de jogador roda.
   // É de propósito — não existe "servidor sem auth" nem modo legado.
   const verificarToken = opts.verificarToken || (() => Promise.resolve({ ok: false, codigo: "SEM_VERIFICADOR" }));
+
+  // ==========================================================================
+  // [CHAT] TRANSPORTE — produtor do canal e entrega da projeção.
+  // ==========================================================================
+  //
+  // SEM PADRÃO PERMISSIVO, igual ao `verificarToken` acima: sem ponte injetada
+  // não existe chat. Não há "modo local" nem fallback que grave mensagem sem
+  // passar pela autoridade — a ausência da ponte recusa o envio, e é isso.
+  const chatPonte = opts.chatPonte || null;
+
+  /// Última impressão sincronizada por sala. Evita declarar o mesmo canal a cada
+  /// jogada, e é o que faz a reconexão não gerar chamada nenhuma.
+  const chatImpressao = {};
+
+  /// Declara o canal quando (e só quando) o estado estável da mesa mudou.
+  ///
+  /// NÃO É AWAIT NO CAMINHO DO JOGO. Um erro da autoridade de chat não pode
+  /// ocupar assento, derrubar conexão nem alterar a partida (§22 item 18): a
+  /// falha é registrada e o jogo segue. O preço é o canal ficar velho até a
+  /// próxima mudança — e a próxima mudança tenta de novo, porque a impressão só
+  /// é gravada quando a chamada dá certo.
+  function sincronizarCanal(codigo) {
+    if (!chatPonte || !codigo) return;
+    const sala = ger.salas[codigo];
+    if (!sala) return;
+
+    const impressao = impressaoDoCanal(sala);
+    if (chatImpressao[codigo] === impressao) return;
+
+    const participantes = composicaoDoCanal(sala);
+    const aberto = canalAberto(sala);
+
+    // Marca ANTES de esperar, para que duas mudanças seguidas não disparem duas
+    // chamadas concorrentes com o mesmo conteúdo. Em caso de falha a marca é
+    // desfeita, e a próxima mudança tenta de novo.
+    chatImpressao[codigo] = impressao;
+
+    Promise.resolve()
+      .then(() =>
+        chatPonte.definirCanal({
+          canalId: canalIdDeCodigo(codigo),
+          superficie: CHAT_SUPERFICIE_MESA,
+          participantes,
+          aberto,
+        })
+      )
+      .catch((e) => {
+        delete chatImpressao[codigo];
+        // Código de operador, nunca corpo de resposta e nunca texto de jogador.
+        console.warn(
+          "[chat] canal nao sincronizado sala=" + codigo + " codigo=" + ((e && e.codigo) || "DESCONHECIDO")
+        );
+      });
+  }
+
+  /// Entrega a projeção APENAS a quem a autoridade autorizou (§12).
+  ///
+  /// Percorre `destinatarios` — a lista que veio da Function — e não a sala. Quem
+  /// ficou de fora não recebe nem o pacote para descartar depois: o `enviar` nunca
+  /// é chamado para ele. Uma implementação que mandasse para a sala inteira e
+  /// deixasse o cliente esconder seria bloqueio decorativo.
+  ///
+  /// O UID é usado AQUI, dentro da infraestrutura, só para achar o socket. O que
+  /// atravessa o fio é `dados`, que é a projeção segura montada pela autoridade —
+  /// este arquivo não acrescenta um campo a ela.
+  function entregarChat(codigo, destinatarios, projecao) {
+    if (!Array.isArray(destinatarios) || !projecao) return 0;
+    const permitidos = Object.create(null);
+    for (const uid of destinatarios) {
+      if (typeof uid === "string" && uid) permitidos[uid] = true;
+    }
+
+    let entregues = 0;
+    for (const id of Object.keys(conexoes)) {
+      const c = conexoes[id];
+      if (!c || c.codigo !== codigo) continue;
+      // Espectador não recebe: `assento == null` é exatamente o que `papelDe`
+      // usa para dizer "espectador". A autoridade também não o põe em
+      // `destinatarios`, então esta é a segunda tranca da mesma porta.
+      if (c.assento == null) continue;
+      if (c.estadoAuth !== AUTH.AUTENTICADO) continue;
+      if (!permitidos[c.jogadorId]) continue;
+      enviarPara(id, { tipo: CHAT_FIO.ENTREGA, dados: projecao });
+      entregues++;
+    }
+    return entregues;
+  }
+
+  /// Recibo ao remetente (§16). Três desfechos distinguíveis, nenhum revelando
+  /// estado de terceiro.
+  function reciboDeChat(id, intentId, resultado, extra) {
+    enviarPara(
+      id,
+      Object.assign({ tipo: CHAT_FIO.RECIBO, intentId, resultado }, extra || {})
+    );
+  }
+
+  /// O caminho do `chat_enviar`.
+  ///
+  /// O QUE O CLIENTE MANDA: `intentId` e `texto`. Nada mais é lido — nem
+  /// `autorUid`, nem `canalId`, nem `destinatarios`, nem instante. O autor sai de
+  /// `c.jogadorId` (gravado do token verificado, propriedade não-gravável) e o
+  /// canal sai de `c.codigo`. Um payload que traga esses campos não é "aceito e
+  /// ignorado": ele simplesmente não é consultado, e o teste estrutural afirma
+  /// que este bloco não os lê.
+  async function processarChatEnviar(id, msg) {
+    const c = conexoes[id];
+    if (!c) return;
+
+    const intentId = typeof msg.intentId === "string" ? msg.intentId : "";
+
+    if (!chatPonte) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.TENTE_DE_NOVO,
+      });
+    }
+
+    // ESPECTADOR NÃO FALA, e quem não está em mesa também não. A recusa é local
+    // porque não há canal a consultar — e é a MESMA resposta que a autoridade
+    // daria (`papelSemDireitoDeFala`), então não há política nova aqui.
+    if (c.codigo == null || c.assento == null) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.SEM_ASSENTO,
+      });
+    }
+
+    const codigo = c.codigo;
+
+    // O canal precisa existir na autoridade antes da primeira fala. Se a
+    // sincronização anterior falhou, esta é a chance de recuperar.
+    sincronizarCanal(codigo);
+
+    let r;
+    try {
+      r = await chatPonte.enviarMensagem({
+        autorUid: c.jogadorId,
+        intentId,
+        canalId: canalIdDeCodigo(codigo),
+        superficie: CHAT_SUPERFICIE_MESA,
+        conteudo: typeof msg.texto === "string" ? msg.texto : msg.texto,
+      });
+    } catch (e) {
+      // TIMEOUT NÃO É APROVAÇÃO. Falha de rede, timeout e recusa da autoridade
+      // caem todos aqui, e todos recusam. Nada é gravado, nada é entregue, e o
+      // estado da partida não é tocado.
+      const bruto = e && e.detalhe;
+      console.warn(
+        "[chat] envio recusado sala=" + codigo + " codigo=" + ((e && e.codigo) || "DESCONHECIDO")
+      );
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: redigirRecusaDeChat(bruto),
+      });
+    }
+
+    const projecao = r && r.mensagem;
+    if (!projecao) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.TENTE_DE_NOVO,
+      });
+    }
+
+    // ENTREGA AT-LEAST-ONCE, com `messageId` estável (§15). Um retry da mesma
+    // intenção reentrega a MESMA projeção, com o MESMO `messageId` — que é o que
+    // permite a futura UI deduplicar. Não se finge at-most-once transformando
+    // retry em segunda mensagem.
+    entregarChat(codigo, r.destinatarios, projecao);
+
+    return reciboDeChat(
+      id,
+      intentId,
+      r.jaEnviada ? CHAT_ACK.REPETIDA : CHAT_ACK.ACEITA,
+      { messageId: projecao.messageId }
+    );
+  }
+
   // [PATCH WS-AUTH] §12 — UID (Firebase) x jogadorId (domínio). Hoje o cofre de
   // contas é chaveado pelo próprio uid: a relação é identidade, mas ela é
   // decidida AQUI, no servidor, e nunca informada pelo cliente. Se um dia houver
@@ -5591,6 +6194,15 @@ function criarServidor(opts = {}) {
     }
 
     switch (msg.tipo) {
+      // [CHAT] O ÚNICO ingresso de mensagem do jogador. Assíncrono porque a
+      // decisão é da autoridade remota; `processar` não espera, e o recibo chega
+      // pelo próprio socket quando a resposta voltar. Nenhum outro `case` é
+      // afetado por uma falha aqui.
+      case CHAT_FIO.PEDIDO: {
+        processarChatEnviar(id, msg);
+        return;
+      }
+
       case "criarMesa": {
         // [PATCH WS-AUTH] c.jogadorId vem do token verificado, não da mensagem.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
@@ -5802,6 +6414,16 @@ function criarServidor(opts = {}) {
    *  escape: compra, descarte, batida, morto, nova rodada, encerramento e
    *  ressincronização passam TODOS por aqui. */
   function broadcastSala(codigo) {
+    // [CHAT] O canal acompanha o ESTADO ESTÁVEL da mesa, e este é o ponto por onde
+    // todo estado estável passa: criar mesa, entrar, sair, jogada que encerra a
+    // partida, bot que bate, revanche. Sincronizar aqui — em vez de em cada um
+    // desses caminhos — é o que impede um caminho novo de esquecer o canal.
+    //
+    // `impressaoDoCanal` faz a chamada sair só quando composição ou aceitação
+    // MUDAM: uma jogada comum não fala com a autoridade, e a reconexão (que não
+    // muda nenhuma das duas) também não.
+    sincronizarCanal(codigo);
+
     for (const cid in conexoes) {
       const c = conexoes[cid];
       if (c.codigo !== codigo) continue;
@@ -5839,6 +6461,22 @@ function criarServidor(opts = {}) {
 }
 
 module.exports = { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO };
+// [CHAT] Expostos para a suíte de transporte afirmar o contrato na PRIMITIVA,
+// sem montar servidor, conexão e ponte para cada caso — a mesma razão pela qual
+// `salas` expõe `carimbarEstado` e `montarEnvelopeEncerramento`. É também o que
+// permite ao teste de contrato comparar estas constantes com
+// `contrato/chat-transporte-v1.json` em vez de reescrevê-las.
+module.exports.canalIdDeCodigo = canalIdDeCodigo;
+module.exports.composicaoDoCanal = composicaoDoCanal;
+module.exports.canalAberto = canalAberto;
+module.exports.impressaoDoCanal = impressaoDoCanal;
+module.exports.redigirRecusaDeChat = redigirRecusaDeChat;
+module.exports.CHAT_SUPERFICIE_MESA = CHAT_SUPERFICIE_MESA;
+module.exports.CHAT_PAPEL = CHAT_PAPEL;
+module.exports.CHAT_FIO = CHAT_FIO;
+module.exports.CHAT_ACK = CHAT_ACK;
+module.exports.CHAT_RECUSA = CHAT_RECUSA;
+
 
   };
 
@@ -5862,6 +6500,12 @@ const { criarServidor } = require("./servidor");
 const { criarContas } = require("./contas");
 const { criarOutbox } = require("./outbox"); // [PRODUTOR]
 const { criarVerificadorFirebase } = require("./auth_firebase"); // [PATCH WS-AUTH]
+// [CHAT] A credencial renovável do motor e a ponte para a autoridade de chat. O
+// cabeçalho de `credencial_motor` dizia que o módulo nascia desligado,
+// "infraestrutura pronta para a OS do transporte" — é aqui que ele é ligado.
+const { criarCredencialDoMotor } = require("./credencial_motor");
+const { criarPonteDeChat } = require("./chat_ponte");
+
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const OP = { CONT: 0x0, TEXT: 0x1, BIN: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa };
@@ -6017,11 +6661,31 @@ function iniciar(porta, opts = {}) {
   // aparece em nenhuma dessas rotas, e não passa a aparecer por existir a
   // outbox.
   const outbox = criarOutbox();
+  // [CHAT] A ponte para a autoridade de chat.
+  //
+  // FALHA FECHADA E SILENCIOSA PARA O JOGO. Se as variáveis da credencial não
+  // estiverem no ambiente, `configurada()` responde false, `sincronizarCanal`
+  // não faz nada e todo `chat_enviar` é recusado — e o resto do servidor roda
+  // exatamente como rodava. Um chat indisponível não pode impedir de jogar.
+  const credencialMotor = criarCredencialDoMotor();
+  const chatPonte = criarPonteDeChat({ credencial: credencialMotor });
+  if (!chatPonte.configurada()) {
+    // Nomes das variáveis que faltam, nunca valores. `estado()` já é redigido.
+    console.warn(
+      "[chat] transporte desligado: credencial do motor nao configurada (" +
+        (credencialMotor.estado().faltando || []).join(", ") +
+        ")"
+    );
+  }
+
+
   const servidor = criarServidor({
     agendar: (fn) => setTimeout(fn, RESPIRO_MS),
     contas,
     verificarToken,
     outbox,
+    chatPonte,
+
   });
 
   const http_server = http.createServer((req, res) => {

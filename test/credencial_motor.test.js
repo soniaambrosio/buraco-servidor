@@ -1019,12 +1019,32 @@ describe("CRED/FRONTEIRA", () => {
     assert.equal(pacote.engines.node, ">=20");
   });
 
-  test("CRED-34b: o módulo NÃO foi ligado a nada — a outbox segue intocada", () => {
-    // Esta entrega é infraestrutura. Ligar o transporte é a OS seguinte, e um
-    // acoplamento acidental aqui faria o servidor passar a chamar rede no
-    // encerramento sem ninguém ter decidido isso.
-    assert.equal(/require\("\.\/credencial_motor"\)/.test(FORA_DO_MODULO), false, "ninguém pode carregar o módulo ainda");
-    assert.equal(/criarCredencialDoMotor/.test(FORA_DO_MODULO), false);
+  test("CRED-34b: o módulo foi ligado ao CHAT, e a outbox segue intocada", () => {
+    // A DECISÃO 4 do cabeçalho do módulo dizia "este módulo NÃO é ligado a nada
+    // NESTA ENTREGA — infraestrutura pronta para a OS do transporte". A OS do
+    // transporte chegou, então o "ainda não" morreu. O que NÃO era temporário
+    // continua valendo, e é o que este caso guarda agora.
+    //
+    // LIGADO, UMA VEZ SÓ. Duas montagens da credencial seriam dois refresh
+    // tokens em memória e duas renovações concorrentes contra o Google.
+    const carregamentos = (FORA_DO_MODULO.match(/require\("\.\/credencial_motor"\)/g) || []).length;
+    assert.equal(carregamentos, 1, "a credencial é carregada exatamente uma vez");
+    const montagens = (FORA_DO_MODULO.match(/criarCredencialDoMotor\(/g) || []).length;
+    assert.equal(montagens, 1, "a credencial é montada exatamente uma vez");
+
+    // LIGADA AO CHAT, e a nada além: é a ponte de chat que a recebe.
+    assert.match(FORA_DO_MODULO, /criarPonteDeChat\(\{ credencial: credencialMotor \}\)/);
+
+    // A OUTBOX SEGUE INTOCADA — o motivo original deste caso, e o que não mudou.
+    // A chamada criarOutbox() continua sem argumento: o encerramento não ganhou
+    // credencial, não ganhou ponte e não passou a chamar rede. Quem quiser o
+    // transporte do encerramento vai ter que mexer aqui e explicar.
+    assert.match(FORA_DO_MODULO, /criarOutbox\(\)/);
+    // A DEFINIÇÃO da função é retirada antes de procurar CHAMADA com argumento:
+    // `function criarOutbox(opts = {})` mora no módulo da outbox e casaria com a
+    // busca, reprovando um servidor correto.
+    const chamadasDaOutbox = FORA_DO_MODULO.replace(/function criarOutbox\([^)]*\)/g, "");
+    assert.equal(/criarOutbox\([^)]/.test(chamadasDaOutbox), false, "a outbox não recebe dependência nova");
   });
 
   test("CRED-34c: o servidor continua subindo sem nenhuma das variáveis novas", () => {
