@@ -1,4 +1,16 @@
-# Composição gate VIP + credencial renovável, e o adaptador servidor → backend
+# OS 2 — Composição gate VIP + credencial renovável, e o adaptador servidor → backend
+
+> ## `PASS`
+>
+> **PASS — GATE VIP COMPOSTO À CREDENCIAL RENOVÁVEL E ADAPTADOR BACKEND
+> CANONIZADO**
+>
+> Uma sala VIP/Ranqueada só ocupa o assento depois de aprovação explícita do
+> adaptador autenticado. Casual, espectador e bots permanecem inteiramente fora
+> desse transporte.
+>
+> **333 casos · 0 falhas · 8/8 provas negativas detectadas · zero dependência
+> nova · `npm start` inalterado · zero deploy · zero segredo · zero ativação.**
 
 Branch `integracao/gate-vip-credencial-backend-v1`.
 
@@ -7,8 +19,11 @@ Branch `integracao/gate-vip-credencial-backend-v1`.
 | A — gate VIP | `claude/gate-autoritativo-entrada-vip-ranqueada-v1` | `504d68fe9eaa5af6d26c880e95fcf23b3bf553d8` |
 | B — credencial | `claude/credencial-renovavel-motor-railway-v1` | `85d0eee5286fd1deba5c2ae85176b76e714e6690` |
 | merge-base | `claude/versionamento-visao-autoritativa-v1` | `7e7572b3471bcec2a6968e6084f56dd407cef601` |
+| C — correção do contrato do Secure Token | `correcao/credencial-motor-secure-token-v2` | `deed131f7f880cee3c86d1c7c12f184d459b5e08` |
 
-Diamante: as duas descendem de `7e7572b`, nenhuma contém a outra.
+Diamante: A e B descendem de `7e7572b`, nenhuma contém a outra. C é
+**descendente linear** de B (`merge-base(85d0eee, deed131) == 85d0eee`), e por
+isso entrou por merge explícito, sem reimplementação.
 
 ## A composição
 
@@ -24,6 +39,34 @@ comparados contra a folha de origem: `carta`, `canastra`, `bot`, `jogo`,
 
 Baselines: A = 222, B = 228, composição = **269** (= 222 + 228 − 181 da base
 comum). Aditivo exato.
+
+### A correção do contrato do Secure Token (`deed131`) entrou por merge
+
+A composição nasceu sobre `85d0eee`, que ainda comparava `json.project_id` da
+resposta do Secure Token com `FIREBASE_PROJECT_ID`. O campo é o *project
+number* — `obterIdToken()` lançaria `PROJETO_DIVERGENTE` em **toda** chamada, e
+o adaptador nunca teria token. A correção foi incorporada por **merge
+explícito**, sem reimplementação manual:
+
+* ref remota que a contém: `origin/correcao/credencial-motor-secure-token-v2` @
+  `deed131f7f880cee3c86d1c7c12f184d459b5e08` (a outra é
+  `origin/integracao/credencial-motor-v2-auditoria-uuid-v1` @
+  `c8ab95c427cfb66d3cd6d6c991a3ff617b45a637`, que a contém *e mais coisa*);
+* **ancestralidade provada**: `merge-base(85d0eee, deed131) == 85d0eee` — linear;
+* **escopo auditado**: dos doze módulos do bundle, só `credencial_motor` mudou.
+  O diff de código é exatamente três remoções — o código `PROJETO_DIVERGENTE`, a
+  exigência de `project_id` ser string em `RESPOSTA_INCOMPLETA`, e a comparação
+  em si. Todo o resto do diff é comentário. Nada de `aud`, `iss`, `sub`,
+  `user_id`, expiração, claim, HTTPS, host fixo, timeout, teto de resposta,
+  cache ou coalescência foi afrouxado;
+* merge **sem conflito**, e as duas pontas auditadas depois dele: `CRED-34b`
+  (reescrito por esta OS) e os catorze `CRED-18*` (trazidos por `deed131`)
+  coexistem, e nenhum módulo da OS 2 foi perdido.
+
+`credencial_motor` agora é **byte a byte idêntico a `deed131`** — sem nenhuma
+adaptação. Isso só foi possível porque `admissao_vip` já morava *antes* dela no
+registro (ver abaixo); tivesse sido inserido depois, o merge teria exigido
+costura na fronteira do módulo.
 
 ### O módulo novo mora ANTES da credencial, e isso não é estético
 
@@ -167,10 +210,29 @@ Retomada de assento continua **não existindo**, e esta OS não a inventou.
 
 ## Testes
 
-`test/admissao_vip.test.js` — 48 provas em cinco eixos (`END`, `CTR`, `FAL`,
-`VOO`, `FIO`). Baseline integral da composição: **318/318**.
+`test/admissao_vip.test.js` — 50 provas em cinco eixos (`END`, `CTR`, `FAL`,
+`VOO`, `FIO`). Baseline integral da composição: **333/333**.
 
-### Provas negativas (§13)
+Por suíte: `credencial_motor` 60 · `admissao_vip` 50 · `gate_vip` 42 ·
+`produtor` 39 · `ws_auth` 34 · `versao` 24 · `espectador` 23 · `auth_token` 18 ·
+`costura` 16 · `regressao` 14 · `regressao_auth` 12 · `ws` 1.
+
+### A cadeia composta, medida de ponta a ponta
+
+`CRED-18*` (de `deed131`) prova que a **credencial sozinha** aceita o envelope
+com `project_id` numérico. O que ninguém media era a **cadeia** que esta OS
+criou. Dois casos novos fecham isso:
+
+* **`FIO-16`** — envelope numérico → `interpretarResposta` → `conferirSanidade`
+  → `obterIdToken()` → adaptador → gate → **assento ocupado**. Sob `85d0eee` a
+  cadeia morreria no primeiro passo, e o sintoma no fio ("entrada recusada")
+  seria indistinguível de uma negativa comercial legítima;
+* **`FIO-17`** — o contrapeso: um envelope impecável com token de **outro
+  projeto** continua recusado, por `aud`/`iss`, e o backend não é nem
+  perguntado. Sem ele, "aceita `project_id` numérico" seria indistinguível de
+  "parou de conferir projeto".
+
+### Provas negativas (§13, mais a regressão da correção)
 
 | # | Defeito injetado | Detectado | Quem pegou |
 | - | --- | --- | --- |
@@ -181,6 +243,11 @@ Retomada de assento continua **não existindo**, e esta OS não a inventou.
 | 5 | token aparecendo em log | sim (1) | `FIO-10` |
 | 6 | `{ok:true}` sem `admissaoId` aceito | sim (2) | `CTR-05`, `FAL: admissaoId vazio` |
 | 7 | voos de tentativas diferentes compartilhados | sim (7) | `VOO-02/03/04`, `FIO-02/04/05` |
+| 8 | **restaura a comparação defeituosa do `project_id`** | sim (35) | `FIO-16`, `FIO-17`, `CRED-18/18b/18e`, `CRED-01/07/08/09`, … |
+
+A oitava é a regressão da própria correção incorporada: reintroduzir
+`json.project_id !== esperado.projectId` derruba 35 casos, e entre eles os dois
+que medem a cadeia. A correção não pode voltar atrás em silêncio.
 
 **A prova 1 não foi detectada na primeira rodada, e isso valeu um teste novo.**
 O ramo de promessa rejeitada do gate nunca era percorrido: o adaptador real
@@ -214,23 +281,21 @@ Firebase. Sem deploy, sem PR, sem merge em branch protegida. `main` intocada.
 
 ## Riscos residuais
 
-1. **A folha B está atrás de uma correção que já existe.** `deed131`
-   (`correcao/credencial-motor-secure-token-v2`) é descendente linear de
-   `85d0eee` e traz `fix(credencial): o envelope do Secure Token nao decide
-   projeto`: em `85d0eee`, `interpretarResposta` compara `json.project_id` com
-   `FIREBASE_PROJECT_ID`, e a homologação mediu que aquele campo vem com o
-   **número** do projeto — logo `obterIdToken()` lançaria `PROJETO_DIVERGENTE`
-   em **toda** chamada real. A OS fixa `85d0eee` três vezes e manda não recriar,
-   então foi ele o composto. Consequência prática hoje: nenhuma, porque nada é
-   ativado e a entrada VIP falha fechada de qualquer forma. Consequência na
-   ativação: o adaptador nunca obteria token. Remediação: mesclar `deed131` — é
-   descendente de B, então o merge é trivial e sem conflito.
+1. ~~**A folha B está atrás de uma correção que já existe.**~~ **RESOLVIDO.**
+   `deed131` foi incorporado por merge explícito (ver acima). `credencial_motor`
+   é byte a byte idêntico à correção homologada, `PROJETO_DIVERGENTE` não existe
+   mais em lugar nenhum do código, e a regressão está travada pela oitava prova
+   negativa.
 2. **Falso positivo intermitente na suíte do espectador.** Um id de carta
    (`c432`) colide por substring com um `eventoId` aleatório e derruba a
    varredura de vazamento. Já diagnosticado e corrigido em
    `correcao/teste-espectador-uuid-falso-positivo-v1` @ `fd99260` — terceira
-   folha irmã de `7e7572b`, que nem A nem B contêm, e que esta OS não podia
-   trazer. Reproduziu uma vez em ~15 execuções.
+   folha irmã de `7e7572b`, que nenhuma das entradas contém. Reproduziu **uma
+   vez em 16 execuções** da suíte integral, e não voltou nas 15 seguintes.
+   Observação para a próxima composição: `c8ab95c`
+   (`integracao/credencial-motor-v2-auditoria-uuid-v1`) contém `deed131` **e**
+   essa correção — mesclá-lo fecharia este risco junto, mas traz mais do que a
+   correção pedida aqui, então não foi feito por conta própria.
 3. **O ramo de rejeição do despachante segue sem caminho de produção.**
    `concluirPortaDeMesa` trata rejeição, mas nem o gate nem o adaptador rejeitam
    hoje. `FAL-15` prova que a rejeição não escreve assento e que o tratador

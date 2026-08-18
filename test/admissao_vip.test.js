@@ -819,6 +819,157 @@ describe("ADM/FIO — fim a fim, e quem não passa por aqui", () => {
     assert.equal(srv.ger.categoriaDaSala(codigo), "vip_ranqueada", "e continua disponível pela sala");
   });
 
+  test("FIO-16: `project_id` NUMÉRICO atravessa a cadeia inteira e senta o jogador", async () => {
+    // A CORREÇÃO `deed131`, MEDIDA NA COMPOSIÇÃO — e não só na credencial.
+    //
+    // `CRED-18*` prova que a credencial sozinha aceita o envelope com
+    // `project_id` numérico. O que ninguém media é o que esta OS criou: a
+    // CADEIA. Envelope numérico → `interpretarResposta` → `conferirSanidade` →
+    // `obterIdToken()` → adaptador → gate → assento ocupado.
+    //
+    // Com a V1 da credencial (`85d0eee`), `interpretarResposta` lançaria
+    // `PROJETO_DIVERGENTE` neste exato ponto, o adaptador nunca teria token,
+    // nenhuma pergunta chegaria ao backend, e a entrada VIP falharia fechada
+    // PARA SEMPRE — em produção, e só na ativação. É a diferença entre
+    // "recusado porque o backend disse não" e "recusado porque o servidor não
+    // consegue provar quem é", e as duas se pareciam no fio.
+    const credencialModulo = bundle.require("credencial_motor");
+    const { CLAIM } = credencialModulo;
+
+    const UID_MOTOR = "uid-motor-de-partidas";
+    const PROJETO_TEXTUAL = "buraco-master-vip-teste";
+    const NUMERO_DO_PROJETO = "1234567890"; // o *project number*, que é o que o endpoint devolve
+    const T = Date.UTC(2026, 7, 17, 12, 0, 0);
+
+    const b64 = (v) => Buffer.from(v).toString("base64")
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const idToken = [
+      b64(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "k1" })),
+      b64(JSON.stringify({
+        sub: UID_MOTOR,
+        aud: PROJETO_TEXTUAL,                                        // prende o projeto,
+        iss: "https://securetoken.google.com/" + PROJETO_TEXTUAL,    // e prende de novo
+        iat: Math.floor(T / 1000),
+        exp: Math.floor((T + 3600 * 1000) / 1000),
+        [CLAIM]: true,
+      })),
+      b64("assinatura-de-mentira"),
+    ].join(".");
+
+    // A credencial CANÔNICA, com o transporte do Secure Token injetado devolvendo
+    // exatamente o envelope que a homologação mediu: `project_id` NUMÉRICO.
+    const credencial = credencialModulo.criarCredencialDoMotor({
+      env: {
+        FIREBASE_MOTOR_REFRESH_TOKEN: "refresh-de-teste",
+        FIREBASE_MOTOR_UID: UID_MOTOR,
+        FIREBASE_PROJECT_ID: PROJETO_TEXTUAL,   // textual, e DIFERENTE do envelope
+        FIREBASE_WEB_API_KEY: "api-key-de-teste",
+      },
+      agora: () => T,
+      pedirToken: async () => ({
+        status: 200,
+        corpo: JSON.stringify({
+          access_token: "acc", expires_in: "3600", token_type: "Bearer",
+          refresh_token: "refresh-de-teste", id_token: idToken,
+          user_id: UID_MOTOR,
+          project_id: NUMERO_DO_PROJETO,        // <- o campo que a V1 comparava
+        }),
+      }),
+    });
+
+    // 1. A credencial entrega o token, sem PROJETO_DIVERGENTE.
+    let erro = null;
+    let token = null;
+    try {
+      token = await credencial.obterIdToken();
+    } catch (e) {
+      erro = e;
+    }
+    assert.equal(erro, null,
+      "a credencial não pode recusar por causa do envelope: " + (erro && erro.codigo));
+    assert.equal(token, idToken);
+    assert.ok(!("PROJETO_DIVERGENTE" in credencialModulo.FALHA),
+      "o código da comparação removida não existe mais");
+
+    // 2. A cadeia inteira: adaptador com ESSA credencial, gate, e o assento.
+    const chamadas = [];
+    const autorizar = criarAdaptadorAdmissaoVip({
+      url: URL_OK,
+      credencial,
+      pedir: (args) => { chamadas.push(args); return Promise.resolve(respostaOk("adm-cadeia")); },
+    });
+    const srv = novoServidor({ categoriaCompetitiva: "vip_ranqueada", autorizarEntradaVip: autorizar });
+    const c = await cliente(srv, "uid-jogador");
+    await envia(srv, c, { tipo: "criarMesa", apelido: "Dono" });
+
+    assert.equal(c.ultimo("erro"), null, "nenhuma recusa na cadeia");
+    const entrou = c.ultimo("entrou");
+    assert.ok(entrou, "o jogador sentou");
+    assert.equal(chamadas.length, 1, "o backend foi perguntado — logo houve token");
+    assert.equal(chamadas[0].idToken, idToken, "e o token que viajou é o do envelope numérico");
+    assert.equal(srv.ger.salas[entrou.codigo].assentos[0].admissaoId, "adm-cadeia");
+  });
+
+  test("FIO-17: o que ficou de pé prendendo o projeto é o TOKEN, não o envelope", async () => {
+    // O contrapeso de FIO-16, e a razão de a remoção não ter afrouxado nada:
+    // um envelope impecável com token de OUTRO projeto continua recusado, e a
+    // recusa vem de `aud`/`iss` — que estão dentro do token, que é a metade
+    // criptográfica. Sem esta prova, "aceita project_id numérico" seria
+    // indistinguível de "parou de conferir projeto".
+    const credencialModulo = bundle.require("credencial_motor");
+    const { CLAIM, FALHA: F } = credencialModulo;
+    const UID_MOTOR = "uid-motor-de-partidas";
+    const T = Date.UTC(2026, 7, 17, 12, 0, 0);
+    const b64 = (v) => Buffer.from(v).toString("base64")
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+    const tokenDeOutroProjeto = [
+      b64(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "k1" })),
+      b64(JSON.stringify({
+        sub: UID_MOTOR,
+        aud: "projeto-de-outra-pessoa",
+        iss: "https://securetoken.google.com/projeto-de-outra-pessoa",
+        iat: Math.floor(T / 1000), exp: Math.floor((T + 3600 * 1000) / 1000),
+        [CLAIM]: true,
+      })),
+      b64("assinatura-de-mentira"),
+    ].join(".");
+
+    const credencial = credencialModulo.criarCredencialDoMotor({
+      env: {
+        FIREBASE_MOTOR_REFRESH_TOKEN: "r", FIREBASE_MOTOR_UID: UID_MOTOR,
+        FIREBASE_PROJECT_ID: "buraco-master-vip-teste", FIREBASE_WEB_API_KEY: "k",
+      },
+      agora: () => T,
+      pedirToken: async () => ({
+        status: 200,
+        corpo: JSON.stringify({
+          access_token: "acc", expires_in: "3600", token_type: "Bearer",
+          refresh_token: "r", id_token: tokenDeOutroProjeto,
+          user_id: UID_MOTOR, project_id: "1234567890", // envelope impecável
+        }),
+      }),
+    });
+
+    let codigo = null;
+    try { await credencial.obterIdToken(); } catch (e) { codigo = e.codigo; }
+    assert.ok(codigo === F.AUDIENCE_INVALIDO || codigo === F.ISSUER_INVALIDO,
+      "quem prende o projeto é o token: esperava aud/iss, veio " + codigo);
+
+    // E na cadeia: sem credencial, o backend não é nem perguntado.
+    const chamadas = [];
+    const autorizar = criarAdaptadorAdmissaoVip({
+      url: URL_OK, credencial,
+      pedir: (a) => { chamadas.push(a); return Promise.resolve(respostaOk()); },
+    });
+    const srv = novoServidor({ categoriaCompetitiva: "vip_ranqueada", autorizarEntradaVip: autorizar });
+    const c = await cliente(srv, "uid-jogador");
+    await envia(srv, c, { tipo: "criarMesa", apelido: "A" });
+    assert.equal(c.ultimo("erro").codigo, RECUSA_VIP_INDISPONIVEL);
+    assert.equal(chamadas.length, 0, "não se pergunta ao backend com credencial de outro projeto");
+    assert.deepEqual(Object.keys(srv.ger.salas), []);
+  });
+
   test("FIO-14: a composição preserva as duas folhas", () => {
     // §12.1. As duas entregas continuam de pé e continuam separadas: o gate
     // com a sua enumeração e o seu ponto único, a credencial com a sua API.
