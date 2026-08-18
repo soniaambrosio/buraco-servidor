@@ -14,10 +14,17 @@ dependência nova, **sem** chave de conta de serviço e **sem** login interativo
 | | |
 |---|---|
 | Repositório | `soniaambrosio/buraco-servidor` |
-| Branch | `claude/credencial-renovavel-motor-railway-v1` |
-| Base | `claude/versionamento-visao-autoritativa-v1` |
-| SHA da base | `7e7572b3471bcec2a6968e6084f56dd407cef601` |
+| Branch | `correcao/credencial-motor-secure-token-v2` |
+| Base | `claude/credencial-renovavel-motor-railway-v1` |
+| SHA da base | `85d0eee5286fd1deba5c2ae85176b76e714e6690` |
 | Metade administrativa | `functions/scripts/bootstrap_credencial_motor.js`, no repo do app |
+
+> **V2 — o contrato do Secure Token foi corrigido.** A homologação independente
+> mediu o campo `project_id` da resposta do endpoint: vem o **número do projeto**,
+> não o id textual. A V1 o comparava com `FIREBASE_PROJECT_ID` e recusava na
+> divergência — o Railway **nunca** obteria token, para sempre, e o defeito só
+> apareceria na ativação. A comparação foi **removida**, e não substituída por
+> outra. Ver §3, decisão **6**.
 
 ---
 
@@ -70,12 +77,12 @@ const cred = criarCredencialDoMotor();
 const idToken = await cred.obterIdToken();   // renova sozinho quando precisa
 ```
 
-### Cinco decisões
+### Seis decisões
 
-**1 — Fail closed.** Configuração faltando, resposta estranha, projeto ou UID
-divergente, claim ausente: tudo recusa. Não existe caminho degradado nem token
-"provisório". Um servidor que não consegue provar quem é simplesmente não fala
-com a Function.
+**1 — Fail closed.** Configuração faltando, resposta estranha, UID divergente,
+`aud`/`iss` de outro projeto, claim ausente: tudo recusa. Não existe caminho
+degradado nem token "provisório". Um servidor que não consegue provar quem é
+simplesmente não fala com a Function.
 
 **2 — Nada em disco, nada em log.** O ID token vive **só em memória**; o refresh
 token, na memória e no ambiente. Nenhum dos dois entra em log, mensagem de erro
@@ -96,6 +103,84 @@ e não deve ser: quem tem autoridade sobre este token é a Function que o recebe
 Verificação criptográfica paralela criaria uma segunda opinião sobre um token que
 não é nosso para julgar. O **parser é o mesmo** de `auth_firebase` — um só
 analisador de JWT no bundle, para os dois não divergirem.
+
+**6 — `project_id` do envelope não é o Project ID, e não é autoridade.** *(V2 — a
+correção.)*
+
+A V1 comparava `json.project_id` da resposta do Secure Token com
+`FIREBASE_PROJECT_ID`. A homologação independente mediu o campo contra o endpoint:
+
+```text
+FIREBASE_PROJECT_ID esperado ... "bmv-homolog"
+resposta.project_id ............ "12345"         ← número do projeto, não o id
+resposta.user_id ............... == uid          (correto)
+payload.aud .................... "bmv-homolog"   ← o id textual está AQUI
+payload.iss .................... "https://securetoken.google.com/bmv-homolog"
+```
+
+Com a comparação de pé, `obterIdToken()` lançaria `PROJETO_DIVERGENTE` em **toda**
+chamada. Falha fechada — sem risco de segurança — e sem funcionar: o Railway
+nunca obteria token, e ninguém descobriria antes da ativação.
+
+**A comparação foi removida, e não trocada por uma equivalente contra o número.**
+Ela nunca acrescentou segurança:
+
+| Quem guarda o quê | Onde |
+|---|---|
+| O projeto do refresh token bate com a API key | **o próprio endpoint** valida, e um par incompatível volta como erro HTTP — que já recusa aqui (`CRED-18m`) |
+| A **identidade** | `user_id` do envelope, conferido (`CRED-18i`) |
+| O **projeto textual** | `aud` e `iss` do ID token, conferidos (`CRED-18f`, `CRED-18g`) |
+
+Um envelope pode dizer qualquer coisa; o token, não — `aud` e `iss` vêm assinados
+dentro dele, e são exatamente os campos que a Function verifica do outro lado.
+Guardar o projeto pelo envelope era guardar pela metade mais fraca.
+
+O campo passou a ser **informativo**: não é comparado, **não é exigido**, e a sua
+forma — texto, número em texto, número JSON ou ausência — não decide nada
+(`CRED-18b`, `CRED-18c`, `CRED-18d`). Exigir a forma de um dado que não decide
+nada seria só mais um jeito de a credencial inteira falhar fechada por causa de um
+campo que o servidor não lê.
+
+**Não existe mais o código `PROJETO_DIVERGENTE`.** `CRED-18e` é a rede
+estrutural: ela reprova se a comparação voltar, inclusive escrita com outro nome
+de falha.
+
+### O que a correção NÃO afrouxou
+
+A remoção de uma barreira frouxa só é segura porque as fortes estão medidas.
+Todas continuam de pé, e o bloco `CRED/CONTRATO` as fixa **uma a uma**:
+
+| Barreira | Caso | Continua |
+|---|---|---|
+| `aud === FIREBASE_PROJECT_ID` | `CRED-18f` | ✅ recusa |
+| `iss === https://securetoken.google.com/<id>` | `CRED-18g` | ✅ recusa |
+| `sub === FIREBASE_MOTOR_UID` | `CRED-18h` | ✅ recusa |
+| `user_id === FIREBASE_MOTOR_UID` | `CRED-18i` | ✅ recusa |
+| `motorDePartidas === true`, estrito | `CRED-18j` | ✅ recusa 12 formas |
+| Expiração | `CRED-18k` | ✅ recusa |
+| Resposta sem ID token | `CRED-18l` | ✅ recusa |
+| Erro do endpoint (par projeto × chave) | `CRED-18m` | ✅ recusa, sem ecoar o corpo |
+| Nada vazado em falha | `CRED-18n` | ✅ 8 cenários |
+
+HTTPS, host fixo, timeout, teto de resposta, cache com margem e coalescência:
+**intocados**.
+
+### A fixture que afirmava a suposição
+
+A suíte da V1 não pegava o defeito porque `respostaOk()` codificava
+`project_id: PROJETO` — ela **afirmava** a suposição do módulo em vez de testá-la.
+A fixture da V2 carrega a forma **medida** (`"1234567890"`), e nenhum caso depende
+de ela coincidir com `FIREBASE_PROJECT_ID`.
+
+### O que continua sem prova
+
+`aud`, `iss`, `sub` e a assinatura RS256 com `kid` são verificados **pela
+Function** que recebe o token, via Admin SDK, com `checkRevoked`. Este módulo faz
+sanidade local e **não** verifica assinatura, de propósito (decisão 5). A junta
+entre os dois lados **nunca foi exercitada**: o emulador de Auth emite token
+`alg: none`, e um token assinado à mão mediria o nosso arnês, não o contrato do
+Google. O **smoke com token real** continua obrigatório — está escrito em
+`docs/CREDENCIAL-MOTOR-BOOTSTRAP-E-REVOGACAO-V1.md` §7.1, no repositório do app.
 
 ## 4. Momento exato da renovação
 
@@ -159,11 +244,15 @@ para o Railway.
 
 ## 8. Testes
 
-| Suíte | Casos | Resultado |
-|---|---|---|
-| `credencial_motor` (nova) | 47 | ✅ |
-| regressão do servidor (as 10 anteriores) | 181 | ✅ |
-| **total** | **228** | **✅** |
+| Suíte | V1 | V2 | Resultado |
+|---|---|---|---|
+| `credencial_motor` | 47 | **60** | ✅ |
+| regressão do servidor (as 10 anteriores) | 181 | 181 | ✅ |
+| **total** | **228** | **241** | **✅** |
+
+A V2 acrescenta **14** casos (o bloco `CRED/CONTRATO`) e remove **1**: o antigo
+`CRED-18`, "project_id divergente é recusado", que afirmava um contrato
+inexistente. Nenhum outro caso da V1 mudou de veredito.
 
 ```bash
 npm test
@@ -218,3 +307,10 @@ entrega de credencial.
    aparecerá na OS seguinte.
 5. **O bundle continua sendo editado à mão.** A fonte `cliente/` segue ausente;
    a exceção está documentada no cabeçalho, como nas quatro anteriores.
+6. **O contrato do envelope só foi medido no emulador.** *(V2.)* Que
+   `project_id` é o número do projeto foi medido contra o Secure Token do
+   emulador e é o que a documentação do fluxo de refresh sugere
+   (`PROJECT_NUMBER_MISMATCH`); contra o endpoint **real** ninguém mediu, porque
+   nenhuma chamada real é autorizada. A correção é imune a isso — o campo deixou
+   de decidir qualquer coisa, em **qualquer** forma —, mas o que prova o contrato
+   inteiro continua sendo o smoke com token real, não este documento.
