@@ -7004,6 +7004,42 @@ function bearerDoCabecalho(valor) {
   return m ? m[1] : null;
 }
 
+// [SHA] PROVA DO COMMIT IMPLANTADO — somente leitura, e derivada do BUILD.
+//
+// A pergunta que isto responde e "qual commit esta rodando agora?", e ela nao
+// tinha resposta: `/health` devolvia "ok" seco. Sem isso, toda pre-checagem de
+// janela operacional depende de alguem AFIRMAR o que implantou.
+//
+// DECISAO 1 — SO VARIAVEL INJETADA PELA PLATAFORMA. A lista e fechada e so tem
+// nomes que o Railway (e o Cloud Run) preenchem sozinhos a partir do commit
+// implantado. NAO existe fallback que o operador digite: uma variavel escrita a
+// mao provaria o que alguem escreveu, e nao o que foi implantado — que e
+// exatamente o engano que este endpoint existe para impedir.
+//
+// DECISAO 2 — FORMA VALIDADA, NUNCA ECO. So passa o que tem forma de SHA de git
+// (7 a 40 hexadecimais). Qualquer outra coisa vira `null`, e nao texto
+// devolvido: a rota e publica, e ecoar ambiente e como se vaza segredo sem
+// querer.
+//
+// DECISAO 3 — O CLIENTE NAO ESCOLHE NADA. `corpoDaVersao` le o ambiente e mais
+// nada; nenhum campo vem do pedido. Nao ha cabecalho, query ou corpo que mude a
+// resposta.
+const FONTES_DE_SHA = ["RAILWAY_GIT_COMMIT_SHA", "SOURCE_VERSION", "GIT_COMMIT_SHA"];
+
+/** O SHA implantado, ou `null`. Pura: recebe o ambiente, nao le `process`. */
+function shaImplantado(env) {
+  const fonte = env || {};
+  for (const nome of FONTES_DE_SHA) {
+    const v = fonte[nome];
+    if (typeof v === "string" && /^[0-9a-f]{7,40}$/.test(v)) return { sha: v, origem: nome };
+  }
+  return { sha: null, origem: null };
+}
+
+/** O corpo de `/versao`. Nada aqui vem do pedido. */
+function corpoDaVersao(env) {
+  return shaImplantado(env);
+}
 function iniciar(porta, opts = {}) {
   porta = porta || process.env.PORT || 8080;
   const PUBLIC_DIR = process.env.PUBLIC_DIR ? path.resolve(process.env.PUBLIC_DIR) : null;
@@ -7093,6 +7129,11 @@ function iniciar(porta, opts = {}) {
   }
 
   const http_server = http.createServer((req, res) => {
+    // [SHA] Somente leitura: sem segredo, sem eco do pedido, sem cache.
+    if (req.url === "/versao") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      return res.end(JSON.stringify(corpoDaVersao(process.env)));
+    }
     if (req.url === "/health" || req.url === "/healthz") {
       res.writeHead(200, { "content-type": "text/plain" }); return res.end("ok");
     }
@@ -7173,7 +7214,7 @@ function iniciar(porta, opts = {}) {
 
 if (require.main === module) iniciar();
 
-module.exports = { iniciar, encodeFrame, bearerDoCabecalho };
+module.exports = { iniciar, encodeFrame, bearerDoCabecalho, shaImplantado, corpoDaVersao, FONTES_DE_SHA };
 
   };
 
