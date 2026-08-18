@@ -66,6 +66,33 @@
 // Testes: `test/versao.test.js` (24 provas). Sem merge e sem deploy.
 // Ver docs/VERSIONAMENTO-VISAO-V1.md.
 // ===================================================================================
+// EXCEÇÃO DOCUMENTADA — GATE AUTORITATIVO DE ENTRADA VIP/RANQUEADA
+// (branch claude/gate-autoritativo-entrada-vip-ranqueada-v1)
+// Mesmo motivo das anteriores: a fonte `cliente/` continua ausente. O bundle foi
+// editado à mão para criar o instante — que não existia — em que o servidor
+// afirma, sem consultar o cliente, que UM UID AUTENTICADO está prestes a ocupar
+// UM ASSENTO numa partida VIP/Ranqueada. Trechos marcados com `// [GATE VIP]`:
+//   • módulo `salas`: `CATEGORIAS_COMPETITIVAS` (casual | vip_ranqueada — uma
+//     dimensão NOVA, ortogonal a `tipoPartida`, que segue com os mesmos três
+//     valores de topologia), `normalizarCategoria`, `novaTentativaEntradaId`,
+//     `assentoDoTitular` e o ponto único `avaliarAdmissaoAoAssento`; a porta
+//     `admitirNoAssento` do gerenciador, chamada pelos DOIS — e só dois —
+//     caminhos que sentam um humano (`criarMesa` no assento 0, `entrarMesa` nos
+//     demais), sempre antes da escrita no assento;
+//   • módulo `servidor`: `uidAutenticado` levado às duas portas de mesa e
+//     `erroDeAdmissao` (código estável, mensagem redigida). `assistirMesa` NÃO
+//     foi tocada: espectador não ocupa assento e não atravessa o gate;
+//   • módulo `ws_server`: a categoria do processo vem de CATEGORIA_COMPETITIVA,
+//     e nenhum adaptador de autorização é injetado.
+// FALHA FECHADA por decisão: sem adaptador, entrada em mesa `vip_ranqueada` é
+// recusada ANTES da ocupação do assento; categoria fora da enumeração não vira
+// casual, não admite ninguém. Nada é concedido, consumido ou cobrado — o passe
+// quinzenal, a assinatura e o Firestore não são tocados aqui, e não existe
+// bypass de desenvolvimento habilitado por padrão.
+// Salas `casual` — que é o que toda mesa é hoje — seguem idênticas.
+// Testes: `test/gate_vip.test.js`. Sem merge e sem deploy.
+// Ver docs/GATE-VIP-RANQUEADA-V1.md.
+// ===================================================================================
 (function () {
   var __cache = {};
   var __fabricas = {};
@@ -3808,6 +3835,242 @@ const TIPOS_VALIDOS_PARA_CONQUISTA = new Set(["publica", "privada"]);
 function novoPartidaId() {
   return crypto.randomUUID();
 }
+// ===========================================================================
+// [GATE VIP] CATEGORIA COMPETITIVA DA MESA E GATE AUTORITATIVO DE ADMISSAO
+//
+// O problema: o servidor sabia dizer QUE TIPO DE SALA e uma mesa (publica,
+// privada, simulada) e nao sabia dizer NADA sobre a natureza competitiva dela.
+// Nao existia instante em que o servidor pudesse afirmar, por conta propria,
+// "este UID autenticado esta prestes a ocupar um assento numa partida
+// VIP/Ranqueada" - e sem esse instante nao ha onde pendurar autorizacao,
+// consumo de passe, idempotencia ou recusa.
+//
+// DUAS DIMENSOES, NAO UMA. `tipoPartida` e TOPOLOGIA da sala (como se chega
+// nela); `categoriaCompetitiva` e NATUREZA COMPETITIVA (o que a partida vale).
+// Elas se cruzam, nao se substituem: uma mesa publica pode ser casual, e a
+// modalidade competitiva oficial e a VIP/Ranqueada. Enfiar `vip` dentro de
+// `TIPOS_DE_PARTIDA` colapsaria as duas e faria a topologia responder por uma
+// pergunta que ela nao sabe responder - por isso a enumeracao de topologia
+// permanece exatamente com os tres valores que sempre teve, e existe teste
+// estrutural que derruba a suite se `vip` aparecer la.
+//
+// NENHUM BOOLEANO PARALELO. Nao existe `isVip`, `ehVip` nem `mesaVip`. Um
+// booleano ao lado de uma enumeracao fechada e uma segunda autoridade: as duas
+// divergem no primeiro caminho que esquecer de atualizar uma delas, e a
+// divergencia aparece como mesa que cobra sem ser ranqueada (ou o contrario).
+// ===========================================================================
+
+/** Natureza competitiva da mesa. Enumeracao FECHADA.
+ *
+ *  `casual`         partida que nao vale ranking nem exige direito de entrada;
+ *  `vip_ranqueada`  a modalidade competitiva oficial, que exige admissao
+ *                   autorizada antes de alguem ocupar assento.
+ *
+ *  Combinacao comercial nova nao nasce aqui por acidente: acrescentar valor a
+ *  esta lista e edicao visivel, e a matriz de admissao precisa saber o que
+ *  fazer com ele - categoria que o gate nao reconhece NAO passa. */
+const CATEGORIAS_COMPETITIVAS = ["casual", "vip_ranqueada"];
+
+/** Padrao de quem nao declarou nada. E `casual` porque e a verdade da base:
+ *  toda mesa que existe hoje e casual, e nenhuma delas exige direito de
+ *  entrada. Silencio significa "a de sempre", nunca "a que cobra". */
+const CATEGORIA_PADRAO = "casual";
+
+/** Valor declarado que NAO esta na enumeracao. Nao e sinonimo de `casual` -
+ *  e o contrario disso.
+ *
+ *  `tipoPartida` resolve valor invalido para `simulada`, que e o conservador
+ *  DELE: uma partida que nao conta para conquista. Aqui o conservador e outro.
+ *  Rebaixar categoria desconhecida para `casual` transformaria erro de
+ *  configuracao em mesa aberta e gratuita - silenciosamente, e justamente na
+ *  dimensao que decide se alguem paga para entrar. Entao categoria
+ *  desconhecida nao vira casual e nao vira VIP: ela nao admite ninguem. */
+const CATEGORIA_DESCONHECIDA = "desconhecida";
+
+/** Codigos de recusa da admissao. Estaveis (o cliente pode ramificar neles) e
+ *  REDIGIDOS: nenhum deles conta quem e o jogador, qual e o direito que falta,
+ *  qual assento estava livre ou por que o adaptador respondeu o que respondeu. */
+const RECUSA_VIP_INDISPONIVEL = "ADMISSAO_VIP_INDISPONIVEL";
+const RECUSA_CATEGORIA_DESCONHECIDA = "ADMISSAO_CATEGORIA_DESCONHECIDA";
+
+/** Mensagem unica das recusas de admissao. Uma so, de proposito: mensagens
+ *  diferentes por motivo viram oraculo - quem tentar entrar varias vezes le nas
+ *  diferencas o estado interno que o codigo de recusa nao conta. */
+const ERRO_ADMISSAO = "entrada indisponivel nesta mesa";
+
+/** Como a tentativa foi CLASSIFICADA. Nao e o veredito (isso e `ok`): e o que
+ *  a tentativa E, e sobrevive a recusa.
+ *
+ *  A distincao existe agora porque ela e cara de acrescentar depois: quando o
+ *  consumo de passe existir, reconexao ao proprio assento NAO pode consumir um
+ *  segundo direito, e a unica forma de garantir isso e a admissao ja ter
+ *  chegado ao adaptador dizendo o que ela e. Nesta OS a classificacao nao muda
+ *  o veredito de sala VIP (que falha fechada dos dois jeitos) - ela existe para
+ *  que ninguem precise adivinhar depois. */
+const ADMISSAO_NOVA = "admissao_nova";
+const ADMISSAO_RECONEXAO = "reconexao_ao_proprio_assento";
+
+/** Prefixo do identificador de tentativa de entrada.
+ *
+ *  Existe por UM motivo: `tentativaEntradaId` e `eventoId` sao os dois
+ *  identificadores opacos que circulam por aqui, os dois sao UUID, e troca-los
+ *  um pelo outro seria um erro silencioso - o de versao da visao viraria chave
+ *  de idempotencia de consumo, e um reenvio de estado passaria por tentativa
+ *  nova de entrada. Com o prefixo, a troca e DETECTAVEL: `eventoId` nunca
+ *  comeca com ele, e ha teste que afirma isso nos dois sentidos. */
+const PREFIXO_TENTATIVA = "te_";
+
+/** Resolve a categoria a partir da CONFIGURACAO. Tres respostas, e so tres:
+ *  ausente vira o padrao, valor da enumeracao vira ele mesmo, e qualquer outra
+ *  coisa vira `desconhecida` - que nao admite ninguem. */
+function normalizarCategoria(valor) {
+  if (valor === undefined || valor === null) return CATEGORIA_PADRAO;
+  return CATEGORIAS_COMPETITIVAS.includes(valor) ? valor : CATEGORIA_DESCONHECIDA;
+}
+
+/** Identidade OPACA de UMA tentativa de confirmacao de assento.
+ *
+ *  Sorteada, nunca calculada: nao deriva de uid, de codigo de sala, de assento
+ *  nem de horario. Derivar de qualquer um deles faria o identificador carregar
+ *  o dado por dentro - e um identificador que se pode ler deixa de ser opaco no
+ *  dia em que alguem o loga, o guarda ou o manda para um terceiro.
+ *
+ *  E por tentativa, nao por jogador nem por partida: duas tentativas do mesmo
+ *  uid na mesma sala tem ids diferentes. E isso que a torna utilizavel como
+ *  chave de idempotencia quando o consumo existir - e e por isso que ela NAO
+ *  significa, hoje, que algo foi concedido ou consumido. Ela nomeia a
+ *  tentativa; o efeito dela e outra coisa, e essa outra coisa nao existe. */
+function novaTentativaEntradaId() {
+  return PREFIXO_TENTATIVA + crypto.randomUUID();
+}
+
+/** Forma esperada de um `tentativaEntradaId` cunhado por este servidor. */
+function ehTentativaEntradaId(v) {
+  return typeof v === "string" && v.startsWith(PREFIXO_TENTATIVA) && v.length > PREFIXO_TENTATIVA.length;
+}
+
+/** Assento que o titular `jogadorId` ja ocupa nesta sala; -1 se nenhum.
+ *
+ *  E daqui - e so daqui - que sai a classificacao de reconexao. O cliente nao
+ *  declara que esta reconectando: o servidor OLHA quem ja esta sentado. Um
+ *  campo `reconexao` vindo no payload seria exatamente o botao de "nao me
+ *  cobre de novo" que a proxima OS nao pode oferecer a ninguem. */
+function assentoDoTitular(sala, jogadorId) {
+  if (!sala || jogadorId == null || jogadorId === "") return -1;
+  const alvo = String(jogadorId);
+  for (let i = 0; i < 4; i++) {
+    const a = sala.assentos[i];
+    if (a && a.tipo === "humano" && a.jogadorId != null && String(a.jogadorId) === alvo) return i;
+  }
+  return -1;
+}
+
+/** PONTO UNICO DE ADMISSAO AO ASSENTO.
+ *
+ *  Responde UMA pergunta: "esta ocupacao de assento pode prosseguir?". Roda
+ *  depois da autenticacao e ANTES de o jogador ser gravado no assento - nunca
+ *  ao abrir lobby, tocar em botao, consultar sala ou entrar para assistir.
+ *  Espectador nao passa por aqui porque espectador nao ocupa assento, e o
+ *  caminho de `assistirMesa` nao chama esta funcao.
+ *
+ *  O SUJEITO E O `uid` AUTENTICADO. Nao e apelido, nao e publicId, nao e
+ *  `jogadorId` declarado em mensagem: e o valor que `vincularIdentidade`
+ *  gravou a partir do `sub` do token verificado, e que e imutavel na conexao.
+ *  Nenhum campo deste contrato pode ser preenchido com dado escolhido pelo
+ *  cliente - `categoriaCompetitiva` vem da configuracao do processo,
+ *  `tentativaEntradaId` e cunhado aqui dentro do servidor, `assento` e o que o
+ *  gerenciador concedeu e `reconexao` e derivada de quem ja esta sentado.
+ *
+ *  FALHA FECHADA em todo caminho que nao seja explicitamente permitido:
+ *
+ *    categoria fora da enumeracao   ->  recusa (nao vira casual)
+ *    tentativa sem id do servidor   ->  recusa
+ *    vip_ranqueada sem uid          ->  recusa
+ *    vip_ranqueada sem adaptador    ->  recusa   <- o estado de HOJE
+ *    vip_ranqueada, adaptador != ok ->  recusa
+ *    casual                         ->  segue, exatamente como antes
+ *
+ *  `casual` nao exige uid de proposito: e o comportamento preexistente da mesa,
+ *  e esta OS nao pode muda-lo. A exigencia de identidade e da mesa que cobra.
+ *
+ *  `portas.autorizarEntradaVip` e A PORTA - unica - do adaptador autoritativo
+ *  da proxima OS. Ausente por padrao, e ausente significa recusa: nao existe
+ *  liberacao automatica enquanto nao houver quem autorize, e nao existe bypass
+ *  de desenvolvimento ligado sozinho. So `{ ok: true }` aprova; resposta
+ *  truthy qualquer, `undefined` ou excecao recusam.
+ *
+ *  A DECISAO NAO E O PAYLOAD. Ela carrega classificacao e categoria para quem
+ *  chamou; o que chega ao cliente e so a mensagem redigida e o codigo estavel. */
+function avaliarAdmissaoAoAssento({
+  uidAutenticado,
+  codigoDaSala,
+  identidadeDaPartida,
+  assento,
+  categoriaCompetitiva,
+  tentativaEntradaId,
+  reconexao,
+} = {}, portas = {}) {
+  // Classificacao PRIMEIRO, e fora de qualquer ramo de veredito: ela descreve a
+  // tentativa, e tem de estar certa inclusive quando a resposta e "nao".
+  // `=== true` estrito porque valor truthy vindo de lugar nenhum nao pode
+  // promover uma entrada nova a reconexao.
+  const classificacao = reconexao === true ? ADMISSAO_RECONEXAO : ADMISSAO_NOVA;
+
+  const decisao = (extra) => Object.freeze(Object.assign({
+    categoriaCompetitiva,
+    classificacao,
+    tentativaEntradaId,
+    assento,
+    codigoDaSala,
+    identidadeDaPartida: identidadeDaPartida == null ? null : identidadeDaPartida,
+  }, extra));
+
+  const recusa = (codigoRecusa) => decisao({ ok: false, codigoRecusa, erro: ERRO_ADMISSAO });
+
+  if (!CATEGORIAS_COMPETITIVAS.includes(categoriaCompetitiva)) {
+    return recusa(RECUSA_CATEGORIA_DESCONHECIDA);
+  }
+
+  // Um id que nao foi cunhado por `novaTentativaEntradaId` nao identifica
+  // tentativa nenhuma. Recusar aqui fecha, de graca, o caminho em que alguem um
+  // dia deixe o valor chegar de fora.
+  if (!ehTentativaEntradaId(tentativaEntradaId)) {
+    return recusa(RECUSA_VIP_INDISPONIVEL);
+  }
+
+  if (categoriaCompetitiva === "casual") {
+    return decisao({ ok: true, codigoRecusa: null, erro: null });
+  }
+
+  // Daqui para baixo e `vip_ranqueada`.
+  if (typeof uidAutenticado !== "string" || uidAutenticado === "") {
+    return recusa(RECUSA_VIP_INDISPONIVEL);
+  }
+
+  const autorizar = portas && typeof portas.autorizarEntradaVip === "function"
+    ? portas.autorizarEntradaVip
+    : null;
+  if (!autorizar) return recusa(RECUSA_VIP_INDISPONIVEL);
+
+  let resposta = null;
+  try {
+    resposta = autorizar({
+      uidAutenticado,
+      codigoDaSala,
+      identidadeDaPartida: identidadeDaPartida == null ? null : identidadeDaPartida,
+      assento,
+      categoriaCompetitiva,
+      tentativaEntradaId,
+      classificacao,
+    });
+  } catch (e) {
+    console.error("[gate-vip] adaptador de admissao falhou · mesa=" + codigoDaSala +
+      " classificacao=" + classificacao + " erro=" + (e && e.message));
+    return recusa(RECUSA_VIP_INDISPONIVEL);
+  }
+  if (!resposta || resposta.ok !== true) return recusa(RECUSA_VIP_INDISPONIVEL);
+  return decisao({ ok: true, codigoRecusa: null, erro: null });
+}
 
 // ===========================================================================
 // [VERSAO] VERSIONAMENTO DA VISÃO AUTORITATIVA
@@ -4067,11 +4330,60 @@ function criarGerenciador(opts = {}) {
   const tipoPartida = TIPOS_DE_PARTIDA.includes(opts.tipoPartida)
     ? opts.tipoPartida
     : (opts.tipoPartida === undefined ? TIPO_PADRAO : "simulada");
+  // [GATE VIP] Natureza COMPETITIVA das mesas deste gerenciador. Mora aqui, na
+  // CONSTRUCAO, pela mesma razao que `tipoPartida` mora: o despachante monta a
+  // chamada de `criarMesa` a partir de `msg`, e um campo que morasse la seria
+  // escolhivel pelo cliente. Aqui ele so pode vir de quem construiu o processo.
+  const categoriaCompetitiva = normalizarCategoria(opts.categoriaCompetitiva);
 
-  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
+  // [GATE VIP] A PORTA do adaptador autoritativo de admissao VIP. Ausente por
+  // padrao, e ausente RECUSA - nao existe liberacao automatica na falta de quem
+  // autorize, e nao existe bypass de desenvolvimento ligado sozinho. A proxima
+  // OS injeta o adaptador real por aqui; nada mais deste arquivo muda.
+  const autorizarEntradaVip = typeof opts.autorizarEntradaVip === "function"
+    ? opts.autorizarEntradaVip
+    : null;
+
+  /** [GATE VIP] O UNICO caminho pelo qual um assento e admitido.
+   *
+   *  Os dois - e sao dois - pontos que sentam um humano (`criarMesa` no assento
+   *  0 e `entrarMesa` nos demais) passam por aqui antes de escrever no assento.
+   *  Bot nao passa: bot nao tem uid, nao paga entrada e e o servidor que o
+   *  senta, em `iniciarPartida`. Espectador nao passa: nao ocupa assento.
+   *
+   *  A RECONEXAO E DERIVADA AQUI, olhando quem ja esta sentado - nunca de campo
+   *  de mensagem. Nesta OS ela nao altera o veredito (sala VIP falha fechada nos
+   *  dois casos); ela existe para que a proxima OS receba a tentativa ja
+   *  classificada e nao cobre um segundo passe de quem so caiu e voltou. */
+  function admitirNoAssento({ codigoDaSala, categoria, identidadeDaPartida, assento, jogadorId, uidAutenticado }) {
+    const sala = salas[codigoDaSala] || null;
+    const uid = typeof uidAutenticado === "string" && uidAutenticado !== "" ? uidAutenticado : null;
+    return avaliarAdmissaoAoAssento({
+      uidAutenticado: uid,
+      codigoDaSala,
+      identidadeDaPartida: identidadeDaPartida == null ? null : identidadeDaPartida,
+      assento,
+      categoriaCompetitiva: categoria,
+      // Cunhado AQUI, no servidor, uma vez por tentativa. Nao ha caminho pelo
+      // qual este valor chegue de fora: nenhum parametro de `criarMesa` ou
+      // `entrarMesa` o carrega, e o despachante nao o monta.
+      tentativaEntradaId: novaTentativaEntradaId(),
+      reconexao: assentoDoTitular(sala, jogadorId) !== -1,
+    }, { autorizarEntradaVip });
+  }
+
+  function criarMesa({ apelido = "Jogador", jogadorId = null, uidAutenticado = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
+    // [GATE VIP] Criar mesa E ocupar o assento 0. O gate roda ANTES de a sala
+    // existir: recusado, nao ha sala nova, nao ha assento ocupado e nao ha
+    // codigo em uso - sortear um codigo nao registra nada em `salas`.
+    const admissao = admitirNoAssento({
+      codigoDaSala: codigo, categoria: categoriaCompetitiva,
+      identidadeDaPartida: null, assento: 0, jogadorId, uidAutenticado,
+    });
+    if (!admissao.ok) return { erro: admissao.erro, codigoRecusa: admissao.codigoRecusa };
     salas[codigo] = {
       codigo, modalidade, metaPontos,
       aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
@@ -4085,6 +4397,12 @@ function criarGerenciador(opts = {}) {
       // [PRODUTOR] Identidade da partida: só existe depois de `iniciarPartida`.
       // A sala existe antes e sobrevive depois; a partida, não.
       tipoPartida,
+      // [GATE VIP] Natureza competitiva desta mesa. Congelada logo abaixo: e a
+      // mesma da vida inteira da sala, inclusive nas revanches, porque quem
+      // entrou numa mesa casual nao pode se ver numa ranqueada sem ter entrado
+      // nela. Entra na impressao do estado como qualquer campo autoritativo -
+      // sendo constante, nunca faz a versao andar sozinha.
+      categoriaCompetitiva,
       partidaId: null,
       participantes: null,
       envelopeEncerramento: null,
@@ -4102,10 +4420,17 @@ function criarGerenciador(opts = {}) {
       eventoId: null,
       impressaoEstado: null,
     };
+    // [GATE VIP] IMUTAVEL. Nao e zelo decorativo: sem isto, qualquer caminho que
+    // um dia receba a sala poderia rebaixar uma mesa ranqueada para casual (ou
+    // promover uma casual) no meio da partida, e a decisao de admissao que ja
+    // aconteceu ficaria valendo para uma mesa que nao existe mais.
+    Object.defineProperty(salas[codigo], "categoriaCompetitiva", {
+      value: categoriaCompetitiva, writable: false, configurable: false, enumerable: true,
+    });
     return { codigo, assento: 0 };
   }
 
-  function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
+  function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, uidAutenticado = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
     if (sala.iniciada) return { erro: "a partida já começou" };
@@ -4122,6 +4447,15 @@ function criarGerenciador(opts = {}) {
       for (const s of ORDEM) { if (sala.assentos[s] === null) { alvo = s; break; } }
     }
     if (alvo === -1) return { erro: "mesa cheia" };
+    // [GATE VIP] Ultima coisa antes da escrita no assento, e depois de o assento
+    // alvo ja estar decidido - o gate precisa saber QUAL assento seria ocupado.
+    // A categoria vem da SALA (congelada na criacao), nao do gerenciador: e a
+    // mesa que se esta entrando que manda, e ela nao muda de natureza.
+    const admissao = admitirNoAssento({
+      codigoDaSala: codigo, categoria: sala.categoriaCompetitiva,
+      identidadeDaPartida: sala.partidaId, assento: alvo, jogadorId, uidAutenticado,
+    });
+    if (!admissao.ok) return { erro: admissao.erro, codigoRecusa: admissao.codigoRecusa };
     sala.assentos[alvo] = { apelido, tipo: "humano", jogadorId };
     return { assento: alvo, codigo };
   }
@@ -4487,7 +4821,19 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox };
+  /** [GATE VIP] Natureza competitiva de UMA sala, para quem precisa dela fora
+   *  da admissao - o encerramento autoritativo inclusive. Leitura, so: a
+   *  propriedade e nao-gravavel na origem, e nao existe setter em lugar nenhum. */
+  function categoriaDaSala(codigo) {
+    const sala = salas[codigo];
+    return sala ? sala.categoriaCompetitiva : null;
+  }
+
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox,
+    // [GATE VIP] `categoriaConfigurada` e o que a CONFIGURACAO do processo
+    // resolveu para as mesas novas; `categoriaDaSala` e o que cada mesa ja
+    // criada carrega. Sao coisas diferentes e ficam com nomes diferentes.
+    categoriaConfigurada: categoriaCompetitiva, categoriaDaSala, admitirNoAssento };
 }
 
 module.exports = {
@@ -4500,6 +4846,15 @@ module.exports = {
   // [VERSAO] Expostos para a suíte afirmar idempotência e detecção de mudança
   // direto na primitiva, sem ter que montar servidor e conexão para cada caso.
   carimbarEstado, impressaoDoEstado, CAMPOS_FORA_DA_IMPRESSAO,
+  // [GATE VIP] Expostos para a suite afirmar a enumeracao fechada, a matriz de
+  // admissao e o vocabulario de recusa direto na primitiva - sem ter que
+  // reimplementar nenhum deles do lado do teste.
+  avaliarAdmissaoAoAssento, normalizarCategoria, novaTentativaEntradaId,
+  ehTentativaEntradaId, assentoDoTitular,
+  CATEGORIAS_COMPETITIVAS, CATEGORIA_PADRAO, CATEGORIA_DESCONHECIDA,
+  PREFIXO_TENTATIVA, ERRO_ADMISSAO,
+  RECUSA_VIP_INDISPONIVEL, RECUSA_CATEGORIA_DESCONHECIDA,
+  ADMISSAO_NOVA, ADMISSAO_RECONEXAO,
 };
 
   };
@@ -5020,6 +5375,20 @@ function criarServidor(opts = {}) {
   function ehParticipante(c) {
     return papelDe(c) === "jogador";
   }
+  /** [GATE VIP] Erro de uma porta de mesa, no fio.
+   *
+   *  Recusa de admissao carrega um CODIGO estavel (o cliente pode ramificar
+   *  nele); os demais erros da mesa continuam saindo exatamente como saiam,
+   *  sem campo novo - por isso o codigo so entra quando existe.
+   *
+   *  O que NAO sai: categoria da mesa, classificacao da tentativa, o
+   *  `tentativaEntradaId` e o motivo real da recusa. Quem foi recusado aprende
+   *  que nao entrou, e mais nada. */
+  function erroDeAdmissao(r) {
+    return r.codigoRecusa
+      ? { tipo: "erro", motivo: r.erro, codigo: r.codigoRecusa }
+      : { tipo: "erro", motivo: r.erro };
+  }
 
   /** Estado que ESTA conexão pode receber. Passa pela porta única de `salas`. */
   function visaoDaConexao(c) {
@@ -5114,9 +5483,13 @@ function criarServidor(opts = {}) {
     switch (msg.tipo) {
       case "criarMesa": {
         // [PATCH WS-AUTH] c.jogadorId vem do token verificado, não da mensagem.
+        // [GATE VIP] E o mesmo vale para `uidAutenticado`, que e o SUJEITO da
+        // admissao: sai de `vincularIdentidade`, e nenhum campo de `msg` o
+        // alcanca. Note que `msg` nao contribui com nada para a admissao -
+        // nem categoria, nem tentativa, nem assento.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
+        if (r.erro) return enviarPara(id, erroDeAdmissao(r));
         c.codigo = r.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
         return broadcastSala(r.codigo);
@@ -5125,8 +5498,8 @@ function criarServidor(opts = {}) {
         // [PATCH WS-AUTH] idem: identidade da conexão, nunca da mensagem. É por
         // aqui que a reconexão volta pra mesa — e ela só chega aqui autenticada.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });
+        if (r.erro) return enviarPara(id, erroDeAdmissao(r));
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
         return broadcastSala(c.codigo);
@@ -5538,12 +5911,27 @@ function iniciar(porta, opts = {}) {
   // aparece em nenhuma dessas rotas, e não passa a aparecer por existir a
   // outbox.
   const outbox = criarOutbox();
+  // [GATE VIP] Natureza COMPETITIVA das mesas deste processo. Vem do ambiente,
+  // que e a configuracao confiavel do servidor - do mesmo lugar de PORT e de
+  // FIREBASE_PROJECT_ID, e nao de mensagem de cliente. Ausente = `casual`, que
+  // e o que toda mesa e hoje. Valor fora da enumeracao NAO vira casual: vira
+  // `desconhecida`, e mesa desconhecida nao admite ninguem (fail closed).
   const servidor = criarServidor({
     agendar: (fn) => setTimeout(fn, RESPIRO_MS),
     contas,
     verificarToken,
     outbox,
+    categoriaCompetitiva: process.env.CATEGORIA_COMPETITIVA,
+    // Nenhum adaptador de autorizacao VIP e injetado aqui, e isso e a
+    // entrega desta OS: em producao, entrada em mesa nao-casual falha
+    // fechada ate a proxima OS ligar o autorizador de verdade.
   });
+  const catConfigurada = servidor.ger.categoriaConfigurada;
+  console.log("[gate-vip] categoria competitiva das mesas deste processo: " + catConfigurada);
+  if (catConfigurada !== "casual") {
+    console.warn("[gate-vip] sem adaptador de autorizacao injetado: NENHUMA ocupacao de " +
+      "assento sera admitida neste processo (fail closed).");
+  }
 
   const http_server = http.createServer((req, res) => {
     if (req.url === "/health" || req.url === "/healthz") {
