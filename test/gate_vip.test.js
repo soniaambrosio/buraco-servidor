@@ -732,10 +732,21 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
     assert.equal(sala.categoriaCompetitiva, "casual");
   });
 
-  test("MESA-11: mesa privada e mesa pública casuais não exigem gate VIP", async () => {
-    // §8: a topologia não decide natureza competitiva, e nenhuma combinação
-    // nova foi inventada — pública e privada seguem casuais e abertas.
-    for (const tipoPartida of ["publica", "privada", "simulada"]) {
+  test("MESA-11: mesa pública e simulada casuais não exigem gate VIP", async () => {
+    // [OS 2 — TIPOS DE MESA] ESTE TESTE MUDOU DE AFIRMAÇÃO, e a metade que
+    // saiu virou o MESA-11b logo abaixo. Nada foi apagado: o que ele afirmava
+    // sobre `privada` passou a ser afirmado ao contrário, de propósito.
+    //
+    // Ele nascia dizendo que a topologia não decide NADA sobre admissão —
+    // verdade enquanto a única mesa que cobrava era a `vip_ranqueada`. A regra
+    // aprovada da Mesa Privada mudou isso: ela é benefício EXCLUSIVO VIP, e
+    // cada ocupante precisa de direito próprio. Passar a exigir autorização
+    // numa topologia é decisão, e não descuido.
+    //
+    // O INVARIANTE PROTEGIDO AQUI É O MESMO DE SEMPRE: mesa casual que não é
+    // privada continua aberta a qualquer autenticado — e é isso que impede a
+    // proteção da sala fechada de trancar o jogo todo.
+    for (const tipoPartida of ["publica", "simulada"]) {
       const srv = novoServidor({ tipoPartida });
       const c = await cliente(srv, "uid-1");
       c.envia({ tipo: "criarMesa", apelido: "A" });
@@ -744,6 +755,39 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
       assert.equal(srv.ger.salas[codigo].tipoPartida, tipoPartida);
       assert.equal(srv.ger.salas[codigo].categoriaCompetitiva, "casual");
     }
+  });
+
+  test("MESA-11b: mesa privada DECLARADA exige autorização, mesmo sendo casual", async () => {
+    // A metade nova. Sem adaptador injetado a admissão falha fechada — o mesmo
+    // comportamento que a `vip_ranqueada` já tinha, agora estendido à
+    // topologia que a regra aprovada tornou exclusiva de assinante.
+    const srv = novoServidor({ tipoPartida: "privada" });
+    const c = await cliente(srv, "uid-1");
+    c.envia({ tipo: "criarMesa", apelido: "A" });
+    assert.ok(c.ultimo("erro"), "mesa privada declarada entrou sem autorização");
+    assert.equal(c.ultimo("entrou"), null, "não pode haver assento ocupado");
+    // E a recusa é a MESMA de sempre. A Mesa Privada não ganhou mensagem
+    // própria, porque uma mensagem própria contaria que a sala é privada.
+    assert.equal(c.ultimo("erro").motivo, ERRO_ADMISSAO);
+  });
+
+  test("MESA-11c: a topologia PADRÃO não exige autorização", async () => {
+    // O ponto mais delicado da mudança, e por isso ele tem prova própria.
+    //
+    // `TIPO_PADRAO` é `privada` — ele descreve a verdade da base (toda mesa de
+    // hoje nasce de um código compartilhado) e responde a uma pergunta
+    // diferente: "esta partida conta para conquista pessoal?".
+    //
+    // Se a exigência de VIP olhasse para a topologia RESOLVIDA, toda instância
+    // não configurada passaria a exigir autorização, e o efeito seria trancar
+    // o jogo inteiro em nome de proteger a sala fechada. Ela olha para a
+    // DECLARADA — e ninguém-declarou não é uma declaração.
+    const srv = novoServidor({});
+    const c = await cliente(srv, "uid-1");
+    c.envia({ tipo: "criarMesa", apelido: "A" });
+    assert.equal(c.ultimo("erro"), null, "a topologia padrão passou a exigir VIP");
+    const codigo = c.ultimo("entrou").codigo;
+    assert.equal(srv.ger.salas[codigo].tipoPartida, "privada", "o padrão continua sendo privada");
   });
 
   test("MESA-12: a configuração do processo vem do ambiente, não de mensagem", () => {

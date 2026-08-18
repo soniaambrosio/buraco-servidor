@@ -3846,9 +3846,50 @@ const crypto = require("crypto");
 
 const NOMES_BOT = ["Renato", "Cláudia", "Mateus", "Sofia"];
 
-/** Código padrão tipo BURACO-4821. (Math.random é ok em Node normal.) */
+/** [MESA PRIVADA] Alfabeto do código da sala: 25 símbolos, escolhidos para
+ *  serem DITADOS EM VOZ ALTA sem ambiguidade.
+ *
+ *  Fora da lista, de propósito: `0` e `O`, `1` e `I` e `L`, `2` e `Z`, `5` e
+ *  `S`, `8` e `B`. Um código que se lê errado ao telefone vira uma tentativa
+ *  falhada — e tentativa falhada consome o limitador de quem não fez nada de
+ *  errado. */
+const ALFABETO_CODIGO = "ACDEFGHJKMNPQRTUVWXY34679";
+
+/** Quantos símbolos tem um código. 25^8 ≈ 1.5e11, ou ~37 bits. */
+const TAMANHO_CODIGO = 8;
+
+/** [MESA PRIVADA] Código da sala, com entropia criptográfica.
+ *
+ *  O QUE ISTO SUBSTITUI, e por que era um defeito:
+ *
+ *      "BURACO-" + Math.floor(1000 + Math.random() * 9000)
+ *
+ *  São NOVE MIL códigos possíveis (~13 bits), sorteados por um gerador NÃO
+ *  criptográfico. Um script percorre o espaço inteiro em segundos, e a cada
+ *  acerto entra numa sala privada de outra pessoa. Numa mesa que exige VIP de
+ *  cada ocupante isso nem é a pior parte: a pior parte é que o código, sendo
+ *  adivinhável, vira um canal de descoberta de quem está jogando com quem.
+ *
+ *  A redução de byte para símbolo é por REJEIÇÃO, e não por `% 25`. O módulo
+ *  enviesaria — 256 não é múltiplo de 25, então os seis primeiros símbolos do
+ *  alfabeto sairiam com ~1.22x a chance dos demais. O viés não quebra o código
+ *  sozinho, mas corta entropia de graça, e entropia é a única coisa que este
+ *  código tem.
+ *
+ *  O formato mudou (`BMV-XXXX-XXXX`), e isso é deliberado: um código do formato
+ *  antigo apresentado hoje é reconhecivelmente antigo, e não um código válido
+ *  de uma sala que não existe mais. */
 function gerarCodigoPadrao() {
-  return "BURACO-" + Math.floor(1000 + Math.random() * 9000);
+  const limite = 256 - (256 % ALFABETO_CODIGO.length); // maior múltiplo de 25 ≤ 256
+  let saida = "";
+  while (saida.length < TAMANHO_CODIGO) {
+    for (const b of crypto.randomBytes(32)) {
+      if (b >= limite) continue; // rejeitado: usar seria enviesar
+      saida += ALFABETO_CODIGO[b % ALFABETO_CODIGO.length];
+      if (saida.length === TAMANHO_CODIGO) break;
+    }
+  }
+  return "BMV-" + saida.slice(0, 4) + "-" + saida.slice(4, 8);
 }
 
 /** Natureza da mesa, decidida pelo SERVIDOR. Nunca vem do cliente.
@@ -4106,6 +4147,7 @@ function avaliarAdmissaoAoAssento({
   categoriaCompetitiva,
   tentativaEntradaId,
   reconexao,
+  tipoPartida,
 } = {}, portas = {}) {
   // Classificacao PRIMEIRO, e fora de qualquer ramo de veredito: ela descreve a
   // tentativa, e tem de estar certa inclusive quando a resposta e "nao".
@@ -4135,11 +4177,33 @@ function avaliarAdmissaoAoAssento({
     return recusa(RECUSA_VIP_INDISPONIVEL);
   }
 
-  if (categoriaCompetitiva === "casual") {
+  // [MESA PRIVADA] QUEM PRECISA DE AUTORIZACAO. Duas dimensoes, e nao uma —
+  // que e o mesmo motivo pelo qual `tipoPartida` e `categoriaCompetitiva` nao
+  // foram colapsadas num campo so.
+  //
+  //   vip_ranqueada .... ambiente competitivo oficial. Exige assinatura ativa
+  //                      OU passe de cortesia.
+  //   privada .......... beneficio EXCLUSIVO VIP, mesmo sendo `casual`. Exige
+  //                      assinatura ativa de CADA ocupante, e o codigo da sala
+  //                      nao substitui direito nenhum.
+  //
+  // A Mesa Privada nao alimenta o Ranking, e por isso ela NAO e
+  // `vip_ranqueada`. Se fosse, sala fechada com adversarios escolhidos a dedo
+  // passaria a pontuar — que e a forma mais barata de farmar rating que
+  // existe. As duas respostas divergem, entao sao duas perguntas.
+  //
+  // Quem decide QUAL das duas fontes de elegibilidade vale e o backend, e nao
+  // este arquivo: o gate transporta a pergunta e le a resposta. Ele nao sabe o
+  // que e assinatura, o que e cortesia, nem que a cortesia nao serve na
+  // Privada.
+  const exigeAutorizacao =
+    categoriaCompetitiva === "vip_ranqueada" || tipoPartida === "privada";
+
+  if (!exigeAutorizacao) {
     return decisao({ ok: true, codigoRecusa: null, erro: null });
   }
 
-  // Daqui para baixo e `vip_ranqueada`.
+  // Daqui para baixo e mesa que exige elegibilidade.
   if (typeof uidAutenticado !== "string" || uidAutenticado === "") {
     return recusa(RECUSA_VIP_INDISPONIVEL);
   }
@@ -4449,11 +4513,48 @@ function criarGerenciador(opts = {}) {
   const tipoPartida = TIPOS_DE_PARTIDA.includes(opts.tipoPartida)
     ? opts.tipoPartida
     : (opts.tipoPartida === undefined ? TIPO_PADRAO : "simulada");
+
+  // [MESA PRIVADA] A topologia DECLARADA, que e coisa diferente da resolvida.
+  //
+  // `tipoPartida` acima resolve para `privada` QUANDO NINGUEM DECLAROU NADA —
+  // e o padrao, e ele descreve a verdade da base: toda mesa de hoje nasce de
+  // um codigo compartilhado. Esse padrao serve bem a pergunta que ele foi
+  // criado para responder ("esta partida conta para conquista pessoal?").
+  //
+  // Ele NAO serve a pergunta nova ("esta mesa exige elegibilidade VIP de cada
+  // ocupante?"). Se servisse, toda instancia nao configurada — inclusive todas
+  // as 333 provas desta suite — passaria a exigir autorizacao, e o efeito
+  // seria trancar o jogo inteiro em nome de proteger a Mesa Privada.
+  //
+  // Entao a segunda pergunta olha para o que foi DECLARADO, e nao para o que
+  // foi resolvido. Uma instancia so hospeda Mesa Privada VIP se alguem
+  // escreveu `privada` na configuracao dela. `null` significa "ninguem
+  // declarou", e ninguem-declarou nao e uma declaracao.
+  const tipoPartidaDeclarado = TIPOS_DE_PARTIDA.includes(opts.tipoPartida)
+    ? opts.tipoPartida
+    : null;
   // [GATE VIP] Natureza COMPETITIVA das mesas deste gerenciador. Mora aqui, na
   // CONSTRUCAO, pela mesma razao que `tipoPartida` mora: o despachante monta a
   // chamada de `criarMesa` a partir de `msg`, e um campo que morasse la seria
   // escolhivel pelo cliente. Aqui ele so pode vir de quem construiu o processo.
   const categoriaCompetitiva = normalizarCategoria(opts.categoriaCompetitiva);
+
+  // [ECONOMIA] Entrada em fichas das mesas deste gerenciador.
+  //
+  // MORA AQUI PELA MESMA RAZAO QUE `tipoPartida` E `categoriaCompetitiva`
+  // moram, e o motivo agora e concreto: ate esta OS o valor vinha de
+  // `msg.aposta`, ou seja, o CLIENTE escolhia quanto se cobrava para entrar na
+  // mesa que ele abria. `sala.aposta` alimenta `registrarPartida`, que move o
+  // cofre de moedas — entao o cliente escolhia quanto o cofre movia.
+  //
+  // A secao 9.3 da OS proibe "confiar no valor de entrada enviado livremente
+  // pelo cliente", e a secao 5.1 proibe aposta em Mesa Publica. As duas coisas
+  // se resolvem no mesmo lugar: o valor passa a ser configuracao do PROCESSO, e
+  // o padrao e ZERO. Uma mesa que cobra e uma mesa que alguem configurou para
+  // cobrar.
+  const apostaDeEntrada = Number.isFinite(opts.apostaDeEntrada)
+    ? Math.max(0, Math.round(opts.apostaDeEntrada))
+    : 0;
 
   // [GATE VIP] A PORTA do adaptador autoritativo de admissao VIP. Ausente por
   // padrao, e ausente RECUSA - nao existe liberacao automatica na falta de quem
@@ -4488,10 +4589,21 @@ function criarGerenciador(opts = {}) {
       // `entrarMesa` o carrega, e o despachante nao o monta.
       tentativaEntradaId: novaTentativaEntradaId(),
       reconexao: assentoDoTitular(sala, jogadorId) !== -1,
+      // [MESA PRIVADA] A TOPOLOGIA entra no gate. Ver o cabecalho de
+      // `avaliarAdmissaoAoAssento`: uma mesa `privada` passa a exigir
+      // autorizacao mesmo sendo `casual`, porque a Mesa Privada e beneficio
+      // exclusivo VIP e cada ocupante precisa de direito PROPRIO.
+      //
+      // Ela vem da CONSTRUCAO do gerenciador, como sempre — nao do parametro
+      // de `criarMesa`, nao de `msg`, e nao da sala (que pode nem existir
+      // ainda quando o assento 0 e admitido).
+      //
+      // E e a topologia DECLARADA, nao a resolvida: ver `tipoPartidaDeclarado`.
+      tipoPartida: tipoPartidaDeclarado,
     }, { autorizarEntradaVip });
   }
 
-  function criarMesa({ apelido = "Jogador", jogadorId = null, uidAutenticado = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, uidAutenticado = null, modalidade = "sbtl", metaPontos = 3000 } = {}) {
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
@@ -4509,7 +4621,9 @@ function criarGerenciador(opts = {}) {
     if (veredito.admissaoId) assentoZero.admissaoId = veredito.admissaoId;
     salas[codigo] = {
       codigo, modalidade, metaPontos,
-      aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
+      // [ECONOMIA] Entrada por jogador (0 = sem aposta). Vem da CONSTRUCAO do
+      // gerenciador, e nao mais de `msg.aposta` — ver `apostaDeEntrada`.
+      aposta: apostaDeEntrada,
       criadorAssento: 0,
       assentos: [assentoZero, null, null, null],
       iniciada: false,
@@ -6498,7 +6612,11 @@ function criarServidor(opts = {}) {
         // alcanca. Note que `msg` nao contribui com nada para a admissao -
         // nem categoria, nem tentativa, nem assento.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
+        // [ECONOMIA] `msg.aposta` NAO e mais lido. O valor de entrada e
+        // configuracao do processo (`apostaDeEntrada`), pela mesma disciplina
+        // de `tipoPartida` e `categoriaCompetitiva`: o que o cliente escolhe
+        // nao pode decidir quanto o cofre movimenta.
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, modalidade: msg.modalidade, metaPontos: msg.metaPontos });
         return concluirPortaDeMesa(id, c, r, null);
       }
       case "entrarMesa": {
