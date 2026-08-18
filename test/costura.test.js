@@ -65,6 +65,9 @@ function servidorDeCostura(tempo) {
  */
 async function mesaAutenticada(tempo = relogio(), opts = {}) {
   const { humanos = 4, metaPontos = 3000 } = opts;
+  // [META] Idem `test/ajuda.js`: a mesa nasce canônica (1.500/2.000/3.000) e
+  // quem encurta a partida é o jogo, depois de iniciado.
+  const metaDaMesa = [1500, 2000, 3000].includes(metaPontos) ? metaPontos : undefined;
   const srv = servidorDeCostura(tempo);
   const jogadores = [];
   for (let i = 0; i < humanos; i++) {
@@ -72,13 +75,15 @@ async function mesaAutenticada(tempo = relogio(), opts = {}) {
     await c.autentica(token("uid-" + i));
     jogadores.push(c);
   }
-  jogadores[0].envia({ tipo: "criarMesa", apelido: "Dono", metaPontos });
+  jogadores[0].envia({ tipo: "criarMesa", apelido: "Dono", metaPontos: metaDaMesa });
   const codigo = jogadores[0].ultimo("entrou").codigo;
   for (let i = 1; i < humanos; i++) {
     jogadores[i].envia({ tipo: "entrarMesa", codigo, apelido: "J" + i });
   }
   jogadores[0].envia({ tipo: "iniciarPartida" });
-  return { srv, codigo, jogadores, sala: srv.ger.salas[codigo] };
+  const sala = srv.ger.salas[codigo];
+  if (metaDaMesa === undefined && sala && sala.jogo) sala.jogo.metaPontos = metaPontos;
+  return { srv, codigo, jogadores, sala };
 }
 
 // ===========================================================================
@@ -351,7 +356,7 @@ describe("COST — despacho e encerramento", () => {
     // de vez, e o teste provaria "conexão fechada não recebe" — outra coisa, e
     // mais fraca. O caso duro é este: conexão VIVA, credencial vencida.
     await humano.autentica(token("uid-0", { validoPorS: 60 }));
-    humano.envia({ tipo: "criarMesa", apelido: "Dono", metaPontos: 100 });
+    humano.envia({ tipo: "criarMesa", apelido: "Dono" });
     const codigo = humano.ultimo("entrou").codigo;
     humano.envia({ tipo: "iniciarPartida" });
     const sala = srv.ger.salas[codigo];

@@ -4485,6 +4485,40 @@ function montarEnvelopeEncerramento(sala, agoraIso) {
   });
 }
 
+// ===========================================================================
+// [META] A META DE PONTOS DA PARTIDA
+// ===========================================================================
+//
+// A meta e configuracao LEGITIMA da mesa: quem abre escolhe se a partida vai
+// a 1.500, 2.000 ou 3.000 pontos, e quem entra joga a mesa que encontrou.
+//
+// Isso a separa de `apostaDeEntrada`, que e configuracao do PROCESSO porque
+// move o cofre de fichas. Meta nao move ficha nenhuma — ela diz quando a
+// partida acaba. Escolher a duracao da propria partida nao e poder economico.
+//
+// Mas ser ESCOLHIVEL pelo cliente nao e o mesmo que ser CONFIAVEL vindo dele.
+// O valor chega por mensagem, entao passa por esta lista antes de virar mesa:
+// o que nao esta nela nao nasce. "Veio do app, entao esta certo" e exatamente
+// o que esta lista existe para impedir.
+const METAS_CANONICAS = Object.freeze([1500, 2000, 3000]);
+
+// O PADRAO E EXPLICITO, e nao "o primeiro item da lista". Derivar o padrao da
+// ordem da vitrine faz reordenar botao trocar regra sem ninguem notar.
+const META_PADRAO = 2000;
+
+/** Resolve a meta que uma mesa NOVA vai ter.
+ *
+ *  Devolve o numero aceito, ou `null` — e `null` aqui significa RECUSA, nunca
+ *  "cai no padrao". A unica coisa que vira padrao e a AUSENCIA do campo, que e
+ *  o cliente antigo que nem sabe que existe meta. Qualquer valor PRESENTE e uma
+ *  escolha, e escolha fora da lista se recusa em vez de virar outra coisa nas
+ *  costas de quem escolheu — vale para `null`, `NaN`, `"2000"`, zero, negativo
+ *  e para o 1999 de quem errou o dedo. */
+function resolverMetaDePontos(valor) {
+  if (valor === undefined) return META_PADRAO;
+  return METAS_CANONICAS.includes(valor) ? valor : null;
+}
+
 /** Cria um gerenciador de salas em memória. `opts.gerarCodigo` permite injetar
  *  um gerador determinístico nos testes. */
 function criarGerenciador(opts = {}) {
@@ -4603,7 +4637,15 @@ function criarGerenciador(opts = {}) {
     }, { autorizarEntradaVip });
   }
 
-  function criarMesa({ apelido = "Jogador", jogadorId = null, uidAutenticado = null, modalidade = "sbtl", metaPontos = 3000 } = {}) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, uidAutenticado = null, modalidade = "sbtl", metaPontos } = {}) {
+    // [META] Antes de qualquer outra coisa: mesa com meta invalida nao nasce.
+    //
+    // A recusa vem ANTES de sortear codigo e antes do gate de admissao, pela
+    // mesma disciplina que faz o gate rodar antes de a sala existir: pedido
+    // recusado nao deixa rastro nenhum — nem codigo em uso, nem assento
+    // ocupado, nem sala meio construida.
+    const meta = resolverMetaDePontos(metaPontos);
+    if (meta === null) return { erro: "meta de pontos inválida" };
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
@@ -4620,7 +4662,9 @@ function criarGerenciador(opts = {}) {
     const assentoZero = { apelido, tipo: "humano", jogadorId };
     if (veredito.admissaoId) assentoZero.admissaoId = veredito.admissaoId;
     salas[codigo] = {
-      codigo, modalidade, metaPontos,
+      codigo, modalidade,
+      // [META] O valor JA VALIDADO, nunca o cru que chegou por mensagem.
+      metaPontos: meta,
       // [ECONOMIA] Entrada por jogador (0 = sem aposta). Vem da CONSTRUCAO do
       // gerenciador, e nao mais de `msg.aposta` — ver `apostaDeEntrada`.
       aposta: apostaDeEntrada,
@@ -4663,6 +4707,14 @@ function criarGerenciador(opts = {}) {
     // aconteceu ficaria valendo para uma mesa que nao existe mais.
     Object.defineProperty(salas[codigo], "categoriaCompetitiva", {
       value: categoriaCompetitiva, writable: false, configurable: false, enumerable: true,
+    });
+    // [META] IMUTAVEL pela mesma razao, e a razao aqui tem nome e sobrenome:
+    // quem entra por codigo entrou NUMA mesa de 2.000, e nenhuma mensagem
+    // posterior — entrada, reconexao, revanche — pode transforma-la em outra.
+    // A trava e estrutural porque a alternativa seria confiar que nenhum
+    // caminho futuro escreva neste campo, e caminho futuro sempre existe.
+    Object.defineProperty(salas[codigo], "metaPontos", {
+      value: meta, writable: false, configurable: false, enumerable: true,
     });
     return { codigo, assento: 0 };
     });
@@ -5125,6 +5177,9 @@ module.exports = {
   // [BACKEND] Expostos para a suite afirmar os dois regimes da admissao sem
   // ter que montar servidor e rede para cada caso.
   ehPromessa, concluirAdmissao,
+  // [META] Expostos para a suite afirmar a lista canonica e o padrao direto na
+  // primitiva, e para o arnes montar mesa sem adivinhar quais metas existem.
+  resolverMetaDePontos, METAS_CANONICAS, META_PADRAO,
 };
 
   };

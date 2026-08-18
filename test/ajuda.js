@@ -123,7 +123,21 @@ async function cliente(srv, uid = "uid-anonimo") {
  * Mesa pronta com `humanos` pessoas sentadas (o resto vira bot ao iniciar).
  * Devolve { srv, codigo, jogadores[], sala }.
  */
+// [META] A MESA NASCE COM META CANÔNICA — SEMPRE.
+//
+// O servidor só aceita 1.500, 2.000 e 3.000 numa mesa nova, e não existe porta
+// de teste que o faça aceitar outra coisa: se existisse, a suíte inteira
+// estaria medindo um servidor que não é o que roda em produção.
+//
+// Só que várias provas aqui precisam de partida CURTA (meta 100, meta 1) para
+// chegar ao encerramento sem jogar 2.000 pontos de bot. Então quem encurta é o
+// JOGO, depois de iniciado — estado do motor, que estas suítes já reescrevem à
+// mão para forçar placar e encerramento. A MESA continua sendo uma mesa que
+// existe em produção; o que é de mentirinha é a duração da partida dela.
+const METAS_DE_MESA = [1500, 2000, 3000];
+
 async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3000 } = {}) {
+  const metaDaMesa = METAS_DE_MESA.includes(metaPontos) ? metaPontos : undefined;
   const srv = novoServidor();
   const jogadores = [];
 
@@ -137,7 +151,7 @@ async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3
     apelido: "Dono",
     jogadorId: "uid-0",
     modalidade,
-    metaPontos,
+    metaPontos: metaDaMesa,
   });
   jogadores.push(dono);
   const codigo = dono.ultimo("entrou").codigo;
@@ -149,7 +163,10 @@ async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3
   }
 
   dono.envia({ tipo: "iniciarPartida" });
-  return { srv, codigo, jogadores, sala: srv.ger.salas[codigo] };
+  const sala = srv.ger.salas[codigo];
+  // Meta de teste, aplicada ao JOGO e nunca à mesa. Ver METAS_DE_MESA acima.
+  if (metaDaMesa === undefined && sala && sala.jogo) sala.jogo.metaPontos = metaPontos;
+  return { srv, codigo, jogadores, sala };
 }
 
 /**

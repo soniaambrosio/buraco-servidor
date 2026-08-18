@@ -142,14 +142,18 @@ test("afkBot entrega o assento ao servidor e afkVoltar devolve", async () => {
 test("a partida roda até o fim e o encerramento é emitido uma vez só", async () => {
   const srv = servidorAutenticado();
   const dono = await jogador(srv, "uid-solo");
-  dono.envia({ tipo: "criarMesa", apelido: "Solo", modalidade: "aberto", metaPontos: 100 });
+  dono.envia({ tipo: "criarMesa", apelido: "Solo", modalidade: "aberto" });
   const codigo = dono.ultimo("entrou").codigo;
   dono.envia({ tipo: "iniciarPartida" });
+
+  // [META] A mesa nasce canônica; quem encurta a partida é o jogo, já iniciado.
+  // Sem isto os bots teriam de somar 2.000 pontos para o teste ver um "fim".
+  const sala = srv.ger.salas[codigo];
+  sala.jogo.metaPontos = 100;
 
   // entrega o próprio assento ao servidor: os 4 viram bot e a mesa corre sozinha
   dono.envia({ tipo: "afkBot" });
 
-  const sala = srv.ger.salas[codigo];
   assert.ok(sala.resumoFinal, "a partida tinha que ter encerrado");
   assert.equal(sala.fimEmitido, true);
   assert.equal(dono.todas("fim").length, 1, "o 'fim' sai uma vez só");

@@ -187,7 +187,7 @@ test("passado o exp, a conexão para de aceitar comando e para de receber estado
   const { srv, tempo } = ambiente();
   const a = cliente(srv);
   await a.autentica(emitirToken({ chave: CHAVE, uid: UID_A, emitidoEm: T0, validoPorS: 3600 }));
-  a.envia({ tipo: "criarMesa", apelido: "Sônia", metaPontos: 100 });
+  a.envia({ tipo: "criarMesa", apelido: "Sônia" });
   const codigo = a.ultimo("entrou").codigo;
 
   // ANTES da expiração: tudo normal
@@ -237,7 +237,7 @@ test("token novo do MESMO jogador renova a sessão sem derrubar a conexão", asy
   const { srv, tempo } = ambiente();
   const a = cliente(srv);
   await a.autentica(emitirToken({ chave: CHAVE, uid: UID_A, emitidoEm: T0, validoPorS: 3600 }));
-  a.envia({ tipo: "criarMesa", apelido: "Sônia", metaPontos: 100 });
+  a.envia({ tipo: "criarMesa", apelido: "Sônia" });
   const codigo = a.ultimo("entrou").codigo;
 
   tempo.avancarS(3601);
@@ -289,7 +289,7 @@ test("estourada a carência sem renovar, a conexão é encerrada", async () => {
   const { srv, tempo } = ambiente({ carenciaRenovacaoMs: 30000 });
   const a = cliente(srv);
   await a.autentica(emitirToken({ chave: CHAVE, uid: UID_A, emitidoEm: T0, validoPorS: 3600 }));
-  a.envia({ tipo: "criarMesa", apelido: "Sônia", metaPontos: 100 });
+  a.envia({ tipo: "criarMesa", apelido: "Sônia" });
 
   tempo.avancarS(3601);
   assert.equal(a.estadoAuth, AUTH.EXPIRADA);
@@ -314,7 +314,7 @@ test("o encerramento com carteira não vai para conexão com credencial vencida"
   const { srv, tempo } = ambiente();
   const a = cliente(srv);
   await a.autentica(emitirToken({ chave: CHAVE, uid: UID_A, emitidoEm: T0, validoPorS: 3600 }));
-  a.envia({ tipo: "criarMesa", apelido: "Solo", modalidade: "aberto", metaPontos: 100 });
+  a.envia({ tipo: "criarMesa", apelido: "Solo", modalidade: "aberto" });
   const codigo = a.ultimo("entrou").codigo;
   a.envia({ tipo: "iniciarPartida" });
 
@@ -331,14 +331,14 @@ test("comandos represados antes da autenticação não executam depois sozinhos"
   const { srv } = ambiente();
   const c = cliente(srv);
 
-  c.envia({ tipo: "criarMesa", apelido: "Fila", metaPontos: 100 });
+  c.envia({ tipo: "criarMesa", apelido: "Fila" });
   assert.equal(Object.keys(srv.ger.salas).length, 0);
 
   await c.autentica(tokenA());
   // autenticar NÃO desengaveta comando nenhum: quem reenvia é o cliente.
   assert.equal(Object.keys(srv.ger.salas).length, 0, "o comando pré-auth não podia rodar retroativamente");
 
-  c.envia({ tipo: "criarMesa", apelido: "Fila", metaPontos: 100 });
+  c.envia({ tipo: "criarMesa", apelido: "Fila" });
   assert.equal(Object.keys(srv.ger.salas).length, 1, "reenviado depois de autenticar, aí sim roda");
 });
 
@@ -604,7 +604,7 @@ test("reconexão exige autenticar de novo: a conexão nova nasce sem identidade"
 
   const antiga = cliente(srv);
   await antiga.autentica(tokenA());
-  antiga.envia({ tipo: "criarMesa", apelido: "Sônia", metaPontos: 100 });
+  antiga.envia({ tipo: "criarMesa", apelido: "Sônia" });
   const codigo = antiga.ultimo("entrou").codigo;
 
   srv.desconectar(antiga.id); // queda
@@ -630,7 +630,7 @@ test("na volta, o B não retoma o lugar do A alegando o jogadorId do A", async (
 
   const a = cliente(srv);
   await a.autentica(tokenA());
-  a.envia({ tipo: "criarMesa", apelido: "Sônia", metaPontos: 100 });
+  a.envia({ tipo: "criarMesa", apelido: "Sônia" });
   const codigo = a.ultimo("entrou").codigo;
   srv.desconectar(a.id);
 

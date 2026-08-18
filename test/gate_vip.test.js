@@ -705,7 +705,7 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
     // contrato, e esta OS não a autoriza.
     const srv = novoServidor();
     const dono = await cliente(srv, "uid-0");
-    dono.envia({ tipo: "criarMesa", apelido: "Dono", metaPontos: 100 });
+    dono.envia({ tipo: "criarMesa", apelido: "Dono" });
     const codigo = dono.ultimo("entrou").codigo;
     for (let i = 1; i < 4; i++) {
       const c = await cliente(srv, "uid-" + i);

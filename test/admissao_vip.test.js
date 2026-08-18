@@ -794,7 +794,7 @@ describe("ADM/FIO — fim a fim, e quem não passa por aqui", () => {
     // continua FORA dele — disponível por `categoriaDaSala`, como na OS 1.
     const { srv } = servidorVip({ responder: (_a, n) => respostaOk("adm-" + n) });
     const dono = await cliente(srv, "uid-0");
-    await envia(srv, dono, { tipo: "criarMesa", apelido: "Dono", metaPontos: 100 });
+    await envia(srv, dono, { tipo: "criarMesa", apelido: "Dono" });
     const codigo = dono.ultimo("entrou").codigo;
     for (let i = 1; i < 4; i++) {
       const c = await cliente(srv, "uid-" + i);
