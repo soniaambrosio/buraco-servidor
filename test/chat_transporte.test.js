@@ -505,6 +505,48 @@ test("CHT-D-01 retry mantÃ©m o MESMO messageId e avisa repetiÃ§Ã£o", async () =>
   assert.equal(entregas[0].dados.messageId, entregas[1].dados.messageId);
 });
 
+
+test("CHT-D-07 o RETRY entrega à lista da autoridade, não à sala", async () => {
+  // A entrega repetida do at-least-once continua sendo ENTREGA: ela passa pelo
+  // mesmo `entregarChat`, e a lista continua sendo a da autoridade. Recalcular
+  // a partir de quem está sentado seria furar bloqueio na segunda tentativa 
+  // o caminho que ninguém olha  e a mensagem chegaria a quem a autoridade
+  // deixou de fora justamente por decisão de moderação.
+  const ponte = pontefalsa({
+    destinatarios: () => [UID_B], // Carla NUNCA está na lista
+    envio: (pedido, n) =>
+      Promise.resolve({
+        enviada: true,
+        jaEnviada: n > 1,
+        mensagem: {
+          messageId: "msg-estavel",
+          autorPublicId: "PUB-A",
+          superficie: pedido.superficie,
+          canalId: pedido.canalId,
+          conteudo: pedido.conteudo,
+          enviadaEm: "2026-01-01T12:00:00.000Z",
+          esquema: 1,
+        },
+        destinatarios: [UID_B],
+      }),
+  });
+  const srv = servidorDeChat(ponte);
+  const { a, b, codigo } = await mesaComDois(srv);
+  const c = await jogador(srv, UID_C);
+  c.envia({ tipo: "entrarMesa", codigo, apelido: "Carla" });
+  await drenar();
+  assert.ok(Number.isInteger(srv.conexoes[c.id].assento), "Carla precisa estar SENTADA");
+
+  a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "mesma", texto: "duas vezes" });
+  await drenar();
+  a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "mesma", texto: "duas vezes" });
+  await drenar();
+
+  assert.equal(a.ultimo(CHAT_FIO.RECIBO).resultado, CHAT_ACK.REPETIDA, "o segundo pedido precisa ser retry");
+  assert.equal(b.todas(CHAT_FIO.ENTREGA).length, 2, "quem a autoridade listou recebe as duas");
+  assert.equal(c.todas(CHAT_FIO.ENTREGA).length, 0, "o retry recalculou os destinatários pela sala");
+  assert.equal(a.todas(CHAT_FIO.ENTREGA).length, 0, "o autor não estava na lista e recebeu");
+});
 test("CHT-D-02 recusa da autoridade vira cÃ³digo REDIGIDO", async () => {
   // O fio nÃ£o pode dizer "B te bloqueou" nem "B estÃ¡ suspenso" (Â§17).
   const ponte = pontefalsa({
