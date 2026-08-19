@@ -337,8 +337,23 @@ describe("GATE-VIP/GATE — o ponto único de admissão ao assento", () => {
     assert.deepEqual(normalizadas.sort(), [
       "sala.assentos =",          // iniciarPartida: preenche BOTS nos vazios
       "sala.assentos[alvo] =",    // entrarMesa: gated logo acima
+      "sala.assentos[assento] =", // ausentar no LOBBY: LIBERA o assento
       "sala.assentos[assento] =", // sair: LIBERA o assento, não ocupa
-    ], "escrita nova em assento — ela passa por admitirNoAssento?");
+    ].sort(), "escrita nova em assento — ela passa por admitirNoAssento?");
+
+    // [COMPOSICAO controlador + gate] AS DUAS ESCRITAS POR `[assento]` LIBERAM.
+    //
+    // O controlador trouxe a segunda: `ausentar` no lobby solta o assento pelo
+    // mesmo caminho de `sair`, porque antes da partida não há nada a reservar.
+    // Contar duas ocorrências da MESMA forma textual não bastaria — uma
+    // ocupação disfarçada de liberação passaria pela lista acima sem alterá-la.
+    // Então cada uma é conferida no VALOR: `= null` é soltar, e é só isso que
+    // esta forma pode fazer.
+    const porAssento = MOD_SALAS.match(/sala\.assentos\[assento\]\s*=(?!=)\s*[^;\r\n]+/g) || [];
+    assert.equal(porAssento.length, 2, "surgiu uma terceira escrita por assento");
+    for (const e of porAssento) {
+      assert.match(e, /=\s*null$/, "escrita por assento que NÃO é liberação: " + e);
+    }
 
     // E as duas — e só duas — chamadas do gate estão nos dois caminhos que
     // sentam um humano, cada uma antes da escrita correspondente. A declaração
@@ -502,7 +517,29 @@ describe("GATE-VIP/PAPEL — quem passa pelo gate e quem nunca passa", () => {
     g.entrarMesa({ codigo, apelido: "B", jogadorId: "uid-2", uidAutenticado: "uid-2", reconexao: true });
     assert.equal(vistos[1].classificacao, ADMISSAO_NOVA,
       "declarar reconexão não converte entrada nova em reconexão");
-    assert.ok(!/reconexao/.test(MOD_SERVIDOR), "o despachante não fala de reconexão");
+    // [COMPOSICAO controlador + gate] O DESPACHANTE NÃO DECIDE RECONEXÃO — MAS
+    // PASSA ADIANTE A DECISÃO DE `salas`.
+    //
+    // A afirmação original era `!/reconexao/.test(MOD_SERVIDOR)`: enquanto o
+    // despachante não falava de reconexão, "não mencionar" e "não decidir"
+    // coincidiam. O controlador (§15.10) precisa dizer ao cliente que ele VOLTOU
+    // ao próprio assento em vez de ganhar um novo, e esse dado é a resposta de
+    // `salas` — `r.reconexao` —, nunca `msg.reconexao`. Manter a proibição de
+    // menção obrigaria a esconder do cliente uma verdade que o servidor apurou.
+    //
+    // O que se guarda agora é o que sempre importou, e é mais estreito: nenhuma
+    // leitura de reconexão vinda da MENSAGEM, e nenhuma comparação que a
+    // reintroduza por outro nome.
+    const codigoDoDespachante = MOD_SERVIDOR.replace(/\/\/[^\n]*/g, "");
+    assert.ok(!/msg\s*\.\s*reconexao/.test(codigoDoDespachante),
+      "o despachante não lê reconexão da mensagem");
+    assert.ok(!/\breconexao\b\s*(?:in|of)\b/.test(codigoDoDespachante),
+      "o despachante não sonda reconexão no payload");
+    const mencoes = codigoDoDespachante.match(/\breconexao\b[^,;)\n]*/g) || [];
+    for (const m of mencoes) {
+      assert.ok(/reconexao:\s*!!r\.reconexao/.test(m),
+        "toda menção a reconexão no despachante vem de `salas`, e não do cliente: " + m);
+    }
   });
 
   test("PAPEL-04: `assentoDoTitular` só reconhece humano com a mesma identidade", () => {

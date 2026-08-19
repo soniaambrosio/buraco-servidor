@@ -136,9 +136,11 @@ async function cliente(srv, uid = "uid-anonimo") {
 // existe em produção; o que é de mentirinha é a duração da partida dela.
 const METAS_DE_MESA = [1500, 2000, 3000];
 
-async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3000 } = {}) {
+async function mesaComPartida({ humanos = 4, modalidade = "sbtl", metaPontos = 3000, servidor = {} } = {}) {
   const metaDaMesa = METAS_DE_MESA.includes(metaPontos) ? metaPontos : undefined;
-  const srv = novoServidor();
+  // [OS7] `servidor` chega cru a `novoServidor`: é por ele que um teste injeta
+  // relógio controlável ou graça própria, sem que os demais mudem de forma.
+  const srv = novoServidor(servidor);
   const jogadores = [];
 
   // Cada conexão autentica com o uid que ela declara. `jogadorId` continua indo
@@ -373,6 +375,7 @@ module.exports = {
   novoServidor,
   cliente,
   mesaComPartida,
+  METAS_DE_MESA,
   espectador,
   espectadorVigiado,
   marcarSegredos,

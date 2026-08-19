@@ -1019,21 +1019,22 @@ describe("CRED/FRONTEIRA", () => {
     assert.equal(pacote.engines.node, ">=20");
   });
 
-  test("CRED-34b: o módulo tem UM consumidor só, e é a autorização de entrada", () => {
-    // [COMPOSIÇÃO gate-vip + credencial] ESTE TESTE MUDOU DE AFIRMAÇÃO, E A
-    // AFIRMAÇÃO ANTIGA ERA DATADA.
+  test("CRED-34b: UMA credencial, DOIS consumidores — admissão VIP e chat", () => {
+    // [COMPOSIÇÃO gate-vip + chat + credencial] ESTE CASO JÁ MUDOU DUAS VEZES, E
+    // AS DUAS AFIRMAÇÕES ANTERIORES ERAM DATADAS.
     //
     // Ele nasceu dizendo "ninguém pode carregar o módulo ainda": a credencial
-    // era infraestrutura sem consumidor, e um acoplamento acidental faria o
-    // servidor chamar rede sem ninguém ter decidido isso. A composição decidiu.
-    // A credencial passou a ter exatamente UM consumidor — o adaptador de
-    // admissão VIP, ligado no bootstrap do transporte.
+    // era infraestrutura sem consumidor. Depois virou "há exatamente UM
+    // consumidor" — numa folha era a admissão VIP, na outra era o chat. As duas
+    // estavam certas sobre a folha delas e erradas sobre o servidor composto.
     //
-    // O QUE ELE PROTEGE CONTINUA IGUAL, e é por isso que ele não foi apagado:
-    // que ninguém construa uma SEGUNDA credencial. Duas teriam caches
+    // O QUE ELE PROTEGE NUNCA MUDOU, e é por isso que ele não foi apagado nem
+    // afrouxado: que ninguém construa uma SEGUNDA credencial. Duas teriam caches
     // independentes e rotacionariam o refresh token por conta própria — e duas
-    // rotações concorrentes invalidam uma à outra, derrubando o motor inteiro
-    // de um jeito que só apareceria na ativação.
+    // rotações concorrentes invalidam uma à outra, derrubando o motor inteiro de
+    // um jeito que só apareceria na ativação. A composição ingênua das duas
+    // folhas produzia exatamente essa segunda credencial; este caso é o que a
+    // pega.
     const carregamentos = (FORA_DO_MODULO.match(/require\("\.\/credencial_motor"\)/g) || []).length;
     assert.equal(carregamentos, 1, "a credencial é carregada em UM lugar só");
     const construcoes = (FORA_DO_MODULO.match(/criarCredencialDoMotor\(/g) || []).length;
@@ -1052,6 +1053,39 @@ describe("CRED/FRONTEIRA", () => {
       assert.equal(/credencial_motor|criarCredencialDoMotor/.test(fatia), false,
         "o módulo " + modulo + " não conhece a credencial");
     }
+
+    // OS DOIS CONSUMIDORES RECEBEM A MESMA INSTÂNCIA. Não basta haver uma só
+    // construção: se um dos dois deixasse de receber `credencialDoMotor`, o
+    // caminho dele voltaria a falhar fechado calado — e a suíte não veria.
+    const marca = "= criarCredencialDoMotor(";
+    const iMarca = FORA_DO_MODULO.indexOf(marca);
+    assert.ok(iMarca > 0, "a credencial é atribuída a um nome");
+    const nome = FORA_DO_MODULO.slice(0, iMarca).trim().split(/\s+/).pop();
+    assert.ok(nome && nome !== "const", "o nome da credencial é legível");
+    // Busca por TEXTO, não por expressão montada: `nome` vem do próprio arquivo
+    // e um identificador com caractere especial viraria regex inválida — falha
+    // de arnês que passaria por falha de servidor.
+    assert.ok(FORA_DO_MODULO.includes("credencial: " + nome + ",") ||
+              FORA_DO_MODULO.includes("credencial: " + nome + " "),
+      "a credencial canônica é passada adiante por nome");
+    const iVip = FORA_DO_MODULO.indexOf("criarAdaptadorAdmissaoVip({");
+    const fimVip = FORA_DO_MODULO.indexOf("});", iVip);
+    assert.ok(iVip > 0 && fimVip > iVip, "achei a montagem do adaptador de admissão");
+    assert.ok(FORA_DO_MODULO.slice(iVip, fimVip).includes("credencial: " + nome),
+      "a admissão VIP recebe a credencial canônica");
+    assert.ok(FORA_DO_MODULO.includes("criarPonteDeChat({ credencial: " + nome + " })"),
+      "a ponte de chat recebe a MESMA credencial");
+
+    // A OUTBOX SEGUE INTOCADA — o motivo original deste caso, e o que não mudou.
+    // A chamada criarOutbox() continua sem argumento: o encerramento não ganhou
+    // credencial, não ganhou ponte e não passou a chamar rede. Quem quiser o
+    // transporte do encerramento vai ter que mexer aqui e explicar.
+    assert.match(FORA_DO_MODULO, /criarOutbox\(\)/);
+    // A DEFINIÇÃO da função é retirada antes de procurar CHAMADA com argumento:
+    // `function criarOutbox(opts = {})` mora no módulo da outbox e casaria com a
+    // busca, reprovando um servidor correto.
+    const chamadasDaOutbox = FORA_DO_MODULO.replace(/function criarOutbox\([^)]*\)/g, "");
+    assert.equal(/criarOutbox\([^)]/.test(chamadasDaOutbox), false, "a outbox não recebe dependência nova");
   });
 
   test("CRED-34c: o servidor continua subindo sem nenhuma das variáveis novas", () => {

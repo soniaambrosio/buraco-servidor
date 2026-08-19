@@ -2959,7 +2959,17 @@ function jogarTurnoBotCore(jogo, assento) {
   // nesse caso: compra do monte e abre da mão quando puder (o cérebro respeita o
   // mínimo nas baixadas). Perde raras aberturas boas via lixo, mas nunca fura a regra.
   const lixoForcariaAberturaFraca = minimoAbertura > 0 && justif;
-  if (plano1.compra.origem === "lixo" && topo && !pegarLixoStranda && !lixoForcariaAberturaFraca) {
+  // [CONTROLADOR §10] TURNO JÁ INICIADO. Se o humano comprou e caiu depois, o
+  // bot que assume entra DEPOIS da compra: a fase do turno é do jogo, não do
+  // controlador, e takeover não reinicia turno. Sem esta guarda o bot tentaria
+  // comprar de novo, `validarVez` recusaria e o turno morreria sem jogada —
+  // a mesa penduraria exatamente no caso que esta OS existe para consertar.
+  //
+  // A obrigação de topo (`deveUsarTopo`) atravessa junto: ela vive no jogo e é
+  // honrada mais abaixo, no mesmo ponto em que já era.
+  if (jogo.jaComprou) {
+    log.push("assumiu o turno já iniciado (compra preservada)");
+  } else if (plano1.compra.origem === "lixo" && topo && !pegarLixoStranda && !lixoForcariaAberturaFraca) {
     const r = J.comprarLixo(jogo, assento);
     if (r.ok) {
       comprouLixo = true;
@@ -3898,6 +3908,41 @@ function gerarCodigoPadrao() {
  *  a privada fica fora do ranking por ser combinável, mas quem jogou jogou.
  *  `simulada` é o default CONSERVADOR de qualquer mesa cuja natureza não tenha
  *  sido declarada pelo servidor: na dúvida, não conta. */
+// ===========================================================================
+// [CONTROLADOR] CONTROLE DE ASSENTO — separado da POSSE (OS 7 §3).
+//
+// POSSE responde "de quem é este assento": vive em `sala.assentos[i]`
+// (`{ tipo, apelido, jogadorId }`), é congelada em `iniciarPartida` e
+// NENHUM caminho desta OS a altera. É ela que `composicaoDoCanal` lê para o
+// chat, e é por isso que uma queda de rede não remexe o canal.
+//
+// CONTROLE responde "quem fornece a próxima intenção deste assento": vive em
+// `sala.controle[i]`, fora de `sala.jogo`. Ficar fora do objeto de jogo é
+// deliberado — o controlador não é regra de Buraco e não pode encostar em mão,
+// monte, lixo, morto, vez, obrigação de topo ou placar (§10).
+//
+// `sala.jogo.assentos[i].tipo` continua existindo e continua alternando entre
+// "humano" e "bot", mas passa a ser DERIVADO: quem decide é `controle`. O
+// motor e o bot leem `tipo`; a autoridade é `controle`.
+// ===========================================================================
+const CONTROLE = Object.freeze({
+  HUMANO_ATIVO: "humano_ativo",      // conectado e no comando
+  HUMANO_AUSENTE: "humano_ausente",  // caiu, assento RESERVADO, ninguém joga
+  BOT_SUBSTITUTO: "bot_substituto",  // bot jogando assento de dono humano
+  BOT_DE_MESA: "bot_de_mesa",        // nasceu bot em iniciarPartida, sem dono
+});
+/** Motivo da perda de controle. Queda NÃO é desistência (§7). */
+const MOTIVO_CONTROLE = Object.freeze({
+  QUEDA: "queda_de_conexao",
+  AFK: "afk",
+  SAIDA: "saida_voluntaria",
+});
+/** Os dois estados em que o assento é jogado por bot. */
+const CONTROLES_DE_BOT = new Set([CONTROLE.BOT_SUBSTITUTO, CONTROLE.BOT_DE_MESA]);
+/** Graça de ausência por QUEDA (§5). Configuração do SERVIDOR: entra por
+ *  `criarGerenciador({ gracaAusenciaMs })`, nunca por mensagem do cliente. */
+const GRACA_AUSENCIA_PADRAO_MS = 15000;
+
 const TIPOS_DE_PARTIDA = ["publica", "privada", "simulada"];
 const TIPO_PADRAO = "privada";
 
@@ -4482,6 +4527,16 @@ function montarEnvelopeEncerramento(sala, agoraIso) {
           assento: p.assento, uid: p.uid, dupla: p.dupla, tipo: p.tipo,
         }))
       : [],
+    // [CONTROLADOR §13] Fato canônico da substituição, para o backend de
+    // ranking consumir. O servidor NÃO calcula rating aqui: ele diz o que
+    // aconteceu. `botAgiu: false` é caiu-e-voltou; `true` é o bot jogou.
+    substituicoes: Array.isArray(sala.substituicoes)
+      ? sala.substituicoes.map((s) => ({
+          assento: s.assento, uid: s.uid, motivo: s.motivo,
+          desdeIso: s.desdeIso, botAgiu: s.botAgiu,
+          humanoVoltou: s.humanoVoltou, voltouEmIso: s.voltouEmIso,
+        }))
+      : [],
   });
 }
 
@@ -4531,6 +4586,14 @@ function criarGerenciador(opts = {}) {
   // não se importam com encerramento não precisam tocar em disco.
   const outbox = opts.outbox || null;
   const agoraIso = opts.agoraIso || (() => new Date().toISOString());
+  // [CONTROLADOR §17] Relógio em milissegundos, injetável. Toda a decisão de
+  // expiração de graça passa por aqui — nenhum `Date.now()` solto no caminho
+  // do controlador, para que a suíte possa afirmar T-1, T e T+1 sem dormir.
+  const agora = opts.agora || (() => Date.now());
+  // [CONTROLADOR §5] Janela de graça da ausência por queda.
+  const gracaAusenciaMs = Number.isFinite(opts.gracaAusenciaMs)
+    ? Math.max(0, opts.gracaAusenciaMs)
+    : GRACA_AUSENCIA_PADRAO_MS;
   const gerarCodigo = opts.gerarCodigo || gerarCodigoPadrao;
   const LIMITE_BOTS = opts.limiteAvanco || 5000; // trava anti-loop do avanço
   // autoBots: avança TODOS os bots na hora (síncrono). Quando false, quem chama
@@ -4723,7 +4786,15 @@ function criarGerenciador(opts = {}) {
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, uidAutenticado = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
-    if (sala.iniciada) return { erro: "a partida já começou" };
+    if (sala.iniciada) {
+      // [CONTROLADOR §9] Mesa iniciada não recusa mais em bloco. Se o UID
+      // autenticado é o PROPRIETÁRIO preservado de um assento, isto não é
+      // entrada — é reconexão, e ela tem de passar. Qualquer outro UID
+      // continua recebendo a recusa de sempre.
+      const rec = reconectar({ codigo, jogadorId });
+      if (rec && rec.assento != null) return rec;
+      return { erro: (rec && rec.erro) || "a partida já começou" };
+    }
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
     // caso comum (casal/dupla que quer jogar JUNTA). Só depois enche os adversários
@@ -4806,6 +4877,19 @@ function criarGerenciador(opts = {}) {
     // trocar, mas o TITULAR daquele assento não muda. Sem este retrato, quem
     // caiu no meio perderia o crédito do que fez, e quem entrou depois herdaria.
     sala.participantes = mapaDeParticipantes(sala);
+    // [CONTROLADOR] O controlador nasce COM a partida e espelha a posse do
+    // instante inicial: assento com dono humano nasce sob controle humano;
+    // assento preenchido por bot nasce `bot_de_mesa` e nunca terá dono. A
+    // distinção existe para que "devolver o assento" só seja possível onde há
+    // a quem devolver.
+    sala.controle = sala.assentos.map((a) =>
+      a && a.tipo === "humano" && a.jogadorId
+        ? { estado: CONTROLE.HUMANO_ATIVO, motivo: null, desde: null, retornoPendente: false, terminal: false }
+        : { estado: CONTROLE.BOT_DE_MESA, motivo: null, desde: null, retornoPendente: false, terminal: false }
+    );
+    // [CONTROLADOR §13] Fato competitivo: uma entrada por substituição aberta.
+    // Nasce vazio a cada partida (a revanche passa por aqui).
+    sala.substituicoes = [];
     if (autoBots) avancarBots(sala); // se a vez começar num bot, ele já joga
     liquidar(sala); // caso raro: partida que já encerra de cara (meta minúscula em teste)
     return { ok: true, codigo };
@@ -4960,9 +5044,21 @@ function criarGerenciador(opts = {}) {
         continue;
       }
       const vez = jogo.assentos[jogo.vez];
-      if (!vez || vez.tipo !== "bot") break; // vez de humano: para e espera
-      const r = jogarTurnoBot(jogo, jogo.vez);
-      sala.log.push({ rodada: jogo.rodada, assento: jogo.vez, apelido: vez.apelido, acoes: r.log });
+      if (!vez) break;
+      // [CONTROLADOR §6] FRONTEIRA SEGURA. O retorno de um humano que estava
+      // sob substituição vale AQUI: antes de o bot começar o próximo turno
+      // daquele assento, e nunca no meio de um. Turno já iniciado
+      // (`jaComprou`) não é fronteira — espera o próximo.
+      const ctrlVez = controleDe(sala, jogo.vez);
+      if (ctrlVez && ctrlVez.retornoPendente && !jogo.jaComprou) {
+        aplicarRetorno(sala, jogo.vez);
+        break; // agora é vez de humano: para e espera
+      }
+      // [CONTROLADOR] Quem decide não é mais `tipo`, é `controle`. Assento
+      // `humano_ausente` cai aqui e PARA o laço: durante a graça a mesa espera,
+      // e nenhum bot age por ele (§5.5).
+      if (!assentoEhDeBot(sala, jogo.vez)) break;
+      const r = proporAcaoDoAssento({ codigo: sala.codigo, assento: jogo.vez });
       if (!r.ok && !jogo.rodadaEncerrada) break; // erro inesperado: evita loop
     }
     liquidar(sala); // partida pode ter encerrado numa batida de bot
@@ -4977,7 +5073,8 @@ function criarGerenciador(opts = {}) {
     if (j.encerrada) return false;
     if (j.rodadaEncerrada) return true; // precisa transicionar de rodada
     const v = j.assentos[j.vez];
-    return !!(v && v.tipo === "bot");
+    // [CONTROLADOR] Autoridade é o controlador, não o `tipo` do assento.
+    return !!(v && assentoEhDeBot(sala, j.vez));
   }
 
   /** Executa UM passo do servidor: joga o turno de UM bot, OU transiciona a
@@ -4990,9 +5087,17 @@ function criarGerenciador(opts = {}) {
     if (j.encerrada) { liquidar(sala); return { jogou: false }; }
     if (j.rodadaEncerrada) { J.distribuirRodada(j); return { jogou: false, transicao: true }; }
     const v = j.assentos[j.vez];
-    if (!v || v.tipo !== "bot") return { jogou: false };
+    if (!v) return { jogou: false };
+    // [CONTROLADOR §6] Mesma fronteira segura do laço síncrono: um passo da
+    // cadência com respiro também devolve o assento antes de jogar por ele.
+    const ctrlVez = controleDe(sala, j.vez);
+    if (ctrlVez && ctrlVez.retornoPendente && !j.jaComprou) {
+      aplicarRetorno(sala, j.vez);
+      return { jogou: false, retornoAplicado: true, assento: j.vez };
+    }
+    if (!assentoEhDeBot(sala, j.vez)) return { jogou: false };
     const assento = j.vez;
-    const r = jogarTurnoBot(j, assento);
+    const r = proporAcaoDoAssento({ codigo, assento });
     sala.log.push({ rodada: j.rodada, assento, apelido: v.apelido, acoes: r.log });
     liquidar(sala); // batida de bot pode ter encerrado a partida
     return { jogou: true, assento, resultado: r };
@@ -5123,8 +5228,241 @@ function criarGerenciador(opts = {}) {
     return v;
   }
 
-  /** Um jogador saiu da sala. No lobby, libera o assento; em jogo, vira bot
-   *  (pra mesa não travar) — decisão simples pro M2. */
+  // =========================================================================
+  // [CONTROLADOR] LEITURA
+  // =========================================================================
+  function controleDe(sala, assento) {
+    if (!sala || !Array.isArray(sala.controle)) return null;
+    return sala.controle[assento] || null;
+  }
+
+  /** O assento pode ser jogado por bot AGORA? É a pergunta que o laço faz. */
+  function assentoEhDeBot(sala, assento) {
+    const c = controleDe(sala, assento);
+    return !!(c && CONTROLES_DE_BOT.has(c.estado));
+  }
+
+  /** O proprietário do assento (posse), ou null se o assento nasceu bot. */
+  function donoDoAssento(sala, assento) {
+    const a = sala && sala.assentos && sala.assentos[assento];
+    if (!a || a.tipo !== "humano" || typeof a.jogadorId !== "string" || !a.jogadorId) return null;
+    return a.jogadorId;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR §13] FATO COMPETITIVO
+  //
+  // O servidor NÃO calcula rating (a autoridade do ranking vive fora dele).
+  // Ele produz o fato: houve substituição, em qual assento, por qual motivo,
+  // quando começou, se o bot chegou a AGIR e se o humano voltou. `botAgiu` é
+  // o campo que separa "caiu e voltou em 3 s" de "o bot jogou por você".
+  // =========================================================================
+  function registrarSubstituicao(sala, assento, motivo) {
+    if (!Array.isArray(sala.substituicoes)) sala.substituicoes = [];
+    const reg = {
+      assento,
+      uid: donoDoAssento(sala, assento),
+      motivo: motivo || null,
+      desdeIso: agoraIso(),
+      botAgiu: false,
+      humanoVoltou: false,
+      voltouEmIso: null,
+    };
+    sala.substituicoes.push(reg);
+    return reg;
+  }
+
+  /** A substituição ainda ABERTA deste assento (o humano não voltou). */
+  function substituicaoAberta(sala, assento) {
+    if (!Array.isArray(sala.substituicoes)) return null;
+    for (let i = sala.substituicoes.length - 1; i >= 0; i--) {
+      const s = sala.substituicoes[i];
+      if (s.assento === assento && !s.humanoVoltou) return s;
+    }
+    return null;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR §11] FRONTEIRA DE PROPOSTA
+  //
+  // ÚNICO ponto por onde uma ação de bot entra na partida. Ele responde à
+  // pergunta de autoridade — "este assento pode propor agora?" — antes de
+  // qualquer regra de Buraco ser tocada, e é o que impede humano e bot de
+  // terem autoridade ao mesmo tempo (§20).
+  //
+  // RESIDUAL DECLARADO PARA A OS 10: o decisor JS ainda APLICA a jogada dentro
+  // de `jogarTurnoBot`, em vez de devolver uma intenção para esta função
+  // validar e aplicar. Separar decisão de aplicação é a OS 10; migrar isso
+  // aqui significaria reescrever o bot JS, que a §12 proíbe. O que esta OS
+  // entrega é o SOQUETE: o gate de autoridade, o registro do fato e o ponto
+  // único de entrada — trocar o decisor depois é trocar a linha marcada.
+  // =========================================================================
+  function proporAcaoDoAssento({ codigo, assento } = {}) {
+    const sala = salas[codigo];
+    if (!sala || !sala.jogo) return { ok: false, erro: "mesa sem partida", log: [] };
+    const jogo = sala.jogo;
+    if (jogo.encerrada) return { ok: false, erro: "a partida já terminou", log: [] };
+    if (jogo.vez !== assento) return { ok: false, erro: "não é a vez deste assento", log: [] };
+    // GATE DE AUTORIDADE. Assento humano — ativo OU ausente em graça — não
+    // aceita proposta de bot. É aqui que a dupla autoridade morre.
+    if (!assentoEhDeBot(sala, assento)) {
+      return { ok: false, erro: "assento não está sob controle de bot", log: [] };
+    }
+    const alvo = jogo.assentos[assento];
+    const r = jogarTurnoBot(jogo, assento); // <-- decisor (OS 10 troca ESTA linha)
+    sala.log.push({ rodada: jogo.rodada, assento, apelido: alvo && alvo.apelido, acoes: r.log });
+    if (r.ok) {
+      // [§13] O bot AGIU por este assento. É o fato que muda o efeito competitivo.
+      const sub = substituicaoAberta(sala, assento);
+      if (sub) sub.botAgiu = true;
+    }
+    return r;
+  }
+
+  // =========================================================================
+  // [CONTROLADOR] TRANSIÇÕES
+  // =========================================================================
+
+  /** O bot assume o assento. Não toca posse, nem nada de `jogo` além do
+   *  `tipo` derivado — a fase do turno atravessa intacta (§10). */
+  function assumirPorBot(sala, assento, motivo) {
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (CONTROLES_DE_BOT.has(ctrl.estado)) return { ok: true, jaEraBot: true };
+    ctrl.estado = CONTROLE.BOT_SUBSTITUTO;
+    ctrl.motivo = motivo || null;
+    ctrl.desde = agora();
+    ctrl.retornoPendente = false;
+    // Saída voluntária é TERMINAL para aquele jogador naquela partida (§7).
+    if (motivo === MOTIVO_CONTROLE.SAIDA) ctrl.terminal = true;
+    const j = sala.jogo;
+    if (j && j.assentos[assento]) {
+      j.assentos[assento].tipo = "bot";
+      if (!j.assentos[assento].apelido) j.assentos[assento].apelido = NOMES_BOT[assento % NOMES_BOT.length];
+    }
+    registrarSubstituicao(sala, assento, motivo);
+    avancarBots(sala); // se era a vez dele, o bot assume — do ponto em que estava
+    return { ok: true, assumido: true };
+  }
+
+  /** Ausência (§5). Queda ganha graça; declaração (AFK, saída) não ganha:
+   *  não há incerteza de rede a proteger quando o próprio jogador avisa. */
+  function ausentar({ codigo, assento, motivo } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!Number.isInteger(assento)) return { erro: "assento inválido" };
+    if (!sala.iniciada) {
+      // No lobby não há partida a segurar: o assento é liberado, como sempre foi.
+      if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
+      return { ok: true, lobby: true };
+    }
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (CONTROLES_DE_BOT.has(ctrl.estado)) return { ok: true, jaEraBot: true };
+    if (motivo === MOTIVO_CONTROLE.QUEDA) {
+      // §5: NÃO vira bot agora. Marca ausente, reserva o assento e conta o tempo.
+      ctrl.estado = CONTROLE.HUMANO_AUSENTE;
+      ctrl.motivo = motivo;
+      ctrl.desde = agora();
+      ctrl.retornoPendente = false;
+      return { ok: true, ausente: true, expiraEm: ctrl.desde + gracaAusenciaMs };
+    }
+    return assumirPorBot(sala, assento, motivo || MOTIVO_CONTROLE.AFK);
+  }
+
+  /** [§5.6 / §17] Expiração da graça, avaliada por RELÓGIO INJETADO e de forma
+   *  PREGUIÇOSA: quem chama é o despachante, a cada mensagem, e o agendamento
+   *  do servidor real — que só existe para a mesa silenciosa não ficar parada.
+   *  Os dois caminhos chamam ESTA função, então não há duas verdades sobre o
+   *  instante do takeover.
+   *
+   *  A comparação é `>=`: em T-1 o assento continua ausente; em T o bot assume.
+   *  Exatamente T é takeover, e isso é escolha declarada, não acaso de ponto
+   *  flutuante. */
+  function verificarAusencias(codigo) {
+    const sala = salas[codigo];
+    if (!sala || !sala.iniciada || !Array.isArray(sala.controle)) return 0;
+    const t = agora();
+    let assumidos = 0;
+    for (let i = 0; i < sala.controle.length; i++) {
+      const c = sala.controle[i];
+      if (!c || c.estado !== CONTROLE.HUMANO_AUSENTE) continue;
+      if (!Number.isFinite(c.desde)) continue;
+      if (t - c.desde < gracaAusenciaMs) continue;
+      assumirPorBot(sala, i, c.motivo || MOTIVO_CONTROLE.QUEDA);
+      assumidos++;
+    }
+    return assumidos;
+  }
+
+  /** Devolve o controle ao humano. Só é chamada em FRONTEIRA SEGURA. */
+  function aplicarRetorno(sala, assento) {
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return;
+    ctrl.estado = CONTROLE.HUMANO_ATIVO;
+    ctrl.motivo = null;
+    ctrl.desde = null;
+    ctrl.retornoPendente = false;
+    if (sala.jogo && sala.jogo.assentos[assento]) sala.jogo.assentos[assento].tipo = "humano";
+    const sub = substituicaoAberta(sala, assento);
+    if (sub) { sub.humanoVoltou = true; sub.voltouEmIso = agoraIso(); }
+  }
+
+  /** Retorno do proprietário (§6). Nunca interrompe ação pela metade. */
+  function retornar({ codigo, assento, jogadorId } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!Number.isInteger(assento)) return { erro: "assento inválido" };
+    const dono = donoDoAssento(sala, assento);
+    if (!dono) return { erro: "assento sem proprietário humano" };
+    // Um UID diferente NUNCA retoma assento alheio, nem que o assento esteja
+    // sob bot. `jogadorId` null seria "sem identidade", e também não passa.
+    if (dono !== jogadorId) return { erro: "assento de outro proprietário" };
+    const ctrl = controleDe(sala, assento);
+    if (!ctrl) return { erro: "assento sem controlador" };
+    if (ctrl.terminal) return { erro: "você saiu desta partida" };
+    if (ctrl.estado === CONTROLE.HUMANO_ATIVO) return { ok: true, jaAtivo: true, botAgiu: false };
+    if (ctrl.estado === CONTROLE.HUMANO_AUSENTE) {
+      // Voltou dentro da graça: nenhum bot chegou a agir por este assento.
+      ctrl.estado = CONTROLE.HUMANO_ATIVO;
+      ctrl.motivo = null;
+      ctrl.desde = null;
+      return { ok: true, retomou: true, botAgiu: false };
+    }
+    // Sob substituição: a troca espera a fronteira do turno.
+    const j = sala.jogo;
+    const sub = substituicaoAberta(sala, assento);
+    const botAgiu = !!(sub && sub.botAgiu);
+    if (j && j.vez === assento && j.jaComprou === true) {
+      // Turno DESTE assento já começou: devolver agora partiria a jogada.
+      ctrl.retornoPendente = true;
+      return { ok: true, pendente: true, botAgiu };
+    }
+    aplicarRetorno(sala, assento);
+    return { ok: true, retomou: true, botAgiu };
+  }
+
+  /** [§9] Reconexão do PROPRIETÁRIO a uma partida já iniciada. Não é entrada
+   *  nova: não escolhe assento, não cria jogador, não aceita apelido como
+   *  identidade. O casamento é UID autenticado × posse preservada. */
+  function reconectar({ codigo, jogadorId } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { erro: "mesa não encontrada" };
+    if (!sala.iniciada) return { erro: "a partida não começou" };
+    if (typeof jogadorId !== "string" || !jogadorId) {
+      return { erro: "reconexão exige identidade autenticada" };
+    }
+    let alvo = -1;
+    for (let i = 0; i < sala.assentos.length; i++) {
+      if (donoDoAssento(sala, i) === jogadorId) { alvo = i; break; }
+    }
+    if (alvo === -1) return { erro: "a partida já começou" };
+    const r = retornar({ codigo, assento: alvo, jogadorId });
+    if (r.erro) return r;
+    return { codigo, assento: alvo, reconexao: true, pendente: !!r.pendente, botAgiu: !!r.botAgiu };
+  }
+
+  /** Saída VOLUNTÁRIA (§7). Sem graça e sem volta nesta partida. */
   function sair({ codigo, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
@@ -5132,12 +5470,11 @@ function criarGerenciador(opts = {}) {
       if (assento !== sala.criadorAssento) sala.assentos[assento] = null;
       return { ok: true };
     }
-    if (sala.jogo && sala.jogo.assentos[assento]) {
-      sala.jogo.assentos[assento].tipo = "bot";
-      if (!sala.jogo.assentos[assento].apelido) sala.jogo.assentos[assento].apelido = NOMES_BOT[assento % NOMES_BOT.length];
-      avancarBots(sala); // se era a vez dele, o bot assume
-    }
-    return { ok: true };
+    const r = assumirPorBot(sala, assento, MOTIVO_CONTROLE.SAIDA);
+    // Mesmo se o assento já era bot, a saída é terminal para o dono.
+    const ctrl = controleDe(sala, assento);
+    if (ctrl) ctrl.terminal = true;
+    return r.erro ? r : { ok: true };
   }
 
   /** [GATE VIP] Natureza competitiva de UMA sala, para quem precisa dela fora
@@ -5148,11 +5485,23 @@ function criarGerenciador(opts = {}) {
     return sala ? sala.categoriaCompetitiva : null;
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox,
+  // [COMPOSICAO chat + controlador + meta] A superfície de `salas` é a UNIÃO das
+  // três folhas, não a escolha de uma: quem some daqui não some do arquivo, some
+  // do alcance de quem chama — e o defeito só apareceria em produção, como
+  // `undefined is not a function` numa mesa com gente dentro.
+  return {
+    salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots,
+    vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair,
+    liquidar, outbox,
+    // [CONTROLADOR] superfície da OS 7
+    ausentar, retornar, reconectar, verificarAusencias, proporAcaoDoAssento,
+    controleDe, assentoEhDeBot, donoDoAssento, gracaAusenciaMs,
     // [GATE VIP] `categoriaConfigurada` e o que a CONFIGURACAO do processo
     // resolveu para as mesas novas; `categoriaDaSala` e o que cada mesa ja
     // criada carrega. Sao coisas diferentes e ficam com nomes diferentes.
-    categoriaConfigurada: categoriaCompetitiva, categoriaDaSala, admitirNoAssento, desfazerAdmissao };
+    categoriaConfigurada: categoriaCompetitiva, categoriaDaSala,
+    admitirNoAssento, desfazerAdmissao,
+  };
 }
 
 module.exports = {
@@ -5180,6 +5529,10 @@ module.exports = {
   // [META] Expostos para a suite afirmar a lista canonica e o padrao direto na
   // primitiva, e para o arnes montar mesa sem adivinhar quais metas existem.
   resolverMetaDePontos, METAS_CANONICAS, META_PADRAO,
+  // [CONTROLADOR] Vocabulário exposto para a suíte afirmar o contrato sem
+  // reescrever as strings — teste que redigita "bot_substituto" não detecta
+  // renomeação, só a repete.
+  CONTROLE, MOTIVO_CONTROLE, GRACA_AUSENCIA_PADRAO_MS,
 };
 
   };
@@ -6213,6 +6566,246 @@ module.exports = {
 
   };
 
+  __fabricas["chat_ponte"] = function (module, exports, require) {
+// [CHAT] servidor/chat_ponte.js — A PONTE PARA A AUTORIDADE DE CHAT.
+//
+// O QUE ESTE MÓDULO É: o único lugar do servidor que fala com
+// `functions-moderacao`. Ele apresenta a credencial renovável do motor, monta a
+// URL da callable, manda o pedido e devolve a resposta CRUA de quem decide.
+//
+// O QUE ESTE MÓDULO NÃO É, e não pode virar: autoridade. Ele não olha bloqueio,
+// não olha sanção, não valida texto, não escolhe destinatários, não cunha
+// `messageId` e não remonta identidade pública. Se um `if` de política aparecer
+// aqui, ele está no lugar errado — a decisão é da Function, e este arquivo só
+// carrega pergunta e resposta.
+//
+// SIMÉTRICO DE `auth_firebase`. Aquele verifica a credencial de QUEM ENTRA; o
+// `credencial_motor` produz a credencial de QUANDO SAÍMOS; este a APRESENTA. A
+// DECISÃO 4 do cabeçalho de `credencial_motor` dizia que o módulo nascia
+// desligado, "infraestrutura pronta para a OS do transporte". É esta OS, e é
+// aqui que ele é ligado — sem segunda credencial, sem chave estática e sem
+// `firebase-admin`.
+//
+// ZERO DEPENDÊNCIA, como o resto do repositório: `https` do Node e nada mais.
+//
+// TESTÁVEL SEM REDE (§28). `opts.chamar` substitui o transporte inteiro. Sem
+// injeção, o padrão é o HTTPS real — e a suíte NUNCA usa o padrão, porque um
+// teste que alcance a internet é um teste que falha no avião.
+
+const https = require("https");
+
+/// Códigos de falha DESTE módulo. Nenhum deles atravessa o fio até o jogador sem
+/// passar pela redação de `servidor.js` (§17): são para log de operador.
+const FALHA_PONTE = {
+  SEM_CREDENCIAL: "PONTE_SEM_CREDENCIAL",
+  SEM_CONFIGURACAO: "PONTE_SEM_CONFIGURACAO",
+  REDE: "PONTE_REDE",
+  TIMEOUT: "PONTE_TIMEOUT",
+  RESPOSTA_ILEGIVEL: "PONTE_RESPOSTA_ILEGIVEL",
+  RECUSA_DA_AUTORIDADE: "PONTE_RECUSA",
+};
+
+/// Teto de resposta. Uma callable de chat responde com uma projeção e uma lista
+/// curta de UIDs; qualquer coisa maior que isto é defeito ou ataque, e ler sem
+/// limite é como se entrega memória a quem responde.
+const LIMITE_RESPOSTA_BYTES = 64 * 1024;
+
+/// Quanto se espera pela autoridade antes de desistir.
+///
+/// TIMEOUT NÃO É APROVAÇÃO (§22 item 19). Ao estourar, este módulo REJEITA — e
+/// quem chama recusa a mensagem. Não existe caminho em que o silêncio da
+/// autoridade se transforme em mensagem entregue.
+const TIMEOUT_MS = 8000;
+
+class ErroPonteDeChat extends Error {
+  constructor(codigo, detalhe) {
+    // A mensagem é montada aqui e NUNCA interpolada a partir do corpo da
+    // resposta remota: o corpo pode conter o texto do jogador, e texto de
+    // jogador não entra em mensagem de erro nem em log.
+    super("ponte de chat: " + codigo);
+    this.name = "ErroPonteDeChat";
+    this.codigo = codigo;
+    // `detalhe` é o código de recusa da autoridade (curto, do vocabulário dela),
+    // nunca o corpo bruto.
+    this.detalhe = detalhe || null;
+  }
+}
+
+/// POST numa callable do Firebase, com o ID token do motor.
+///
+/// O formato do corpo (`{data: ...}`) e o do sucesso (`{result: ...}`) são o
+/// protocolo das callables, e não invenção nossa.
+function chamarHttps({ url, idToken, dados }) {
+  return new Promise((resolve, reject) => {
+    let alvo;
+    try {
+      alvo = new URL(url);
+    } catch (_) {
+      return reject(new ErroPonteDeChat(FALHA_PONTE.SEM_CONFIGURACAO));
+    }
+
+    const corpo = Buffer.from(JSON.stringify({ data: dados }), "utf8");
+    let req;
+    try {
+      req = https.request(
+        {
+          method: "POST",
+          hostname: alvo.hostname,
+          path: alvo.pathname + alvo.search,
+          port: alvo.port || 443,
+          headers: {
+            "content-type": "application/json",
+            "content-length": corpo.length,
+            authorization: "Bearer " + idToken,
+          },
+          timeout: TIMEOUT_MS,
+        },
+        (res) => {
+          const pedacos = [];
+          let total = 0;
+          res.on("data", (d) => {
+            total += d.length;
+            if (total > LIMITE_RESPOSTA_BYTES) {
+              req.destroy();
+              return;
+            }
+            pedacos.push(d);
+          });
+          res.on("end", () => {
+            let json = null;
+            try {
+              json = JSON.parse(Buffer.concat(pedacos).toString("utf8"));
+            } catch (_) {
+              return reject(new ErroPonteDeChat(FALHA_PONTE.RESPOSTA_ILEGIVEL));
+            }
+            resolve({ status: res.statusCode, json });
+          });
+        }
+      );
+    } catch (_) {
+      return reject(new ErroPonteDeChat(FALHA_PONTE.REDE));
+    }
+
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new ErroPonteDeChat(FALHA_PONTE.TIMEOUT));
+    });
+    // A mensagem do erro de rede NÃO é propagada: ela pode carregar host, IP e
+    // caminho, e nada disso ajuda quem lê o log de chat.
+    req.on("error", () => reject(new ErroPonteDeChat(FALHA_PONTE.REDE)));
+    req.end(corpo);
+  });
+}
+
+/**
+ * Cria a ponte.
+ *
+ * @param opts.credencial  o objeto de `credencial_motor` (`obterIdToken`).
+ * @param opts.projectId   projeto do Firebase (para montar a URL).
+ * @param opts.regiao      região das Functions.
+ * @param opts.nomes       nomes das Functions, vindos do contrato compartilhado.
+ * @param opts.chamar      substitui o transporte HTTPS (testes).
+ * @param opts.baseUrl     substitui a origem (emulador).
+ */
+function criarPonteDeChat(opts = {}) {
+  const credencial = opts.credencial || null;
+  const projectId = opts.projectId || process.env.FIREBASE_PROJECT_ID || null;
+  const regiao = opts.regiao || "southamerica-east1";
+  const nomes = opts.nomes || {
+    definirCanal: "definirCanalDeChat",
+    enviarPeloMotor: "enviarMensagemChatPeloMotor",
+  };
+  const chamar = opts.chamar || chamarHttps;
+  const baseUrl =
+    opts.baseUrl || (projectId ? "https://" + regiao + "-" + projectId + ".cloudfunctions.net" : null);
+
+  function configurada() {
+    return Boolean(credencial && credencial.configurada && credencial.configurada() && baseUrl);
+  }
+
+  function urlDe(nome) {
+    return baseUrl + "/" + nome;
+  }
+
+  /// Executa uma chamada autenticada e traduz a resposta.
+  ///
+  /// FALHA FECHADA em todos os caminhos: sem credencial, sem configuração, rede
+  /// caída, timeout, resposta ilegível, recusa da autoridade — todos REJEITAM.
+  /// Não há retorno "provisório" nem degradado.
+  async function invocar(nome, dados) {
+    if (!configurada()) {
+      throw new ErroPonteDeChat(FALHA_PONTE.SEM_CONFIGURACAO);
+    }
+
+    let idToken;
+    try {
+      idToken = await credencial.obterIdToken();
+    } catch (e) {
+      // O código da credencial é útil ao operador e não revela segredo.
+      throw new ErroPonteDeChat(FALHA_PONTE.SEM_CREDENCIAL, e && e.codigo);
+    }
+
+    const r = await chamar({ url: urlDe(nome), idToken, dados });
+
+    if (r && r.status === 200 && r.json && r.json.result !== undefined) {
+      return r.json.result;
+    }
+
+    // Recusa da autoridade. O código dela vem em `details.recusa` — vocabulário
+    // curto e já pensado para ser mostrado. O resto da resposta é descartado.
+    const detalhe =
+      (r && r.json && r.json.error && r.json.error.details && r.json.error.details.recusa) ||
+      (r && r.json && r.json.error && r.json.error.status) ||
+      null;
+    throw new ErroPonteDeChat(FALHA_PONTE.RECUSA_DA_AUTORIDADE, detalhe);
+  }
+
+  /**
+   * Declara (cria ou atualiza) o canal de chat de uma sala.
+   *
+   * O CONTEÚDO VEM DO SERVIDOR, sempre: quem está sentado, qual superfície, se
+   * está aberto. O cliente não participa desta chamada de forma nenhuma.
+   */
+  function definirCanal({ canalId, superficie, participantes, aberto }) {
+    return invocar(nomes.definirCanal, {
+      canalId,
+      superficie,
+      participantes,
+      aberto,
+    });
+  }
+
+  /**
+   * Pede à autoridade que a mensagem exista.
+   *
+   * `autorUid` vai no payload porque o UID autenticado desta chamada é o do
+   * MOTOR, não o do autor — e a autoridade só aceita isso de quem tem o claim
+   * `motorDePartidas`, conferindo ainda que aquele UID ocupa o canal.
+   */
+  function enviarMensagem({ autorUid, intentId, canalId, superficie, conteudo }) {
+    return invocar(nomes.enviarPeloMotor, {
+      autorUid,
+      intentId,
+      canalId,
+      superficie,
+      conteudo,
+    });
+  }
+
+  return { definirCanal, enviarMensagem, configurada };
+}
+
+module.exports = {
+  criarPonteDeChat,
+  chamarHttps,
+  ErroPonteDeChat,
+  FALHA_PONTE,
+  TIMEOUT_MS,
+  LIMITE_RESPOSTA_BYTES,
+};
+
+  };
+
   __fabricas["servidor"] = function (module, exports, require) {
 // servidor/servidor.js — SERVIDOR DE SALAS (protocolo), multiplayer M2
 // Despachante de mensagens INDEPENDENTE DE TRANSPORTE. Fala o protocolo do
@@ -6243,7 +6836,195 @@ module.exports = {
 // propriedades NÃO-GRAVÁVEIS: nenhum comando posterior troca a identidade da
 // conexão, e nenhum `msg.jogadorId` é lido em lugar nenhum deste arquivo.
 
-const { criarGerenciador } = require("./salas");
+const { criarGerenciador, MOTIVO_CONTROLE, CONTROLE } = require("./salas");
+
+// ===========================================================================
+// [CHAT] PRODUTOR DO CANAL — o contexto estável que a autoridade consome.
+// ===========================================================================
+//
+// O QUE O SERVIDOR SABE E A AUTORIDADE NÃO: quem está sentado, em que sala, e
+// se a partida acabou. É só isso que ele produz. Bloqueio, sanção, autoria,
+// texto, `messageId` e destinatários continuam sendo decididos por
+// `functions-moderacao` — nada disso é recalculado aqui.
+//
+// VOCABULÁRIO CONGELADO. Os valores abaixo são os do contrato compartilhado
+// `contrato/chat-transporte-v1.json`, que existe idêntico nos dois
+// repositórios. `test/chat_contrato.test.js` afirma que estas constantes batem
+// com o arquivo — se alguém mudar uma e não a outra, a suíte reprova. É o que
+// impede o servidor e a Function de falarem dialetos diferentes.
+
+const crypto = require("crypto");
+
+/** Superfície da mesa. O espectador tem valor próprio e NÃO é usado no envio. */
+const CHAT_SUPERFICIE_MESA = "mesa_de_partida";
+
+/** Papéis dentro do canal. Só `sentado` fala e recebe. */
+const CHAT_PAPEL = {
+  SENTADO: "jogador_sentado",
+  ESPECTADOR: "espectador",
+  FORA: "fora_do_canal",
+};
+
+/** Tipos do fio. */
+const CHAT_FIO = {
+  PEDIDO: "chat_enviar",
+  ENTREGA: "chat_mensagem",
+  RECIBO: "chat_ack",
+};
+
+/** Desfechos do recibo ao remetente. */
+const CHAT_ACK = {
+  ACEITA: "aceita",
+  REPETIDA: "repetida",
+  RECUSADA: "recusada",
+};
+
+/**
+ * Códigos que PODEM atravessar o fio (§17).
+ *
+ * REDIGIDOS DE PROPÓSITO. `indisponivel` cobre bloqueio E sanção de terceiro sem
+ * dizer qual dos dois foi — porque dizer "B te bloqueou" entrega a decisão
+ * pessoal de B a quem ele bloqueou, e dizer "B está suspenso" entrega estado
+ * administrativo de terceiro. `silenciado` é diferente: é sobre o PRÓPRIO
+ * remetente, e ele tem direito de saber por que não consegue falar.
+ */
+const CHAT_RECUSA = {
+  TEXTO_INVALIDO: "texto_invalido",
+  SEM_ASSENTO: "sem_assento",
+  SILENCIADO: "silenciado",
+  INDISPONIVEL: "indisponivel",
+  CANAL_FECHADO: "canal_fechado",
+  INTENCAO_INVALIDA: "intencao_invalida",
+  INTENCAO_REUTILIZADA: "intencao_reutilizada",
+  TENTE_DE_NOVO: "tente_de_novo",
+};
+
+/**
+ * O `canalId` a partir do código da sala.
+ *
+ * DIGEST, e não o código cru, por duas razões:
+ *
+ *  1. O código da sala É A CHAVE DE ENTRADA de uma mesa privada — quem o tem,
+ *     entra. Ele tem 4 dígitos ("BURACO-1234"), então é adivinhável, e a §6
+ *     proíbe segredo no identificador. O `canalId` viaja na projeção e é
+ *     referenciado numa denúncia; não pode ser o convite.
+ *  2. ESTABILIDADE. O digest é função só do código, então ele não muda com
+ *     socket, reconexão, geração de transporte, assento nem partida. Uma queda
+ *     de conexão não cria outro canal — que é exatamente o que a §6 exige.
+ *
+ * NÃO derivado de UID: o código da sala não contém UID.
+ *
+ * 32 hex = 128 bits. O valor não é segredo e não autentica ninguém; ele só
+ * precisa não colidir entre salas.
+ */
+function canalIdDeCodigo(codigo) {
+  return crypto
+    .createHash("sha256")
+    .update("canal-de-chat|" + String(codigo), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
+ * A composição do canal, derivada do ESTADO DA SALA — nunca de conexão.
+ *
+ * FONTE: `sala.assentos[i]`, que é o registro autoritativo de quem ocupa a mesa.
+ * Deliberadamente NÃO é a lista de conexões abertas, e a diferença aparece na
+ * reconexão: `sair` pós-início troca o tipo em `sala.jogo.assentos` (o jogador
+ * vira bot no JOGO) e não toca `sala.assentos`, então uma queda de conexão não
+ * altera a composição do canal. Se a fonte fosse conexão, cada oscilação de rede
+ * remexeria o canal e a §7 seria impossível de cumprir.
+ *
+ * BOT NUNCA ENTRA (§21). Só `tipo === "humano"` com `jogadorId`. Um bot no canal
+ * seria um destinatário sem pessoa, e um passo de distância de bot que conversa.
+ *
+ * ESPECTADOR NÃO ENTRA. Quem assiste não ocupa assento, então não aparece em
+ * `sala.assentos` — a exclusão é por construção, e não por filtro que alguém
+ * pode esquecer.
+ */
+function composicaoDoCanal(sala) {
+  if (!sala || !Array.isArray(sala.assentos)) return [];
+  const fora = [];
+  for (const a of sala.assentos) {
+    if (!a || a.tipo !== "humano") continue;
+    if (typeof a.jogadorId !== "string" || !a.jogadorId) continue;
+    fora.push({ uid: a.jogadorId, papel: CHAT_PAPEL.SENTADO });
+  }
+  return fora;
+}
+
+/**
+ * O canal aceita mensagem?
+ *
+ * `!sala.liquidada`, e a escolha tem base no domínio, não em preferência: quem
+ * gerencia essa marca é `salas.js`, que a liga em `liquidar` (encerramento
+ * autoritativo da partida) e a DESLIGA em `iniciarPartida`. Então o
+ * comportamento na revanche não foi decidido aqui — ele cai do estado que a sala
+ * já mantinha antes desta OS: partida encerrada não recebe fala, e partida nova
+ * na mesma sala volta a receber.
+ *
+ * A sala nunca é destruída neste servidor (não há `delete salas[codigo]`), então
+ * "encerrar definitivamente" é o encerramento da PARTIDA — não a morte da sala.
+ */
+function canalAberto(sala) {
+  return Boolean(sala) && sala.liquidada !== true;
+}
+
+/**
+ * A impressão do canal: o que faz uma sincronização valer a pena.
+ *
+ * Sem isto, `broadcastSala` chamaria a Function em cada jogada — dezenas de
+ * chamadas por partida para declarar o mesmo canal. Com isto, a chamada só sai
+ * quando a composição ou o estado de aceitação MUDA de fato, e a reconexão (que
+ * não muda nenhum dos dois) não gera chamada nenhuma.
+ */
+function impressaoDoCanal(sala) {
+  const uids = composicaoDoCanal(sala)
+    .map((p) => p.uid)
+    .slice()
+    .sort();
+  return (canalAberto(sala) ? "1" : "0") + "|" + uids.join(",");
+}
+
+/**
+ * Traduz a recusa da autoridade num código seguro para o fio (§17).
+ *
+ * LISTA DE PERMISSÃO. Qualquer coisa que não esteja mapeada vira
+ * `tente_de_novo` — nunca o código bruto da autoridade, nunca a mensagem, nunca
+ * o corpo da resposta. É o que impede um código novo lá dentro de virar
+ * vazamento aqui por omissão.
+ *
+ * `contatoRecusado` e `suspensaoImpedeChat` colapsam em respostas diferentes de
+ * propósito: o primeiro pode ser sobre TERCEIRO (bloqueio) e por isso vira
+ * `indisponivel`; o segundo é sobre quem escreve.
+ */
+function redigirRecusaDeChat(recusaDaAutoridade) {
+  switch (recusaDaAutoridade) {
+    case "conteudoVazio":
+    case "conteudoNaoTexto":
+    case "conteudoAcimaDoLimite":
+    case "conteudoComCaractereDeControle":
+      return CHAT_RECUSA.TEXTO_INVALIDO;
+    case "papelSemDireitoDeFala":
+    case "semDestinatarios":
+    case "superficieNaoAceitaChat":
+      return CHAT_RECUSA.SEM_ASSENTO;
+    case "suspensaoImpedeChat":
+      return CHAT_RECUSA.SILENCIADO;
+    case "contatoRecusado":
+      return CHAT_RECUSA.INDISPONIVEL;
+    case "canalFechado":
+    case "canalDesconhecido":
+      return CHAT_RECUSA.CANAL_FECHADO;
+    case "intencaoInvalida":
+      return CHAT_RECUSA.INTENCAO_INVALIDA;
+    case "intencaoReutilizada":
+      return CHAT_RECUSA.INTENCAO_REUTILIZADA;
+    default:
+      return CHAT_RECUSA.TENTE_DE_NOVO;
+  }
+}
+
 
 // [PATCH WS-AUTH] estados de autenticação da conexão
 //
@@ -6289,6 +7070,181 @@ function criarServidor(opts = {}) {
   // for injetado, toda autenticação falha e nenhum comando de jogador roda.
   // É de propósito — não existe "servidor sem auth" nem modo legado.
   const verificarToken = opts.verificarToken || (() => Promise.resolve({ ok: false, codigo: "SEM_VERIFICADOR" }));
+
+  // ==========================================================================
+  // [CHAT] TRANSPORTE — produtor do canal e entrega da projeção.
+  // ==========================================================================
+  //
+  // SEM PADRÃO PERMISSIVO, igual ao `verificarToken` acima: sem ponte injetada
+  // não existe chat. Não há "modo local" nem fallback que grave mensagem sem
+  // passar pela autoridade — a ausência da ponte recusa o envio, e é isso.
+  const chatPonte = opts.chatPonte || null;
+
+  /// Última impressão sincronizada por sala. Evita declarar o mesmo canal a cada
+  /// jogada, e é o que faz a reconexão não gerar chamada nenhuma.
+  const chatImpressao = {};
+
+  /// Declara o canal quando (e só quando) o estado estável da mesa mudou.
+  ///
+  /// NÃO É AWAIT NO CAMINHO DO JOGO. Um erro da autoridade de chat não pode
+  /// ocupar assento, derrubar conexão nem alterar a partida (§22 item 18): a
+  /// falha é registrada e o jogo segue. O preço é o canal ficar velho até a
+  /// próxima mudança — e a próxima mudança tenta de novo, porque a impressão só
+  /// é gravada quando a chamada dá certo.
+  function sincronizarCanal(codigo) {
+    if (!chatPonte || !codigo) return;
+    const sala = ger.salas[codigo];
+    if (!sala) return;
+
+    const impressao = impressaoDoCanal(sala);
+    if (chatImpressao[codigo] === impressao) return;
+
+    const participantes = composicaoDoCanal(sala);
+    const aberto = canalAberto(sala);
+
+    // Marca ANTES de esperar, para que duas mudanças seguidas não disparem duas
+    // chamadas concorrentes com o mesmo conteúdo. Em caso de falha a marca é
+    // desfeita, e a próxima mudança tenta de novo.
+    chatImpressao[codigo] = impressao;
+
+    Promise.resolve()
+      .then(() =>
+        chatPonte.definirCanal({
+          canalId: canalIdDeCodigo(codigo),
+          superficie: CHAT_SUPERFICIE_MESA,
+          participantes,
+          aberto,
+        })
+      )
+      .catch((e) => {
+        delete chatImpressao[codigo];
+        // Código de operador, nunca corpo de resposta e nunca texto de jogador.
+        console.warn(
+          "[chat] canal nao sincronizado sala=" + codigo + " codigo=" + ((e && e.codigo) || "DESCONHECIDO")
+        );
+      });
+  }
+
+  /// Entrega a projeção APENAS a quem a autoridade autorizou (§12).
+  ///
+  /// Percorre `destinatarios` — a lista que veio da Function — e não a sala. Quem
+  /// ficou de fora não recebe nem o pacote para descartar depois: o `enviar` nunca
+  /// é chamado para ele. Uma implementação que mandasse para a sala inteira e
+  /// deixasse o cliente esconder seria bloqueio decorativo.
+  ///
+  /// O UID é usado AQUI, dentro da infraestrutura, só para achar o socket. O que
+  /// atravessa o fio é `dados`, que é a projeção segura montada pela autoridade —
+  /// este arquivo não acrescenta um campo a ela.
+  function entregarChat(codigo, destinatarios, projecao) {
+    if (!Array.isArray(destinatarios) || !projecao) return 0;
+    const permitidos = Object.create(null);
+    for (const uid of destinatarios) {
+      if (typeof uid === "string" && uid) permitidos[uid] = true;
+    }
+
+    let entregues = 0;
+    for (const id of Object.keys(conexoes)) {
+      const c = conexoes[id];
+      if (!c || c.codigo !== codigo) continue;
+      // Espectador não recebe: `assento == null` é exatamente o que `papelDe`
+      // usa para dizer "espectador". A autoridade também não o põe em
+      // `destinatarios`, então esta é a segunda tranca da mesma porta.
+      if (c.assento == null) continue;
+      if (c.estadoAuth !== AUTH.AUTENTICADO) continue;
+      if (!permitidos[c.jogadorId]) continue;
+      enviarPara(id, { tipo: CHAT_FIO.ENTREGA, dados: projecao });
+      entregues++;
+    }
+    return entregues;
+  }
+
+  /// Recibo ao remetente (§16). Três desfechos distinguíveis, nenhum revelando
+  /// estado de terceiro.
+  function reciboDeChat(id, intentId, resultado, extra) {
+    enviarPara(
+      id,
+      Object.assign({ tipo: CHAT_FIO.RECIBO, intentId, resultado }, extra || {})
+    );
+  }
+
+  /// O caminho do `chat_enviar`.
+  ///
+  /// O QUE O CLIENTE MANDA: `intentId` e `texto`. Nada mais é lido — nem
+  /// `autorUid`, nem `canalId`, nem `destinatarios`, nem instante. O autor sai de
+  /// `c.jogadorId` (gravado do token verificado, propriedade não-gravável) e o
+  /// canal sai de `c.codigo`. Um payload que traga esses campos não é "aceito e
+  /// ignorado": ele simplesmente não é consultado, e o teste estrutural afirma
+  /// que este bloco não os lê.
+  async function processarChatEnviar(id, msg) {
+    const c = conexoes[id];
+    if (!c) return;
+
+    const intentId = typeof msg.intentId === "string" ? msg.intentId : "";
+
+    if (!chatPonte) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.TENTE_DE_NOVO,
+      });
+    }
+
+    // ESPECTADOR NÃO FALA, e quem não está em mesa também não. A recusa é local
+    // porque não há canal a consultar — e é a MESMA resposta que a autoridade
+    // daria (`papelSemDireitoDeFala`), então não há política nova aqui.
+    if (c.codigo == null || c.assento == null) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.SEM_ASSENTO,
+      });
+    }
+
+    const codigo = c.codigo;
+
+    // O canal precisa existir na autoridade antes da primeira fala. Se a
+    // sincronização anterior falhou, esta é a chance de recuperar.
+    sincronizarCanal(codigo);
+
+    let r;
+    try {
+      r = await chatPonte.enviarMensagem({
+        autorUid: c.jogadorId,
+        intentId,
+        canalId: canalIdDeCodigo(codigo),
+        superficie: CHAT_SUPERFICIE_MESA,
+        conteudo: typeof msg.texto === "string" ? msg.texto : msg.texto,
+      });
+    } catch (e) {
+      // TIMEOUT NÃO É APROVAÇÃO. Falha de rede, timeout e recusa da autoridade
+      // caem todos aqui, e todos recusam. Nada é gravado, nada é entregue, e o
+      // estado da partida não é tocado.
+      const bruto = e && e.detalhe;
+      console.warn(
+        "[chat] envio recusado sala=" + codigo + " codigo=" + ((e && e.codigo) || "DESCONHECIDO")
+      );
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: redigirRecusaDeChat(bruto),
+      });
+    }
+
+    const projecao = r && r.mensagem;
+    if (!projecao) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.TENTE_DE_NOVO,
+      });
+    }
+
+    // ENTREGA AT-LEAST-ONCE, com `messageId` estável (§15). Um retry da mesma
+    // intenção reentrega a MESMA projeção, com o MESMO `messageId` — que é o que
+    // permite a futura UI deduplicar. Não se finge at-most-once transformando
+    // retry em segunda mensagem.
+    entregarChat(codigo, r.destinatarios, projecao);
+
+    return reciboDeChat(
+      id,
+      intentId,
+      r.jaEnviada ? CHAT_ACK.REPETIDA : CHAT_ACK.ACEITA,
+      { messageId: projecao.messageId }
+    );
+  }
+
   // [PATCH WS-AUTH] §12 — UID (Firebase) x jogadorId (domínio). Hoje o cofre de
   // contas é chaveado pelo próprio uid: a relação é identidade, mas ela é
   // decidida AQUI, no servidor, e nunca informada pelo cliente. Se um dia houver
@@ -6565,7 +7521,15 @@ function criarServidor(opts = {}) {
     }
     c.codigo = codigo;
     c.assento = r.assento;
-    enviarPara(id, { tipo: "entrou", codigo, assento: r.assento });
+    // [CONTROLADOR §15.10 · COMPOSICAO] Entrada, reconexao ou entrada VIP ja
+    // aprovada pelo backend: em qualquer dos tres, a conexao que acabou de
+    // assumir o assento e a UNICA que pode agir por ele. Mora aqui, e nao no
+    // despachante, porque este e o unico ponto por onde os regimes sincrono e
+    // assincrono da admissao passam — no assincrono o assento so existe agora.
+    desalojarOutrasConexoes(c);
+    // `reconexao` distingue quem VOLTA de quem chega: o cliente precisa saber
+    // que nao houve assento novo. Ausente na criacao de mesa, que nunca e volta.
+    enviarPara(id, { tipo: "entrou", codigo, assento: r.assento, reconexao: !!r.reconexao });
     return broadcastSala(codigo);
   }
 
@@ -6602,6 +7566,35 @@ function criarServidor(opts = {}) {
     return { tipo: "estado", visao, versaoEstado: meta.versaoEstado, eventoId: meta.eventoId };
   }
 
+  /** [CONTROLADOR §6/§15.10] UMA autoridade por assento.
+   *
+   *  Quem acabou de assumir o assento é o dono da vez; qualquer outra conexão
+   *  que ainda o segure é rebaixada a espectador NA HORA. Rebaixar em vez de
+   *  desconectar é deliberado: o socket velho pode ser um aparelho que ainda
+   *  está com a tela aberta, e ele continua podendo ASSISTIR — só não age.
+   *
+   *  A varredura é por (codigo, assento), não por identidade: o que não pode
+   *  existir são duas conexões emitindo intenção pelo MESMO assento, venham
+   *  elas do mesmo UID ou não. */
+  function desalojarOutrasConexoes(dono) {
+    if (!dono || dono.codigo == null || !Number.isInteger(dono.assento)) return 0;
+    let desalojadas = 0;
+    for (const cid in conexoes) {
+      const o = conexoes[cid];
+      if (!o || o === dono) continue;
+      if (o.codigo !== dono.codigo) continue;
+      if (o.assento !== dono.assento) continue;
+      o.assento = null; // continua na sala, mas como quem assiste
+      desalojadas++;
+      enviarPara(cid, {
+        tipo: "erro",
+        codigo: "ASSENTO_ASSUMIDO",
+        motivo: "este assento foi assumido por outra conexão",
+      });
+    }
+    return desalojadas;
+  }
+
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
@@ -6609,9 +7602,22 @@ function criarServidor(opts = {}) {
     if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} c._cancelarExpiracao = null; }
     if (c.codigo != null && c.assento != null) {
       const cod = c.codigo;
-      ger.sair({ codigo: cod, assento: c.assento });
+      const assento = c.assento;
+      // [CONTROLADOR §5] Socket fechado NÃO é desistência. O assento fica
+      // RESERVADO e o proprietário tem a graça para voltar. Só a expiração —
+      // avaliada por `verificarAusencias`, com o relógio do servidor — entrega
+      // o assento ao bot.
+      ger.ausentar({ codigo: cod, assento, motivo: MOTIVO_CONTROLE.QUEDA });
       c.codigo = null; c.assento = null;
       broadcastSala(cod);
+      // A mesa pode ficar em silêncio durante a graça inteira (ninguém fala
+      // porque é a vez do ausente). Este despertar existe só para que o
+      // silêncio não seja eterno — e ele chama a MESMA função preguiçosa, não
+      // uma segunda regra de expiração.
+      agendarEm(ger.gracaAusenciaMs + 1, () => {
+        if (!ger.salas[cod]) return;
+        if (ger.verificarAusencias(cod) > 0) avancarComRespiro(cod);
+      });
     }
     delete conexoes[id];
   }
@@ -6652,6 +7658,10 @@ function criarServidor(opts = {}) {
       }
       return enviarPara(id, { tipo: "erro", motivo: "conexão não autenticada", codigo: "NAO_AUTENTICADO" });
     }
+    // [CONTROLADOR §5.6] Toda mensagem é uma oportunidade de perceber que uma
+    // graça venceu. Fica DEPOIS da fronteira de autenticação e ANTES do
+    // despacho: mensagem de conexão não autenticada não move o controlador.
+    if (c.codigo != null) ger.verificarAusencias(c.codigo);
     // [PATCH WS-AUTH] identidade declarada no comando ≠ identidade da conexão
     const divergente = identidadeDivergente(c, msg);
     if (divergente) {
@@ -6660,6 +7670,15 @@ function criarServidor(opts = {}) {
     }
 
     switch (msg.tipo) {
+      // [CHAT] O ÚNICO ingresso de mensagem do jogador. Assíncrono porque a
+      // decisão é da autoridade remota; `processar` não espera, e o recibo chega
+      // pelo próprio socket quando a resposta voltar. Nenhum outro `case` é
+      // afetado por uma falha aqui.
+      case CHAT_FIO.PEDIDO: {
+        processarChatEnviar(id, msg);
+        return;
+      }
+
       case "criarMesa": {
         // [PATCH WS-AUTH] c.jogadorId vem do token verificado, não da mensagem.
         // [GATE VIP] E o mesmo vale para `uidAutenticado`, que e o SUJEITO da
@@ -6678,6 +7697,12 @@ function criarServidor(opts = {}) {
         // [PATCH WS-AUTH] idem: identidade da conexão, nunca da mensagem. É por
         // aqui que a reconexão volta pra mesa — e ela só chega aqui autenticada.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
+        // [COMPOSICAO admissao-vip + controlador] A porta continua sendo
+        // `concluirPortaDeMesa`, porque a admissao VIP pode ser ASSINCRONA e o
+        // assento so existe depois que o backend responde. Desalojar aqui, antes
+        // da promessa, rebaixaria a conexao velha por uma entrada que ainda pode
+        // ser recusada. O §15.10 do controlador foi para dentro de
+        // `aplicarEntrada`, que e o unico ponto por onde os DOIS regimes passam.
         const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });
         return concluirPortaDeMesa(id, c, r, msg.codigo);
       }
@@ -6769,26 +7794,28 @@ function criarServidor(opts = {}) {
         return avancarComRespiro(c.codigo);
       }
       case "afkBot": {
-        // AFK: o jogador estourou o tempo 2x — o assento dele vira BOT e o servidor
-        // assume (joga por ele até ele voltar). É o que segura a mesa pública quando
-        // alguém dorme com o celular (pedido Sônia). Só marca o tipo e destrava o ritmo.
+        // [CONTROLADOR §8] AFK deixou de ser ORDEM do cliente e virou AVISO.
+        // O cliente diz "estou ausente"; quem decide o que isso significa —
+        // qual assento, qual identidade, qual instante — é o servidor, e ele
+        // decide a partir da conexão autenticada, nunca do payload.
+        //
+        // AFK é DECLARAÇÃO, não queda: o jogador está no aparelho e avisou.
+        // Por isso não ganha a graça de 15 s, que existe para a incerteza de
+        // rede (§5). O assento passa ao bot na hora, e o dono pode voltar.
         if (c.codigo == null) return;
         if (!ehParticipante(c)) return recusarEspectador(id);
-        const salaB = ger.salas[c.codigo];
-        if (salaB && salaB.jogo && salaB.jogo.assentos[c.assento]) {
-          salaB.jogo.assentos[c.assento].tipo = "bot";
-        }
-        return avancarComRespiro(c.codigo); // o servidor joga o assento agora-bot
+        ger.ausentar({ codigo: c.codigo, assento: c.assento, motivo: MOTIVO_CONTROLE.AFK });
+        return avancarComRespiro(c.codigo);
       }
       case "afkVoltar": {
-        // o jogador voltou: o assento volta a ser HUMANO. O servidor para na vez dele
-        // (vezEhBot=false) e espera — ele reassume no próximo turno dele.
+        // [CONTROLADOR §6/§8] Também aviso, não ordem. O servidor confere a
+        // POSSE (UID autenticado × proprietário do assento) e só devolve o
+        // controle em fronteira segura — se o bot está no meio de um turno, o
+        // retorno fica pendente e vale no próximo.
         if (c.codigo == null) return;
         if (!ehParticipante(c)) return recusarEspectador(id);
-        const salaV = ger.salas[c.codigo];
-        if (salaV && salaV.jogo && salaV.jogo.assentos[c.assento]) {
-          salaV.jogo.assentos[c.assento].tipo = "humano";
-        }
+        const rv = ger.retornar({ codigo: c.codigo, assento: c.assento, jogadorId: c.jogadorId });
+        if (rv && rv.erro) return enviarPara(id, { tipo: "erro", motivo: rv.erro });
         return broadcastSala(c.codigo);
       }
       case "sair": {
@@ -6812,6 +7839,10 @@ function criarServidor(opts = {}) {
    *  bot (ou transição de rodada), agenda o próximo passo. Com `agendar` imediato
    *  vira um laço síncrono (testes); com setTimeout, os bots jogam um a um na tela. */
   function avancarComRespiro(codigo) {
+    // [CONTROLADOR §5.6] Antes de qualquer coisa: a graça de quem caiu pode ter
+    // vencido enquanto a mesa fazia outra coisa. Preguiçoso de propósito — o
+    // instante do takeover é o relógio, não a chegada de um timer.
+    ger.verificarAusencias(codigo);
     broadcastSala(codigo);
     emitirFimSeAcabou(codigo);
     if (ger.vezEhBot(codigo)) {
@@ -6873,6 +7904,16 @@ function criarServidor(opts = {}) {
    *  escape: compra, descarte, batida, morto, nova rodada, encerramento e
    *  ressincronização passam TODOS por aqui. */
   function broadcastSala(codigo) {
+    // [CHAT] O canal acompanha o ESTADO ESTÁVEL da mesa, e este é o ponto por onde
+    // todo estado estável passa: criar mesa, entrar, sair, jogada que encerra a
+    // partida, bot que bate, revanche. Sincronizar aqui — em vez de em cada um
+    // desses caminhos — é o que impede um caminho novo de esquecer o canal.
+    //
+    // `impressaoDoCanal` faz a chamada sair só quando composição ou aceitação
+    // MUDAM: uma jogada comum não fala com a autoridade, e a reconexão (que não
+    // muda nenhuma das duas) também não.
+    sincronizarCanal(codigo);
+
     for (const cid in conexoes) {
       const c = conexoes[cid];
       if (c.codigo !== codigo) continue;
@@ -6910,6 +7951,22 @@ function criarServidor(opts = {}) {
 }
 
 module.exports = { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO };
+// [CHAT] Expostos para a suíte de transporte afirmar o contrato na PRIMITIVA,
+// sem montar servidor, conexão e ponte para cada caso — a mesma razão pela qual
+// `salas` expõe `carimbarEstado` e `montarEnvelopeEncerramento`. É também o que
+// permite ao teste de contrato comparar estas constantes com
+// `contrato/chat-transporte-v1.json` em vez de reescrevê-las.
+module.exports.canalIdDeCodigo = canalIdDeCodigo;
+module.exports.composicaoDoCanal = composicaoDoCanal;
+module.exports.canalAberto = canalAberto;
+module.exports.impressaoDoCanal = impressaoDoCanal;
+module.exports.redigirRecusaDeChat = redigirRecusaDeChat;
+module.exports.CHAT_SUPERFICIE_MESA = CHAT_SUPERFICIE_MESA;
+module.exports.CHAT_PAPEL = CHAT_PAPEL;
+module.exports.CHAT_FIO = CHAT_FIO;
+module.exports.CHAT_ACK = CHAT_ACK;
+module.exports.CHAT_RECUSA = CHAT_RECUSA;
+
 
   };
 
@@ -6930,14 +7987,19 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { criarServidor } = require("./servidor");
-// [BACKEND] A credencial canonica e o adaptador unico. Este e o UNICO ponto
-// do bundle que carrega os dois — nao existe segundo cliente de credencial
-// e nao existe segundo consumidor de backend de admissao.
+// [BACKEND + CHAT · COMPOSICAO] A credencial canonica e os DOIS consumidores
+// que ela alimenta. Este e o UNICO ponto do bundle que carrega
+// `credencial_motor` — nao existe segundo cliente de credencial. O cabecalho do
+// modulo dizia que ele nascia desligado, "infraestrutura pronta para a OS do
+// transporte": e aqui que ele foi ligado, e passou a servir dois consumidores
+// sem virar duas credenciais.
 const { criarCredencialDoMotor } = require("./credencial_motor");
 const { criarAdaptadorAdmissaoVip, VARIAVEL_URL: VARIAVEL_URL_ADMISSAO } = require("./admissao_vip");
+const { criarPonteDeChat } = require("./chat_ponte");
 const { criarContas } = require("./contas");
 const { criarOutbox } = require("./outbox"); // [PRODUTOR]
 const { criarVerificadorFirebase } = require("./auth_firebase"); // [PATCH WS-AUTH]
+
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const OP = { CONT: 0x0, TEXT: 0x1, BIN: 0x2, CLOSE: 0x8, PING: 0x9, PONG: 0xa };
@@ -7129,13 +8191,19 @@ function iniciar(porta, opts = {}) {
   // aparece em nenhuma dessas rotas, e não passa a aparecer por existir a
   // outbox.
   const outbox = criarOutbox();
-  // [BACKEND] AUTORIZACAO DE ENTRADA VIP — a unica fiacao externa deste servidor.
+  // [BACKEND + CHAT] AUTORIZACAO DE ENTRADA VIP E PONTE DE CHAT — as duas
+  // fiacoes externas deste servidor, sobre UMA credencial so.
   //
   // A credencial e a CANONICA (`credencial_motor`), construida uma vez e
   // compartilhada: e ela que tem cache por margem, coalescencia e rotacao do
   // refresh token. Um segundo cliente de credencial teria a sua propria
   // opiniao sobre validade e rotacionaria por conta propria - e duas rotacoes
   // concorrentes invalidam uma a outra. Por isso ela nasce aqui, e uma so.
+  //
+  // [COMPOSICAO] As duas folhas compunham esta linha, cada uma com o seu
+  // consumidor (a admissao VIP numa, o chat na outra) e cada uma construindo a
+  // credencial. Compor por uniao ingenua criaria exatamente a SEGUNDA credencial
+  // que as duas proibiam. Ha uma so, e ela e injetada nos dois consumidores.
   //
   // Construir NAO fala com rede e NAO exige as variaveis: sem elas,
   // `configurada()` responde false e `obterIdToken()` recusa. O servidor sobe
@@ -7148,6 +8216,21 @@ function iniciar(porta, opts = {}) {
     url: process.env[VARIAVEL_URL_ADMISSAO],
     credencial: credencialDoMotor,
   });
+  // [CHAT] A ponte para a autoridade de chat.
+  //
+  // FALHA FECHADA E SILENCIOSA PARA O JOGO. Se as variáveis da credencial não
+  // estiverem no ambiente, `configurada()` responde false, `sincronizarCanal`
+  // não faz nada e todo `chat_enviar` é recusado — e o resto do servidor roda
+  // exatamente como rodava. Um chat indisponível não pode impedir de jogar.
+  const chatPonte = criarPonteDeChat({ credencial: credencialDoMotor });
+  if (!chatPonte.configurada()) {
+    // Nomes das variáveis que faltam, nunca valores. `estado()` já é redigido.
+    console.warn(
+      "[chat] transporte desligado: credencial do motor nao configurada (" +
+        (credencialDoMotor.estado().faltando || []).join(", ") +
+        ")"
+    );
+  }
   // [GATE VIP] Natureza COMPETITIVA das mesas deste processo. Vem do ambiente,
   // que e a configuracao confiavel do servidor - do mesmo lugar de PORT e de
   // FIREBASE_PROJECT_ID, e nao de mensagem de cliente. Ausente = `casual`, que
@@ -7163,6 +8246,7 @@ function iniciar(porta, opts = {}) {
     // credencial — e nesse caso a entrada VIP segue falhando fechada, que e
     // o estado de qualquer processo que ainda nao foi provisionado.
     autorizarEntradaVip,
+    chatPonte,
   });
   const catConfigurada = servidor.ger.categoriaConfigurada;
   console.log("[gate-vip] categoria competitiva das mesas deste processo: " + catConfigurada);

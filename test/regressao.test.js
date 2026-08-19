@@ -10,7 +10,7 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { J, novoServidor, cliente, mesaComPartida } = require("./ajuda.js");
+const { J, T0, novoServidor, cliente, mesaComPartida } = require("./ajuda.js");
 
 /** Índice do assento que uma conexão ocupa, segundo o SERVIDOR. */
 function assentoDe(srv, c) {
@@ -192,8 +192,19 @@ describe("§18 — regressão do jogador", () => {
     assert.equal(jogo.vez, 0);
   });
 
-  test("REG-08: queda de jogador entrega o assento ao bot (comportamento preservado)", async () => {
-    const { srv, sala, jogadores } = await mesaComPartida();
+  test("REG-08: queda de jogador entrega o assento ao bot (agora em duas etapas)", async () => {
+    // [OS7] A regra mudou de forma, não de finalidade. Antes: socket fechado ⇒
+    // assento vira bot NA HORA. Agora: o assento é RESERVADO pela graça, e só
+    // depois dela vira bot. O motivo de existir do REG-08 — "a mesa não pode
+    // travar" — continua sendo afirmado, no segundo passo.
+    //
+    // Relógio controlado: sem ele a graça nunca vence e a segunda metade da
+    // regra ficaria sem prova. Não há espera real em lugar nenhum.
+    let t = T0;
+    const GRACA = 15000;
+    const { srv, codigo, sala, jogadores } = await mesaComPartida({
+      servidor: { agora: () => t, gracaAusenciaMs: GRACA },
+    });
     const jogo = sala.jogo;
     const alvo = jogadores[1];
     const assento = assentoDe(srv, alvo);
@@ -201,8 +212,17 @@ describe("§18 — regressão do jogador", () => {
     assert.equal(jogo.assentos[assento].tipo, "humano");
     srv.desconectar(alvo.id);
 
-    assert.equal(jogo.assentos[assento].tipo, "bot", "o assento vira bot para a mesa não travar");
+    // ETAPA 1 — a queda NÃO entrega o assento, e não destrói a posse.
+    assert.equal(jogo.assentos[assento].tipo, "humano", "a queda entregou o assento na hora");
+    assert.equal(sala.controle[assento].estado, "humano_ausente");
+    assert.equal(sala.assentos[assento].jogadorId, "uid-1", "a queda destruiu a posse");
     assert.equal(srv.conexoes[alvo.id], undefined, "a conexão sai do registro");
+
+    // ETAPA 2 — vencida a graça, o assento vira bot: a mesa não trava.
+    t += GRACA;
+    srv.ger.verificarAusencias(codigo);
+    assert.equal(jogo.assentos[assento].tipo, "bot", "o assento vira bot para a mesa não travar");
+    assert.equal(sala.controle[assento].estado, "bot_substituto");
   });
 
   test("REG-09: liquidação e evento de fim são idempotentes", async () => {
