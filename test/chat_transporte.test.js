@@ -34,7 +34,8 @@ const {
 
 const {
   canalIdDeCodigo, composicaoDoCanal, canalAberto, impressaoDoCanal,
-  redigirRecusaDeChat, CHAT_FIO, CHAT_ACK, CHAT_RECUSA, CHAT_SUPERFICIE_MESA, CHAT_PAPEL,
+  redigirRecusaDeChat, CHAT_FIO, CHAT_ACK, CHAT_RECUSA, CHAT_SUPERFICIE, CHAT_PAPEL,
+  superficieDaMesa, aceitaTextoLivre,
 } = bundle.require("servidor");
 
 const CHAVE = novoParDeChaves("kid-chat-1");
@@ -86,13 +87,27 @@ function pontefalsa(opts = {}) {
   };
 }
 
-function servidorDeChat(ponte) {
+/**
+ * Servidor cujas mesas são MESA PRIVADA declarada.
+ *
+ * A declaração é explícita porque texto livre exige círculo restrito: uma
+ * instância que não declara topologia NÃO admite texto livre, e o grupo CHT-F
+ * prova exatamente isso. Passar `tipoPartida` aqui é o que estas provas têm de
+ * fazer para falar da superfície que admite chat digitado.
+ */
+function servidorDeChat(ponte, extra) {
   const tempo = relogio();
-  return novoServidor({
-    tempo,
-    verificarToken: verificadorDeTeste({ chaves: CHAVE, tempo }),
-    chatPonte: ponte,
-  });
+  return novoServidor(
+    Object.assign(
+      {
+        tempo,
+        verificarToken: verificadorDeTeste({ chaves: CHAVE, tempo }),
+        chatPonte: ponte,
+        tipoPartida: "privada",
+      },
+      extra || {}
+    )
+  );
 }
 
 async function jogador(srv, uid) {
@@ -192,7 +207,7 @@ test("CHT-A-04 o canal sai da SALA: canalId no payload não muda nada", async ()
   await drenar();
 
   assert.equal(ponte.envios[0].canalId, canalIdDeCodigo(codigo));
-  assert.equal(ponte.envios[0].superficie, CHAT_SUPERFICIE_MESA);
+  assert.equal(ponte.envios[0].superficie, CHAT_SUPERFICIE.MESA_PRIVADA);
 });
 
 test("CHT-A-05 o pedido à autoridade tem SÓ os campos do contrato", async () => {
@@ -250,7 +265,7 @@ test("CHT-B-01 criar mesa declara o canal", async () => {
   assert.equal(ponte.canais.length, 1);
   const canal = ponte.canais[0];
   assert.equal(canal.canalId, canalIdDeCodigo(a.ultimo("entrou").codigo));
-  assert.equal(canal.superficie, CHAT_SUPERFICIE_MESA);
+  assert.equal(canal.superficie, CHAT_SUPERFICIE.MESA_PRIVADA);
   assert.equal(canal.aberto, true);
   assert.deepEqual(canal.participantes, [{ uid: UID_A, papel: CHAT_PAPEL.SENTADO }]);
 });
@@ -629,4 +644,113 @@ test("CHT-E-04 a redação de recusa é lista de PERMISSÃO", async () => {
   assert.equal(redigirRecusaDeChat("motivoQueNinguemMapeou"), CHAT_RECUSA.TENTE_DE_NOVO);
   assert.equal(redigirRecusaDeChat(undefined), CHAT_RECUSA.TENTE_DE_NOVO);
   assert.equal(redigirRecusaDeChat("playerModeration"), CHAT_RECUSA.TENTE_DE_NOVO);
+});
+
+// ===========================================================================
+// CHT-F — texto livre SÓ na Mesa Privada (correção canônica)
+// ===========================================================================
+//
+// A primeira versão desta entrega liberava texto livre em qualquer mesa. Está
+// errado: texto livre exige CÍRCULO RESTRITO, entre pessoas convidadas e
+// individualmente elegíveis — e só a Mesa Privada é isso. Mesa Pública, Mesa
+// VIP, Saguão e Salão VIP usam mensagens previamente cadastradas, reações e
+// emojis autorizados, que são outra funcionalidade e não passam por aqui.
+
+test("CHT-F-01 instância que NÃO declara topologia não admite texto livre", async () => {
+  // O caso mais importante do grupo. \`tipoPartida\` RESOLVIDO vira \`privada\` por
+  // omissão (é o padrão histórico, para a pergunta da conquista). Se o chat
+  // olhasse o resolvido, TODA instância não configurada abriria texto livre —
+  // texto livre por omissão, o oposto da correção.
+  const ponte = pontefalsa({ destinatarios: () => [UID_B] });
+  const tempo = relogio();
+  const srv = novoServidor({
+    tempo,
+    verificarToken: verificadorDeTeste({ chaves: CHAVE, tempo }),
+    chatPonte: ponte,
+    // nada de \`tipoPartida\`: ninguém declarou
+  });
+
+  const a = await jogador(srv, UID_A);
+  a.envia({ tipo: "criarMesa", apelido: "Alice" });
+  const codigo = a.ultimo("entrou").codigo;
+  const b = await jogador(srv, UID_B);
+  b.envia({ tipo: "entrarMesa", codigo, apelido: "Bruno" });
+  await drenar();
+
+  // A sala existe e a partida funciona.
+  assert.ok(srv.ger.salas[codigo]);
+  // O tipo RESOLVIDO é `privada` — a armadilha.
+  assert.equal(srv.ger.salas[codigo].tipoPartida, "privada");
+  // E mesmo assim: NENHUM canal declarado.
+  assert.equal(ponte.canais.length, 0, "canal de texto livre não nasce sem declaração");
+
+  a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "i1", texto: "digitando à toa" });
+  await drenar();
+
+  assert.equal(ponte.envios.length, 0, "nem chega à autoridade");
+  const ack = a.ultimo(CHAT_FIO.RECIBO);
+  assert.equal(ack.resultado, CHAT_ACK.RECUSADA);
+  assert.equal(ack.codigo, CHAT_RECUSA.TEXTO_LIVRE_INDISPONIVEL);
+});
+
+test("CHT-F-02 instância declarada PÚBLICA não admite texto livre", async () => {
+  const ponte = pontefalsa();
+  const srv = servidorDeChat(ponte, { tipoPartida: "publica" });
+  const { a } = await mesaComDois(srv);
+  await drenar();
+
+  assert.equal(ponte.canais.length, 0);
+  a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "i1", texto: "mesa pública" });
+  await drenar();
+
+  assert.equal(ponte.envios.length, 0);
+  assert.equal(a.ultimo(CHAT_FIO.RECIBO).codigo, CHAT_RECUSA.TEXTO_LIVRE_INDISPONIVEL);
+});
+
+test("CHT-F-03 Mesa Privada declarada admite, e o canal diz qual superfície é", async () => {
+  const ponte = pontefalsa({ destinatarios: () => [UID_B] });
+  const srv = servidorDeChat(ponte); // declara privada
+  const { a } = await mesaComDois(srv);
+  await drenar();
+
+  assert.equal(ponte.canais.length >= 1, true);
+  assert.equal(ponte.canais[ponte.canais.length - 1].superficie, CHAT_SUPERFICIE.MESA_PRIVADA);
+
+  a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "i1", texto: "mesa privada" });
+  await drenar();
+  assert.equal(a.ultimo(CHAT_FIO.RECIBO).resultado, CHAT_ACK.ACEITA);
+});
+
+test("CHT-F-04 a derivação da superfície FALHA FECHADA", async () => {
+  // Só a declaração explícita `privada` produz Mesa Privada. Tudo o mais — nulo,
+  // pública, simulada, valor inventado — cai em pública, que não fala.
+  assert.equal(superficieDaMesa("privada"), CHAT_SUPERFICIE.MESA_PRIVADA);
+  for (const t of [null, undefined, "publica", "simulada", "vip", "PRIVADA", "", 0, {}]) {
+    assert.equal(superficieDaMesa(t), CHAT_SUPERFICIE.MESA_PUBLICA, "topologia " + JSON.stringify(t));
+  }
+});
+
+test("CHT-F-05 só a Mesa Privada aceita texto livre", async () => {
+  assert.equal(aceitaTextoLivre(CHAT_SUPERFICIE.MESA_PRIVADA), true);
+  for (const s of [
+    CHAT_SUPERFICIE.MESA_PUBLICA,
+    CHAT_SUPERFICIE.MESA_VIP,
+    CHAT_SUPERFICIE.SAGUAO,
+    CHAT_SUPERFICIE.SALAO_VIP,
+    CHAT_SUPERFICIE.ESPECTADOR,
+  ]) {
+    assert.equal(aceitaTextoLivre(s), false, s);
+  }
+  // Superfície desconhecida também não: a lista é POSITIVA.
+  assert.equal(aceitaTextoLivre("mesa_de_partida"), false, "o valor antigo não ressuscita");
+  assert.equal(aceitaTextoLivre(undefined), false);
+});
+
+test("CHT-F-06 a impressão do canal muda com a superfície", async () => {
+  // Se a topologia da instância mudar, o canal muda de política e precisa ser
+  // redeclarado — senão um canal de Mesa Privada sobreviveria a uma instância
+  // que virou pública.
+  const sala = { assentos: [{ tipo: "humano", jogadorId: UID_A }], liquidada: false };
+  assert.notEqual(impressaoDoCanal(sala, "privada"), impressaoDoCanal(sala, null));
+  assert.equal(impressaoDoCanal(sala, "privada"), impressaoDoCanal(sala, "privada"));
 });

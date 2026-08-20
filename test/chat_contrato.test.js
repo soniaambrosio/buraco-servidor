@@ -36,7 +36,8 @@ const crypto = require("crypto");
 
 const bundle = require("../server.js");
 const {
-  CHAT_FIO, CHAT_ACK, CHAT_RECUSA, CHAT_PAPEL, CHAT_SUPERFICIE_MESA,
+  CHAT_FIO, CHAT_ACK, CHAT_RECUSA, CHAT_PAPEL, CHAT_SUPERFICIE,
+  CHAT_SUPERFICIES_COM_TEXTO_LIVRE,
 } = bundle.require("servidor");
 
 const RAIZ = path.resolve(__dirname, "..");
@@ -50,7 +51,7 @@ const FONTE = fs.readFileSync(path.join(RAIZ, "server.js"), "utf8");
  * arquivo. É trabalho de propósito: uma mudança de contrato que não exija tocar
  * as duas pontas é uma mudança que vai divergir.
  */
-const DIGEST_CONTRATO = "08365398cad454c18f04c6270db4152b022df32bf50d8d9f194d9cde6ed74ced";
+const DIGEST_CONTRATO = "1cd27e7af79b4d1608af05356395ef5b753b6e74222e08289f0b41624748f85e";
 
 const contrato = JSON.parse(fs.readFileSync(CAMINHO_CONTRATO, "utf8"));
 
@@ -102,7 +103,20 @@ test("CTR-A-02 as constantes do servidor batem com o contrato", () => {
   assert.equal(CHAT_ACK.REPETIDA, contrato.ack.repetida);
   assert.equal(CHAT_ACK.RECUSADA, contrato.ack.recusada);
 
-  assert.equal(CHAT_SUPERFICIE_MESA, contrato.superficies.mesa);
+  assert.equal(CHAT_SUPERFICIE.MESA_PRIVADA, contrato.superficies.mesaPrivada);
+  assert.equal(CHAT_SUPERFICIE.MESA_PUBLICA, contrato.superficies.mesaPublica);
+  assert.equal(CHAT_SUPERFICIE.MESA_VIP, contrato.superficies.mesaVip);
+  assert.equal(CHAT_SUPERFICIE.SAGUAO, contrato.superficies.saguaoPublico);
+  assert.equal(CHAT_SUPERFICIE.SALAO_VIP, contrato.superficies.salaoVip);
+  assert.equal(CHAT_SUPERFICIE.ESPECTADOR, contrato.superficies.espectador);
+
+  // A LISTA DE TEXTO LIVRE é a mesma nos dois lados, e tem UM elemento.
+  assert.deepEqual(
+    [...CHAT_SUPERFICIES_COM_TEXTO_LIVRE].sort(),
+    contrato.superficies.textoLivre.slice().sort()
+  );
+  assert.deepEqual(contrato.superficies.textoLivre, ["mesa_privada"]);
+
   assert.equal(CHAT_PAPEL.SENTADO, contrato.papeis.sentado);
   assert.equal(CHAT_PAPEL.ESPECTADOR, contrato.papeis.espectador);
   assert.equal(CHAT_PAPEL.FORA, contrato.papeis.fora);

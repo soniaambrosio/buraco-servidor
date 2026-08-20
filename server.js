@@ -4086,6 +4086,25 @@ function criarGerenciador(opts = {}) {
     ? opts.tipoPartida
     : (opts.tipoPartida === undefined ? TIPO_PADRAO : "simulada");
 
+  // [CHAT] A TOPOLOGIA DECLARADA, que é coisa diferente da resolvida acima.
+  //
+  // `tipoPartida` resolve para `privada` QUANDO NINGUÉM DECLAROU NADA, e esse
+  // padrão descreve a verdade da base: toda mesa de hoje nasce de um código
+  // compartilhado. Ele serve bem à pergunta para a qual foi criado — "esta
+  // partida conta para conquista pessoal?".
+  //
+  // Ele NÃO serve à pergunta do chat: "esta mesa é um círculo restrito, entre
+  // pessoas convidadas e individualmente elegíveis?". Se servisse, toda
+  // instância não configurada — inclusive cada prova desta suíte — passaria a
+  // admitir TEXTO LIVRE. Seria abrir o texto livre por omissão, que é o oposto
+  // do que a correção canônica manda.
+  //
+  // Então a pergunta do chat olha o que foi DECLARADO. `null` significa
+  // "ninguém declarou", e ninguém-declarou não é uma declaração.
+  const tipoPartidaDeclarado = TIPOS_DE_PARTIDA.includes(opts.tipoPartida)
+    ? opts.tipoPartida
+    : null;
+
   function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
@@ -4505,7 +4524,10 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair, liquidar, outbox,
+    // [CHAT] A topologia DECLARADA. Ver `tipoPartidaDeclarado`: é ela, e não a
+    // resolvida, que responde se a mesa admite texto livre.
+    topologiaConfigurada: tipoPartidaDeclarado };
 }
 
 module.exports = {
@@ -5491,8 +5513,59 @@ const { criarGerenciador } = require("./salas");
 
 const crypto = require("crypto");
 
-/** Superfície da mesa. O espectador tem valor próprio e NÃO é usado no envio. */
-const CHAT_SUPERFICIE_MESA = "mesa_de_partida";
+/**
+ * Superfícies de chat. Vocabulário do contrato compartilhado.
+ *
+ * CORREÇÃO CANÔNICA: SÓ a Mesa Privada admite TEXTO LIVRE, por ser círculo
+ * restrito entre pessoas convidadas e individualmente elegíveis. As outras usam
+ * mensagens previamente cadastradas, reações e emojis autorizados — outra
+ * funcionalidade, que este servidor não transporta.
+ *
+ * O valor `mesa_de_partida` NÃO existe mais: ele colapsava três superfícies com
+ * políticas diferentes, e mantê-lo como sinônimo de uma delas seria manter o
+ * defeito com outro nome.
+ */
+const CHAT_SUPERFICIE = {
+  MESA_PRIVADA: "mesa_privada",
+  MESA_PUBLICA: "mesa_publica",
+  MESA_VIP: "mesa_vip",
+  SAGUAO: "saguao_publico",
+  SALAO_VIP: "salao_vip",
+  ESPECTADOR: "espectador_de_mesa",
+};
+
+/** As superfícies que admitem texto livre. Lista POSITIVA e fechada. */
+const CHAT_SUPERFICIES_COM_TEXTO_LIVRE = new Set([CHAT_SUPERFICIE.MESA_PRIVADA]);
+
+/**
+ * A superfície de uma mesa, a partir da TOPOLOGIA DECLARADA do gerenciador.
+ *
+ * FALHA FECHADA, e é o ponto todo desta função: `null` (ninguém declarou),
+ * `publica`, `simulada` e qualquer valor inesperado caem em `mesa_publica`, que
+ * NÃO admite texto livre. Só a declaração explícita `privada` produz
+ * `mesa_privada`.
+ *
+ * Não olha a topologia RESOLVIDA (`sala.tipoPartida`), que vira `privada` por
+ * omissão: usá-la abriria texto livre em toda instância não configurada.
+ *
+ * MESA VIP NÃO É PRODUZIDA NESTA LINHAGEM. A dimensão competitiva que distingue
+ * `casual` de `vip_ranqueada` não existe em `c8ab95c`, base desta branch — ela
+ * vive em `claude/meta-canonica-partida-v1`, outra linhagem, que por sua vez não
+ * tem chat. Então `mesa_vip` está no vocabulário e não é emitido aqui, e a falha
+ * cai para o lado seguro: uma mesa VIP desta linhagem é vista como pública, e
+ * pública não fala texto livre. Quando as duas linhagens forem compostas, a Mesa
+ * VIP tem de CONTINUAR sem texto livre.
+ */
+function superficieDaMesa(topologiaDeclarada) {
+  return topologiaDeclarada === "privada"
+    ? CHAT_SUPERFICIE.MESA_PRIVADA
+    : CHAT_SUPERFICIE.MESA_PUBLICA;
+}
+
+/** A superfície admite texto digitado livremente? */
+function aceitaTextoLivre(superficie) {
+  return CHAT_SUPERFICIES_COM_TEXTO_LIVRE.has(superficie);
+}
 
 /** Papéis dentro do canal. Só `sentado` fala e recebe. */
 const CHAT_PAPEL = {
@@ -5533,6 +5606,10 @@ const CHAT_RECUSA = {
   INTENCAO_INVALIDA: "intencao_invalida",
   INTENCAO_REUTILIZADA: "intencao_reutilizada",
   TENTE_DE_NOVO: "tente_de_novo",
+  // A superfície usa falas prontas, e não texto digitado. É resposta de PRODUTO,
+  // não de moderação: o cliente deve mostrar o teclado de falas prontas em vez de
+  // sugerir que a pessoa foi silenciada.
+  TEXTO_LIVRE_INDISPONIVEL: "texto_livre_indisponivel",
 };
 
 /**
@@ -5614,12 +5691,16 @@ function canalAberto(sala) {
  * quando a composição ou o estado de aceitação MUDA de fato, e a reconexão (que
  * não muda nenhum dos dois) não gera chamada nenhuma.
  */
-function impressaoDoCanal(sala) {
+function impressaoDoCanal(sala, topologia) {
   const uids = composicaoDoCanal(sala)
     .map((p) => p.uid)
     .slice()
     .sort();
-  return (canalAberto(sala) ? "1" : "0") + "|" + uids.join(",");
+  // A SUPERFÍCIE entra na impressão: se a topologia da instância mudar, o canal
+  // muda de política e precisa ser redeclarado.
+  return (
+    (canalAberto(sala) ? "1" : "0") + "|" + superficieDaMesa(topologia) + "|" + uids.join(",")
+  );
 }
 
 /**
@@ -5732,7 +5813,14 @@ function criarServidor(opts = {}) {
     const sala = ger.salas[codigo];
     if (!sala) return;
 
-    const impressao = impressaoDoCanal(sala);
+    // A SUPERFÍCIE decide se existe canal. Mesa Pública, VIP, saguão e salão VIP
+    // usam falas prontas: não há canal de texto livre a declarar, e tentar
+    // declarar um só produziria `superficieNaoAceitaChat` na autoridade a cada
+    // mudança de mesa.
+    const superficie = superficieDaMesa(ger.topologiaConfigurada);
+    if (!aceitaTextoLivre(superficie)) return;
+
+    const impressao = impressaoDoCanal(sala, ger.topologiaConfigurada);
     if (chatImpressao[codigo] === impressao) return;
 
     const participantes = composicaoDoCanal(sala);
@@ -5747,7 +5835,7 @@ function criarServidor(opts = {}) {
       .then(() =>
         chatPonte.definirCanal({
           canalId: canalIdDeCodigo(codigo),
-          superficie: CHAT_SUPERFICIE_MESA,
+          superficie,
           participantes,
           aberto,
         })
@@ -5834,6 +5922,18 @@ function criarServidor(opts = {}) {
 
     const codigo = c.codigo;
 
+    // TEXTO LIVRE SÓ NA MESA PRIVADA. A recusa é local porque não há canal a
+    // consultar — e é a MESMA resposta que a autoridade daria
+    // (`superficieNaoAceitaChat`), então não há política nova aqui. O código no
+    // fio é próprio para que o cliente mostre as falas prontas em vez de sugerir
+    // que a pessoa foi silenciada.
+    const superficie = superficieDaMesa(ger.topologiaConfigurada);
+    if (!aceitaTextoLivre(superficie)) {
+      return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
+        codigo: CHAT_RECUSA.TEXTO_LIVRE_INDISPONIVEL,
+      });
+    }
+
     // O canal precisa existir na autoridade antes da primeira fala. Se a
     // sincronização anterior falhou, esta é a chance de recuperar.
     sincronizarCanal(codigo);
@@ -5844,7 +5944,7 @@ function criarServidor(opts = {}) {
         autorUid: c.jogadorId,
         intentId,
         canalId: canalIdDeCodigo(codigo),
-        superficie: CHAT_SUPERFICIE_MESA,
+        superficie,
         conteudo: typeof msg.texto === "string" ? msg.texto : msg.texto,
       });
     } catch (e) {
@@ -6471,7 +6571,10 @@ module.exports.composicaoDoCanal = composicaoDoCanal;
 module.exports.canalAberto = canalAberto;
 module.exports.impressaoDoCanal = impressaoDoCanal;
 module.exports.redigirRecusaDeChat = redigirRecusaDeChat;
-module.exports.CHAT_SUPERFICIE_MESA = CHAT_SUPERFICIE_MESA;
+module.exports.CHAT_SUPERFICIE = CHAT_SUPERFICIE;
+module.exports.CHAT_SUPERFICIES_COM_TEXTO_LIVRE = CHAT_SUPERFICIES_COM_TEXTO_LIVRE;
+module.exports.superficieDaMesa = superficieDaMesa;
+module.exports.aceitaTextoLivre = aceitaTextoLivre;
 module.exports.CHAT_PAPEL = CHAT_PAPEL;
 module.exports.CHAT_FIO = CHAT_FIO;
 module.exports.CHAT_ACK = CHAT_ACK;
