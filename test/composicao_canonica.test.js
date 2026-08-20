@@ -334,7 +334,12 @@ describe("COMPOSIÇÃO — meta inválida morre antes de tudo", () => {
     assert.equal(META_PADRAO, 2000);
     assert.equal(ponte.canais.length, 1, "a mesa canônica não declarou canal");
     assert.equal(ponte.canais[0].canalId, canalIdDeCodigo(codigo));
-    assert.equal(ponte.canais[0].superficie, CHAT_SUPERFICIE_MESA);
+    // [COMUNICACAO CONTROLADA] A superficie saiu do pedido de canal na versao 2
+    // do contrato: a autoridade a deriva do ambiente. O que o canal declara
+    // agora sao as duas dimensoes da mesa — e a mesa canonica desta suite, sem
+    // topologia declarada, e `publica`.
+    assert.equal("superficie" in ponte.canais[0], false);
+    assert.equal(ponte.canais[0].tipoPartida, "publica");
   });
 });
 

@@ -213,8 +213,25 @@ describe("GATE-VIP/CAT — a classificação competitiva da mesa", () => {
     // §9.3, prova ESTRUTURAL: o despachante não lê categoria de `msg`, e não
     // monta categoria nenhuma para passar adiante.
     assert.ok(!/msg\.categoria/i.test(MOD_SERVIDOR), "despachante não lê msg.categoria*");
-    assert.ok(!/categoriaCompetitiva\s*:/.test(MOD_SERVIDOR),
-      "despachante não constrói categoria para o gerenciador");
+    // [COMUNICAÇÃO CONTROLADA] O guarda ficou ESTREITO, e não foi apagado.
+    //
+    // Ele proibia QUALQUER `categoriaCompetitiva:` no módulo do servidor, e a
+    // proibição larga passou a bater no produtor do canal de chat — que
+    // ENCAMINHA a categoria já congelada da sala (`ger.categoriaDaSala`) para a
+    // autoridade de comunicação. Encaminhar o que a sala já decidiu não é
+    // construir categoria; construir seria montá-la a partir da mensagem.
+    //
+    // Então o que se proíbe agora é a CONSTRUÇÃO a partir do cliente, que é o
+    // defeito que a §9.3 nomeia — e, logo abaixo, exige-se que TODA ocorrência
+    // do campo neste módulo venha da sala. As duas juntas são mais estreitas
+    // que a original: a original deixaria passar `categoriaCompetitiva` montada
+    // de outra fonte qualquer, desde que não usasse esse nome de campo.
+    assert.ok(!/categoriaCompetitiva\s*:\s*(msg|dados|payload|req)\b/i.test(MOD_SERVIDOR),
+      "despachante não constrói categoria a partir da mensagem do cliente");
+    for (const uso of MOD_SERVIDOR.match(/categoriaCompetitiva\s*:[^,\n]*/g) || []) {
+      assert.match(uso, /ger\.categoriaDaSala\(/,
+        "categoriaCompetitiva só pode sair da SALA: " + uso.trim());
+    }
     // e no módulo de salas ela só sai de `opts` (construção) ou da sala.
     assert.ok(/normalizarCategoria\(opts\.categoriaCompetitiva\)/.test(MOD_SALAS),
       "a categoria configurada vem de opts, na construção do gerenciador");

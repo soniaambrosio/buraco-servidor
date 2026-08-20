@@ -192,7 +192,15 @@ test("CHT-A-04 o canal sai da SALA: canalId no payload nÃ£o muda nada", async ()
   await drenar();
 
   assert.equal(ponte.envios[0].canalId, canalIdDeCodigo(codigo));
-  assert.equal(ponte.envios[0].superficie, CHAT_SUPERFICIE_MESA);
+  // [COMUNICACAO CONTROLADA] `superficie` saiu do pedido na versao 2 do
+  // contrato: quem a deriva agora e a autoridade, a partir do AMBIENTE do
+  // canal. A afirmacao equivalente â€” e mais forte â€” e que NADA do que o cliente
+  // mandou atravessa: nem o canal inventado, nem a superficie, nem o codigo.
+  assert.equal("superficie" in ponte.envios[0], false);
+  assert.equal("codigo" in ponte.envios[0], false);
+  // Sem `especie` no pedido, a autoridade recebe `tipo: null` â€” que ela le
+  // como texto privado, o comportamento da versao 1.
+  assert.equal(ponte.envios[0].tipo, null);
 });
 
 test("CHT-A-05 o pedido Ã  autoridade tem SÃ“ os campos do contrato", async () => {
@@ -204,9 +212,12 @@ test("CHT-A-05 o pedido Ã  autoridade tem SÃ“ os campos do contrato", async () =
   a.envia({ tipo: CHAT_FIO.PEDIDO, intentId: "i1", texto: "oi", messageId: "meu", enviadaEm: "1999" });
   await drenar();
 
+  // A lista da versao 2 do contrato compartilhado. Que ELA bate com o arquivo
+  // do contrato e afirmado em chat_contrato.test.js (CTR-A-04); aqui o que se
+  // afirma e que o servidor nao acrescenta nem esquece nenhum campo.
   assert.deepEqual(
     Object.keys(ponte.envios[0]).sort(),
-    ["autorUid", "canalId", "conteudo", "intentId", "superficie"]
+    ["autorUid", "canalId", "conteudo", "intentId", "itemId", "tipo"]
   );
 });
 
@@ -250,7 +261,15 @@ test("CHT-B-01 criar mesa declara o canal", async () => {
   assert.equal(ponte.canais.length, 1);
   const canal = ponte.canais[0];
   assert.equal(canal.canalId, canalIdDeCodigo(a.ultimo("entrou").codigo));
-  assert.equal(canal.superficie, CHAT_SUPERFICIE_MESA);
+  // [COMUNICACAO CONTROLADA] A superficie saiu; entraram as duas dimensoes que
+  // este processo tem fixadas na construcao. Sem topologia declarada â€” o caso
+  // desta suite, e o padrao da base â€” vai `publica`, o ambiente online mais
+  // restritivo. NUNCA `privada`, que e o unico com teclado.
+  assert.equal("superficie" in canal, false);
+  assert.equal(canal.tipoPartida, "publica");
+  assert.equal(canal.categoriaCompetitiva, "casual");
+  assert.equal(canal.codigoDaSala, null, "o codigo da sala nao viaja fora da Privada");
+  assert.equal(canal.modo, "apenas_emotes");
   assert.equal(canal.aberto, true);
   assert.deepEqual(canal.participantes, [{ uid: UID_A, papel: CHAT_PAPEL.SENTADO }]);
 });
@@ -506,14 +525,14 @@ test("CHT-D-01 retry mantÃ©m o MESMO messageId e avisa repetiÃ§Ã£o", async () =>
 });
 
 
-test("CHT-D-07 o RETRY entrega à lista da autoridade, não à sala", async () => {
+test("CHT-D-07 o RETRY entrega ï¿½ lista da autoridade, nï¿½o ï¿½ sala", async () => {
   // A entrega repetida do at-least-once continua sendo ENTREGA: ela passa pelo
   // mesmo `entregarChat`, e a lista continua sendo a da autoridade. Recalcular
-  // a partir de quem está sentado seria furar bloqueio na segunda tentativa 
-  // o caminho que ninguém olha  e a mensagem chegaria a quem a autoridade
-  // deixou de fora justamente por decisão de moderação.
+  // a partir de quem estï¿½ sentado seria furar bloqueio na segunda tentativa 
+  // o caminho que ninguï¿½m olha  e a mensagem chegaria a quem a autoridade
+  // deixou de fora justamente por decisï¿½o de moderaï¿½ï¿½o.
   const ponte = pontefalsa({
-    destinatarios: () => [UID_B], // Carla NUNCA está na lista
+    destinatarios: () => [UID_B], // Carla NUNCA estï¿½ na lista
     envio: (pedido, n) =>
       Promise.resolve({
         enviada: true,
@@ -544,8 +563,8 @@ test("CHT-D-07 o RETRY entrega à lista da autoridade, não à sala", async () => {
 
   assert.equal(a.ultimo(CHAT_FIO.RECIBO).resultado, CHAT_ACK.REPETIDA, "o segundo pedido precisa ser retry");
   assert.equal(b.todas(CHAT_FIO.ENTREGA).length, 2, "quem a autoridade listou recebe as duas");
-  assert.equal(c.todas(CHAT_FIO.ENTREGA).length, 0, "o retry recalculou os destinatários pela sala");
-  assert.equal(a.todas(CHAT_FIO.ENTREGA).length, 0, "o autor não estava na lista e recebeu");
+  assert.equal(c.todas(CHAT_FIO.ENTREGA).length, 0, "o retry recalculou os destinatï¿½rios pela sala");
+  assert.equal(a.todas(CHAT_FIO.ENTREGA).length, 0, "o autor nï¿½o estava na lista e recebeu");
 });
 test("CHT-D-02 recusa da autoridade vira cÃ³digo REDIGIDO", async () => {
   // O fio nÃ£o pode dizer "B te bloqueou" nem "B estÃ¡ suspenso" (Â§17).

@@ -50,7 +50,7 @@ const FONTE = fs.readFileSync(path.join(RAIZ, "server.js"), "utf8");
  * arquivo. É trabalho de propósito: uma mudança de contrato que não exija tocar
  * as duas pontas é uma mudança que vai divergir.
  */
-const DIGEST_CONTRATO = "08365398cad454c18f04c6270db4152b022df32bf50d8d9f194d9cde6ed74ced";
+const DIGEST_CONTRATO = "a3ccdbab0730d807c8e954eee3e47d3e2c7b48933fcc1abcac01b5d09c2a2c23";
 
 const contrato = JSON.parse(fs.readFileSync(CAMINHO_CONTRATO, "utf8"));
 

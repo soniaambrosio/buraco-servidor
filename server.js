@@ -5485,6 +5485,19 @@ function criarGerenciador(opts = {}) {
     return sala ? sala.categoriaCompetitiva : null;
   }
 
+  /** [COMUNICACAO CONTROLADA] A topologia DECLARADA na configuracao deste
+   *  processo, e nao a resolvida.
+   *
+   *  A diferenca e a mesma que `tipoPartidaDeclarado` ja registra para a
+   *  admissao, e aqui ela e ainda mais decisiva: a topologia RESOLVIDA vale
+   *  `privada` por padrao (e a verdade da base — toda mesa nasce de um codigo
+   *  compartilhado), e usa-la aqui faria TODA instancia nao configurada pedir o
+   *  ambiente de Mesa Privada — o unico com texto livre. `null` significa
+   *  "ninguem declarou", e ninguem-declarou nao e uma declaracao. */
+  function topologiaDeclarada() {
+    return tipoPartidaDeclarado;
+  }
+
   // [COMPOSICAO chat + controlador + meta] A superfície de `salas` é a UNIÃO das
   // três folhas, não a escolha de uma: quem some daqui não some do arquivo, some
   // do alcance de quem chama — e o defeito só apareceria em produção, como
@@ -5500,6 +5513,8 @@ function criarGerenciador(opts = {}) {
     // resolveu para as mesas novas; `categoriaDaSala` e o que cada mesa ja
     // criada carrega. Sao coisas diferentes e ficam com nomes diferentes.
     categoriaConfigurada: categoriaCompetitiva, categoriaDaSala,
+    // [COMUNICACAO CONTROLADA] A topologia DECLARADA, para o produtor do canal.
+    topologiaDeclarada,
     admitirNoAssento, desfazerAdmissao,
   };
 }
@@ -6618,7 +6633,7 @@ const LIMITE_RESPOSTA_BYTES = 64 * 1024;
 const TIMEOUT_MS = 8000;
 
 class ErroPonteDeChat extends Error {
-  constructor(codigo, detalhe) {
+  constructor(codigo, detalhe, familia) {
     // A mensagem é montada aqui e NUNCA interpolada a partir do corpo da
     // resposta remota: o corpo pode conter o texto do jogador, e texto de
     // jogador não entra em mensagem de erro nem em log.
@@ -6628,6 +6643,9 @@ class ErroPonteDeChat extends Error {
     // `detalhe` é o código de recusa da autoridade (curto, do vocabulário dela),
     // nunca o corpo bruto.
     this.detalhe = detalhe || null;
+    // O motivo CATEGORICO da recusa, quando a autoridade o mandou. Curto e de
+    // lista fechada, como o `detalhe` — e pelo mesmo motivo.
+    this.familia = familia || null;
   }
 }
 
@@ -6753,11 +6771,20 @@ function criarPonteDeChat(opts = {}) {
 
     // Recusa da autoridade. O código dela vem em `details.recusa` — vocabulário
     // curto e já pensado para ser mostrado. O resto da resposta é descartado.
+    const detalhes = (r && r.json && r.json.error && r.json.error.details) || null;
     const detalhe =
-      (r && r.json && r.json.error && r.json.error.details && r.json.error.details.recusa) ||
+      (detalhes && detalhes.recusa) ||
       (r && r.json && r.json.error && r.json.error.status) ||
       null;
-    throw new ErroPonteDeChat(FALHA_PONTE.RECUSA_DA_AUTORIDADE, detalhe);
+    // [COMUNICACAO CONTROLADA] A FAMILIA e o motivo CATEGORICO, e ela existe
+    // para que ESTE arquivo nao precise conhecer o vocabulario inteiro da
+    // autoridade. Sem ela, cada recusa nova la vira "tente de novo" aqui, em
+    // silencio — e o jogador fica tentando uma porta que nunca vai abrir.
+    throw new ErroPonteDeChat(
+      FALHA_PONTE.RECUSA_DA_AUTORIDADE,
+      detalhe,
+      (detalhes && detalhes.familia) || null
+    );
   }
 
   /**
@@ -6766,10 +6793,38 @@ function criarPonteDeChat(opts = {}) {
    * O CONTEÚDO VEM DO SERVIDOR, sempre: quem está sentado, qual superfície, se
    * está aberto. O cliente não participa desta chamada de forma nenhuma.
    */
-  function definirCanal({ canalId, superficie, participantes, aberto }) {
+  /**
+   * Declara o canal.
+   *
+   * [COMUNICACAO CONTROLADA] O que mudou na versao 2 do contrato: sai
+   * `superficie`, entram as DUAS DIMENSOES que este processo ja tem fixadas na
+   * construcao (`tipoPartida`, `categoriaCompetitiva`) e, na Mesa Privada, o
+   * `codigoDaSala`.
+   *
+   * POR QUE NAO MANDAR O AMBIENTE PRONTO: seria conceder o ambiente por um
+   * campo de quem chama, e o ambiente decide se existe teclado. A autoridade
+   * traduz as duas dimensoes e, para a Mesa Privada, ainda confere a sala em
+   * `salasPrivadas` — que este servidor nao consegue forjar.
+   *
+   * O CODIGO DA SALA VIAJA E NAO FICA. A autoridade o usa para localizar a sala
+   * e os assentos admitidos, e nao o grava no canal. Ele nao entra em log
+   * nenhum deste arquivo.
+   */
+  function definirCanal({
+    canalId,
+    tipoPartida,
+    categoriaCompetitiva,
+    codigoDaSala,
+    modo,
+    participantes,
+    aberto,
+  }) {
     return invocar(nomes.definirCanal, {
       canalId,
-      superficie,
+      tipoPartida,
+      categoriaCompetitiva,
+      codigoDaSala,
+      modo,
       participantes,
       aberto,
     });
@@ -6782,13 +6837,23 @@ function criarPonteDeChat(opts = {}) {
    * MOTOR, não o do autor — e a autoridade só aceita isso de quem tem o claim
    * `motorDePartidas`, conferindo ainda que aquele UID ocupa o canal.
    */
-  function enviarMensagem({ autorUid, intentId, canalId, superficie, conteudo }) {
+  /**
+   * Envia uma comunicacao em nome de um jogador.
+   *
+   * [COMUNICACAO CONTROLADA] `tipo` e `itemId` entram; `superficie` sai (a
+   * autoridade a deriva do ambiente do canal). Os SEIS campos vao sempre, e os
+   * ausentes vao como `null` — a autoridade trata `null` como ausencia, e
+   * mandar sempre o mesmo conjunto e o que permite a suite afirmar o formato do
+   * pedido contra o contrato compartilhado.
+   */
+  function enviarMensagem({ autorUid, intentId, canalId, tipo, itemId, conteudo }) {
     return invocar(nomes.enviarPeloMotor, {
       autorUid,
       intentId,
       canalId,
-      superficie,
-      conteudo,
+      tipo: tipo === undefined ? null : tipo,
+      itemId: itemId === undefined ? null : itemId,
+      conteudo: conteudo === undefined ? null : conteudo,
     });
   }
 
@@ -6897,6 +6962,16 @@ const CHAT_RECUSA = {
   INTENCAO_INVALIDA: "intencao_invalida",
   INTENCAO_REUTILIZADA: "intencao_reutilizada",
   TENTE_DE_NOVO: "tente_de_novo",
+  // [COMUNICACAO CONTROLADA] O ambiente nao admite o que se pediu: texto livre
+  // fora da Mesa Privada, item fora do catalogo daquele lugar, chat desligado.
+  // UM codigo para os tres porque a diferenca entre eles nao muda o que o
+  // jogador faz a seguir — e porque detalhar aqui contaria ao cliente
+  // adulterado exatamente qual porta ele nao conseguiu abrir.
+  COMUNICACAO_NAO_PERMITIDA: "comunicacao_nao_permitida",
+  // [COMUNICACAO CONTROLADA] Cooldown, limite por janela, repeticao, rajada e o
+  // freio automatico por abuso. Quanto falta vem em `liberaEmMs`, que e
+  // informacao sobre o PROPRIO remetente.
+  RITMO: "muito_rapido",
 };
 
 /**
@@ -6998,7 +7073,25 @@ function impressaoDoCanal(sala) {
  * propósito: o primeiro pode ser sobre TERCEIRO (bloqueio) e por isso vira
  * `indisponivel`; o segundo é sobre quem escreve.
  */
-function redigirRecusaDeChat(recusaDaAutoridade) {
+function redigirRecusaDeChat(recusaDaAutoridade, familia) {
+  // [COMUNICACAO CONTROLADA] A FAMILIA vem primeiro, e e ela que sustenta o
+  // acrescimo desta OS. O `switch` por nome continua embaixo, intacto: ele e o
+  // que traduz as recusas que ja existiam, e apagar qualquer uma delas mudaria
+  // a resposta de um caso ja provado.
+  //
+  // NENHUMA FAMILIA E NOMEADA POR REGRA COMERCIAL. "direito" cobre item premium
+  // sem assinatura E evento de sistema pedido por quem nao e autoridade — as
+  // duas sao "voce nao pode isto", e detalhar qual das duas contaria ao cliente
+  // adulterado exatamente que porta ele nao abriu.
+  switch (familia) {
+    case "ambiente":
+    case "catalogo":
+    case "direito":
+      return CHAT_RECUSA.COMUNICACAO_NAO_PERMITIDA;
+    case "ritmo":
+      return CHAT_RECUSA.RITMO;
+  }
+
   switch (recusaDaAutoridade) {
     case "conteudoVazio":
     case "conteudoNaoTexto":
@@ -7020,6 +7113,10 @@ function redigirRecusaDeChat(recusaDaAutoridade) {
       return CHAT_RECUSA.INTENCAO_INVALIDA;
     case "intencaoReutilizada":
       return CHAT_RECUSA.INTENCAO_REUTILIZADA;
+    // [COMUNICACAO CONTROLADA] O que o AMBIENTE nao admite. Note que
+    // `textoLivreNaoPermitidoNoAmbiente` e a recusa que o jogador de Mesa
+    // Publica recebe quando tenta digitar — e ela nao vira `texto_invalido`,
+    // porque o texto nao tinha nada de errado: o lugar e que nao aceita texto.
     default:
       return CHAT_RECUSA.TENTE_DE_NOVO;
   }
@@ -7111,7 +7208,29 @@ function criarServidor(opts = {}) {
       .then(() =>
         chatPonte.definirCanal({
           canalId: canalIdDeCodigo(codigo),
-          superficie: CHAT_SUPERFICIE_MESA,
+          // [COMUNICACAO CONTROLADA] As duas dimensoes, e nao o ambiente. A
+          // topologia e a DECLARADA — ver `topologiaDeclarada` — porque a
+          // resolvida vale `privada` por padrao e faria toda instancia nao
+          // configurada pedir o ambiente com teclado.
+          // AUSENCIA DE DECLARACAO VIRA `publica`, e NUNCA `privada`.
+          //
+          // Uma instancia sem topologia declarada existe: e o padrao da base, e
+          // e o caso de toda a suite. Mandar `null` faria a autoridade recusar
+          // o canal inteiro e o chat morreria nessas instancias; mandar
+          // `privada` (a topologia RESOLVIDA) faria todas elas pedirem o unico
+          // ambiente com teclado. `publica` e a terceira saida e a correta: o
+          // ambiente online mais restritivo — falas prontas, sem digitacao.
+          tipoPartida: ger.topologiaDeclarada() || "publica",
+          categoriaCompetitiva: ger.categoriaDaSala(codigo),
+          // So faz sentido na Mesa Privada, e la e obrigatorio: e por ele que a
+          // autoridade acha a sala registrada e os assentos admitidos. Fora da
+          // topologia `privada` vai `null`, e nunca e gravado do outro lado.
+          codigoDaSala: ger.topologiaDeclarada() === "privada" ? codigo : null,
+          // O modo da MESA. Na Mesa Privada a autoridade IGNORA este campo e le
+          // a escolha gravada em `salasPrivadas` — o convidado (e este
+          // servidor) nao muda a configuracao do anfitriao. Fora dela, o modo
+          // possivel e o de balões, e `completo` seria recusado.
+          modo: "apenas_emotes",
           participantes,
           aberto,
         })
@@ -7204,12 +7323,35 @@ function criarServidor(opts = {}) {
 
     let r;
     try {
+      // [COMUNICACAO CONTROLADA] O cliente escolhe O QUE quer dizer — texto ou
+      // item do catalogo — e NADA MAIS. Continua sem escolher autor, canal,
+      // instante ou ambiente: o autor sai de `c.jogadorId` (gravado do token
+      // verificado) e o canal de `c.codigo`.
+      //
+      // `tipo` ausente vale `texto_privado` na autoridade, que e o
+      // comportamento da versao 1 do contrato — um cliente antigo continua
+      // falando, e continua sendo recusado onde texto nao pode existir.
+      // `especie`, e NAO `tipo`: neste protocolo `msg.tipo` e o ENVELOPE
+      // (`chat_enviar`), e le-lo aqui faria o servidor mandar "chat_enviar" a
+      // autoridade como especie de comunicacao. O contrato compartilhado nomeia
+      // o campo do fio, e a razao esta escrita nele.
+      const tipoPedido = typeof msg.especie === "string" ? msg.especie : null;
+      const ehCatalogado = tipoPedido !== null && tipoPedido !== "texto_privado";
+
       r = await chatPonte.enviarMensagem({
         autorUid: c.jogadorId,
         intentId,
         canalId: canalIdDeCodigo(codigo),
-        superficie: CHAT_SUPERFICIE_MESA,
-        conteudo: typeof msg.texto === "string" ? msg.texto : msg.texto,
+        tipo: tipoPedido,
+        itemId: ehCatalogado && typeof msg.itemId === "string" ? msg.itemId : null,
+        // TEXTO SO NO PEDIDO DE TEXTO. Mandar o texto junto de um item faria a
+        // autoridade recusar por `textoNoLugarDoItem` — o que estaria certo, e
+        // seria um erro deste arquivo, nao do jogador.
+        conteudo: ehCatalogado
+          ? null
+          : typeof msg.texto === "string"
+            ? msg.texto
+            : msg.texto,
       });
     } catch (e) {
       // TIMEOUT NÃO É APROVAÇÃO. Falha de rede, timeout e recusa da autoridade
@@ -7220,7 +7362,7 @@ function criarServidor(opts = {}) {
         "[chat] envio recusado sala=" + codigo + " codigo=" + ((e && e.codigo) || "DESCONHECIDO")
       );
       return reciboDeChat(id, intentId, CHAT_ACK.RECUSADA, {
-        codigo: redigirRecusaDeChat(bruto),
+        codigo: redigirRecusaDeChat(bruto, e && e.familia),
       });
     }
 
