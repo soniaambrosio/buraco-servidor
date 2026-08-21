@@ -254,7 +254,7 @@ SABOTAGENS.push(
     aplica: () => fs.unlinkSync(CONTRATO()) },
   { id: "E16", nome: "tirar `camposObrigatoriosPorSuite` do contrato", espera: "SEM_CAMPOS_OBRIGATORIOS",
     aplica: () => { const c = jC(); delete c.camposObrigatoriosPorSuite; eC(c); } },
-  { id: "E17", nome: "desproteger as ferramentas (lista de digests esvaziada)", espera: "GS-07",
+  { id: "E17", nome: "desproteger as ferramentas (lista de digests esvaziada)", espera: "FERRAMENTA_NAO_DECLARADA",
     aplica: () => { const c = jC(); c.ferramentasProtegidas = []; eC(c); } },
   { id: "E18", nome: "esvaziar os casos obrigatorios e baixar o piso global", espera: "CAMPO_OBRIGATORIO_AUSENTE",
     aplica: () => {
@@ -262,6 +262,87 @@ SABOTAGENS.push(
       c.execucao.totalMinimoDeTestes = 1;
       c.suitesObrigatorias[0].casosObrigatorios = [];
       eC(c);
+    } },
+);
+
+// --- OS DEZ ESCAPES DA PRIMEIRA VOLTA DA C2 --------------------------------
+//
+// A primeira volta fechou a AUSENCIA dos campos de defesa e parou ai. Estas
+// sabotagens cobram VALIDADE, e cobram das duas listas — a das suites e a das
+// ferramentas. As duas ultimas (V9/V10) sao o escape grave: a conferencia de
+// digest das ferramentas era condicional, entao apagar o campo apagava a
+// defesa, e dava para esvaziar o `portao.js` com `npm test` VERDE e ZERO
+// testes executados — o falso-verde R1/2.1 de volta por outra porta.
+const desarmarPortao = () =>
+  esc(PORTAO(), ler(PORTAO()).replace("function main() {",
+    'function main() { console.log("PORTAO: APROVADO"); return;'));
+
+SABOTAGENS.push(
+  { id: "V1", nome: "`pisoDeCasos` = 0 (piso presente que nunca compara)", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].pisoDeCasos = 0; eC(c); } },
+  { id: "V2", nome: "`pisoDeCasos` negativo", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].pisoDeCasos = -1; eC(c); } },
+  { id: "V3", nome: "`pisoDeCasos` fracionario (o `if` inteiro e pulado)", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].pisoDeCasos = 61.5; eC(c); } },
+  { id: "V4", nome: "`pisoDeCasos` como string", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].pisoDeCasos = "61"; eC(c); } },
+  { id: "V5", nome: "`id` da entrada removido", espera: "CAMPO_OBRIGATORIO_AUSENTE",
+    aplica: () => { const c = jC(); delete c.suitesObrigatorias[0].id; eC(c); } },
+  { id: "V6", nome: "`id` reduzido a espacos em branco", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].id = "   "; eC(c); } },
+  { id: "V7", nome: "`id` duplicado entre as duas entradas", espera: "ENTRADA_DUPLICADA",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[1].id = c.suitesObrigatorias[0].id; eC(c); } },
+  { id: "V8", nome: "`caminho` apontado para fora do repositorio", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].caminho = "../fora.test.js"; eC(c); } },
+  { id: "V8b", nome: "`caminho` removido (recusa, e nao TypeError)", espera: "CAMPO_OBRIGATORIO_AUSENTE",
+    aplica: () => { const c = jC(); delete c.suitesObrigatorias[0].caminho; eC(c); } },
+  { id: "V8c", nome: "digest da suite malformado (nao hexadecimal)", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].digestSha256 = "z".repeat(64); eC(c); } },
+  { id: "V8d", nome: "digest da suite com tamanho errado", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].digestSha256 = "a".repeat(63); eC(c); } },
+  { id: "V8e", nome: "bloco normativo reduzido a espacos em branco", espera: "CAMPO_OBRIGATORIO_INVALIDO",
+    aplica: () => { const c = jC(); c.suitesObrigatorias[0].blocosNormativos = ["   "]; eC(c); } },
+
+  // --- o escape grave, nas duas formas -------------------------------------
+  { id: "V9", nome: "apagar o digest do PORTAO e esvaziar o portao", espera: "FERRAMENTA_SEM_DIGEST",
+    aplica: () => {
+      const c = jC();
+      for (const f of c.ferramentasProtegidas) if (/portao/.test(f.caminho)) delete f.digestSha256;
+      eC(c);
+      desarmarPortao();
+    } },
+  { id: "V10", nome: "esvaziar `ferramentasProtegidas` e esvaziar o portao", espera: "FERRAMENTA_NAO_DECLARADA",
+    aplica: () => {
+      const c = jC(); c.ferramentasProtegidas = []; eC(c);
+      desarmarPortao();
+    } },
+  { id: "V11", nome: "digest da ferramenta trocado por texto invalido", espera: "FERRAMENTA_SEM_DIGEST",
+    aplica: () => {
+      const c = jC();
+      for (const f of c.ferramentasProtegidas) if (/portao/.test(f.caminho)) f.digestSha256 = "nao-e-digest";
+      eC(c);
+      desarmarPortao();
+    } },
+
+  // --- o verificador alterado para ignorar uma defesa ----------------------
+  // A guarda esta sob digest: mexer nela para desligar uma checagem acende
+  // FERRAMENTA_ADULTERADA no `pretest`, antes de a checagem alterada rodar.
+  { id: "V12", nome: "alterar a GUARDA para ignorar o schema dos campos", espera: "FERRAMENTA_ADULTERADA",
+    aplica: () => esc(GUARDA(), ler(GUARDA()).replace(
+      "      const regra = VALIDADORES[campo];", "      const regra = null;")) },
+  { id: "V13", nome: "alterar a GUARDA para ignorar a cobertura de ferramentas", espera: "FERRAMENTA_ADULTERADA",
+    aplica: () => esc(GUARDA(), ler(GUARDA()).replace(
+      "  for (const rel of pecasEmDisco) {", "  for (const rel of []) {")) },
+  { id: "V14", nome: "apagar GS-20 e GS-21 da suite de sobrevivencia", espera: "CASO_OBRIGATORIO_AUSENTE",
+    aplica: () => {
+      // Realinha digest e piso para ISOLAR a defesa: sem isso quem acende e o
+      // digest, e o espelhamento externo fica sem prova propria.
+      const t = lf(ler(SOBREV()));
+      const i = t.indexOf('  test("GS-20');
+      if (i < 0) throw new Error("GS-20 nao encontrado");
+      esc(SOBREV(), t.slice(0, i) + "});\n");
+      realinhar("test/gate_sobrevivencia.test.js", ["digestSha256", "pisoDeCasos"]);
+      const c = jC(); c.execucao.totalMinimoDeTestes = 1; eC(c);
     } },
 );
 
