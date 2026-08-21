@@ -3560,12 +3560,18 @@ function criarGerenciador(opts = {}) {
   // controla o ritmo (jogarUmBot), pra dar o "respiro" entre jogadas na tela.
   const autoBots = opts.autoBots !== false;
 
-  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0 } = {}) {
+  function criarMesa({ apelido = "Jogador", jogadorId = null, modalidade = "sbtl", metaPontos = 3000, aposta = 0, tipoMesa = "privada", espectadores = true, vip = false } = {}) {
+    const tipos = new Set(["publica", "vip", "privada", "treino"]);
+    if (!tipos.has(tipoMesa)) return { erro: "tipo de mesa inválido", codigoErro: "TIPO_MESA_INVALIDO" };
+    if (tipoMesa === "vip" && vip !== true) {
+      return { erro: "assinatura VIP necessária", codigoErro: "VIP_NECESSARIO" };
+    }
     let codigo, tentativas = 0;
     do { codigo = gerarCodigo(); } while (salas[codigo] && ++tentativas < 100);
     if (salas[codigo]) return { erro: "não foi possível gerar um código único" };
     salas[codigo] = {
-      codigo, modalidade, metaPontos,
+      codigo, modalidade, metaPontos, tipoMesa,
+      espectadoresPermitidos: tipoMesa !== "treino" && espectadores === true,
       aposta: Math.max(0, Math.round(aposta || 0)), // entrada por jogador (0 = sem aposta)
       criadorAssento: 0,
       assentos: [{ apelido, tipo: "humano", jogadorId }, null, null, null],
@@ -3578,9 +3584,12 @@ function criarGerenciador(opts = {}) {
     return { codigo, assento: 0 };
   }
 
-  function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento } = {}) {
+  function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, assento, vip = false } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
+    if (sala.tipoMesa === "vip" && vip !== true) {
+      return { erro: "assinatura VIP necessária", codigoErro: "VIP_NECESSARIO" };
+    }
     if (sala.iniciada) return { erro: "a partida já começou" };
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
@@ -3823,6 +3832,28 @@ function criarGerenciador(opts = {}) {
     return v;
   }
 
+  /** Decide se uma conexão autenticada pode assistir à mesa.
+   *
+   * A decisão usa somente configuração gravada pelo servidor e o direito VIP
+   * derivado de credencial assinada. O payload de `assistirMesa` não escolhe
+   * nenhum destes valores. Mesa privada já exige o código válido para ser
+   * localizada; pública e VIP podem ser descobertas por catálogo, mas ainda
+   * respeitam o interruptor de espectadores. Treino nunca é transmitido. */
+  function podeAssistir({ codigo, vip = false } = {}) {
+    const sala = salas[codigo];
+    if (!sala) return { permitido: false, codigoErro: "MESA_NAO_ENCONTRADA", motivo: "mesa não encontrada" };
+    if (sala.tipoMesa === "treino") {
+      return { permitido: false, codigoErro: "TREINO_NAO_PERMITE_ESPECTADOR", motivo: "treino não permite espectadores" };
+    }
+    if (sala.espectadoresPermitidos !== true) {
+      return { permitido: false, codigoErro: "ESPECTADORES_DESATIVADOS", motivo: "espectadores desativados nesta mesa" };
+    }
+    if (sala.tipoMesa === "vip" && vip !== true) {
+      return { permitido: false, codigoErro: "VIP_NECESSARIO", motivo: "assinatura VIP necessária" };
+    }
+    return { permitido: true, codigoErro: null, motivo: null };
+  }
+
   /** Um jogador saiu da sala. No lobby, libera o assento; em jogo, vira bot
    *  (pra mesa não travar) — decisão simples pro M2. */
   function sair({ codigo, assento } = {}) {
@@ -3840,7 +3871,7 @@ function criarGerenciador(opts = {}) {
     return { ok: true };
   }
 
-  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, sair };
+  return { salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots, vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, podeAssistir, sair };
 }
 
 module.exports = { criarGerenciador, gerarCodigoPadrao, NOMES_BOT };
@@ -4048,7 +4079,15 @@ function criarVerificadorFirebase({ projectId, buscarCertificados, agora } = {})
         // `expiraEm` sai daqui em MILISSEGUNDOS porque a conexão precisa dele:
         // token válido no handshake NÃO compra sessão eterna. Quem manda na
         // validade da conexão é o `exp` do token, não o instante do aperto de mão.
-        return { ok: true, uid: p.sub, expiraEm: p.exp * 1000 };
+        return {
+          ok: true,
+          uid: p.sub,
+          expiraEm: p.exp * 1000,
+          // `vip` é custom claim assinada. O cliente não informa este valor em
+          // comando de mesa; ausência ou qualquer valor diferente de `true`
+          // falha fechada como jogador comum.
+          vip: p.vip === true,
+        };
       },
       // rede/certificado fora do ar → NÃO autentica (fail closed)
       () => ({ ok: false, codigo: FALHA.CERTIFICADOS_INDISPONIVEIS })
@@ -4168,6 +4207,7 @@ function criarServidor(opts = {}) {
       uidAutenticado: null,
       estadoAuth: AUTH.NAO_AUTENTICADO,
       expiraEm: null,        // instante (ms) em que a credencial desta conexão morre
+      vip: false,            // direito derivado exclusivamente do token verificado
       _cancelarExpiracao: null,
       // Um cliente do protocolo 1 nunca manda `auth`. Este marcador é o que
       // distingue "app velho falando o dialeto antigo" de "app novo que ainda
@@ -4181,10 +4221,11 @@ function criarServidor(opts = {}) {
 
   // [PATCH WS-AUTH] Grava a identidade derivada do token na conexão, de forma
   // IMUTÁVEL (§10). Depois disto, `c.jogadorId = qualquer coisa` não tem efeito.
-  function vincularIdentidade(c, uid) {
+  function vincularIdentidade(c, uid, direitos = {}) {
     const jid = String(jogadorIdDoUid(uid));
     Object.defineProperty(c, "uidAutenticado", { value: String(uid), writable: false, configurable: false, enumerable: true });
     Object.defineProperty(c, "jogadorId", { value: jid, writable: false, configurable: false, enumerable: true });
+    c.vip = direitos.vip === true;
     c.estadoAuth = AUTH.AUTENTICADO;
   }
 
@@ -4262,6 +4303,7 @@ function criarServidor(opts = {}) {
         .then((r) => {
           if (!conexoes[id]) return false;
           if (r && r.ok && String(r.uid) === c.uidAutenticado && Number.isFinite(r.expiraEm)) {
+            c.vip = r.vip === true;
             armarExpiracao(c, r.expiraEm);
             enviarPara(id, { tipo: "autenticado", jogadorId: c.jogadorId, protocolo: PROTOCOLO_ATUAL });
             return true;
@@ -4287,7 +4329,7 @@ function criarServidor(opts = {}) {
           recusar(c, "SEM_EXPIRACAO");
           return false;
         }
-        vincularIdentidade(c, r.uid);
+        vincularIdentidade(c, r.uid, { vip: r.vip === true });
         armarExpiracao(c, r.expiraEm);
         if (contas) contas.obterOuCriar(c.jogadorId, null);
         enviarPara(id, { tipo: "autenticado", jogadorId: c.jogadorId, protocolo: PROTOCOLO_ATUAL });
@@ -4430,8 +4472,8 @@ function criarServidor(opts = {}) {
       case "criarMesa": {
         // [PATCH WS-AUTH] c.jogadorId vem do token verificado, não da mensagem.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        const r = ger.criarMesa({ apelido: msg.apelido, jogadorId: c.jogadorId, modalidade: msg.modalidade, metaPontos: msg.metaPontos, aposta: msg.aposta, tipoMesa: msg.tipoMesa, espectadores: msg.espectadores, vip: c.vip });
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro, codigo: r.codigoErro });
         c.codigo = r.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: r.codigo, assento: r.assento });
         return broadcastSala(r.codigo);
@@ -4440,8 +4482,8 @@ function criarServidor(opts = {}) {
         // [PATCH WS-AUTH] idem: identidade da conexão, nunca da mensagem. É por
         // aqui que a reconexão volta pra mesa — e ela só chega aqui autenticada.
         if (contas) contas.obterOuCriar(c.jogadorId, msg.apelido);
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId });
-        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro });
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, vip: c.vip });
+        if (r.erro) return enviarPara(id, { tipo: "erro", motivo: r.erro, codigo: r.codigoErro });
         c.codigo = r.codigo || msg.codigo; c.assento = r.assento;
         enviarPara(id, { tipo: "entrou", codigo: c.codigo, assento: r.assento });
         return broadcastSala(c.codigo);
@@ -4457,6 +4499,10 @@ function criarServidor(opts = {}) {
         // devolvem privilégio nenhum.
         const salaE = ger.salas[msg.codigo];
         if (!salaE) return enviarPara(id, { tipo: "erro", motivo: "mesa não encontrada" });
+        const acesso = ger.podeAssistir({ codigo: msg.codigo, vip: c.vip });
+        if (!acesso.permitido) {
+          return enviarPara(id, { tipo: "erro", motivo: acesso.motivo, codigo: acesso.codigoErro });
+        }
         c.jogadorId = msg.jogadorId || c.jogadorId || null;
         c.codigo = msg.codigo;
         c.assento = null; // explícito: assistir NUNCA concede assento

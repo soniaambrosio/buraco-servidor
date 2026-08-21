@@ -55,6 +55,7 @@ function emitirToken({
   kid,
   semKid = false,
   assinarCom,
+  claims = {},
 } = {}) {
   const iatS = Math.floor(emitidoEm / 1000);
   const cabecalho = { alg, typ: "JWT" };
@@ -67,6 +68,7 @@ function emitirToken({
     iat: iatS,
     auth_time: iatS,
     exp: iatS + validoPorS,
+    ...claims,
   };
   const h = b64url(JSON.stringify(cabecalho));
   const p = b64url(JSON.stringify(conteudo));
