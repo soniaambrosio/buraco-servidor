@@ -127,6 +127,54 @@ function padraoAlcanca(padroes, caminho) {
   return padroes.some((p) => globParaRegex(String(p).replace(/\\/g, "/")).test(alvo));
 }
 
+/** Um SHA-256 hexadecimal, e nada alem disso. */
+const HEX64 = /^[0-9a-f]{64}$/i;
+
+/** Texto util: string, e nao so espaco em branco.
+ *
+ *  A distincao importa. `""` ja era recusado pela checagem de vazio; `"   "`
+ *  nao era — e um `id` de tres espacos e indistinguivel de um `id` ausente para
+ *  qualquer humano lendo o diff, mas passava. */
+const textoUtil = (v) => typeof v === "string" && v.trim() !== "";
+
+/** Lista nao vazia de textos uteis. */
+const listaDeTextos = (v) => Array.isArray(v) && v.length > 0 && v.every(textoUtil);
+
+/** Caminho relativo que NAO escapa do repositorio.
+ *
+ *  Sem isto, `caminho: "../fora.test.js"` aponta a entrada obrigatoria para um
+ *  arquivo fora da arvore versionada: o digest bate, o gate fica verde, e a
+ *  prova protegida nao esta sob revisao de ninguem. */
+function caminhoInterno(rel) {
+  if (!textoUtil(rel)) return false;
+  if (path.isAbsolute(rel)) return false;
+  const dentro = path.relative(RAIZ, path.resolve(RAIZ, rel));
+  return dentro !== "" && !dentro.startsWith("..") && !path.isAbsolute(dentro);
+}
+
+/** O SCHEMA de uma entrada obrigatoria — secao 8 da OS 23.1-P-C2.
+ *
+ *  POR QUE UM VALIDADOR, e nao so "o campo existe". A C2 fechou a AUSENCIA dos
+ *  campos com `camposObrigatoriosPorSuite`, e a rehomologacao mostrou que isso
+ *  cobre metade do problema: o campo PRESENTE e INVALIDO desarma a defesa do
+ *  mesmo jeito, e sem deixar rastro no diff.
+ *
+ *    `pisoDeCasos: 0`    nao e "piso zero", e SEM PISO: `casos < 0` nunca e
+ *                        verdade, entao a comparacao existe e nao decide nada.
+ *    `pisoDeCasos: "61"` nao e um piso de 61: `Number.isInteger("61")` e falso,
+ *                        e o `if` inteiro era pulado.
+ *
+ *  Os dois passavam pela checagem de vazio sem tocar em nada. */
+const VALIDADORES = {
+  id: [textoUtil, "um texto nao vazio"],
+  caminho: [caminhoInterno, "um caminho relativo, dentro do repositorio"],
+  digestSha256: [(v) => typeof v === "string" && HEX64.test(v),
+    "um SHA-256 hexadecimal de exatamente 64 caracteres"],
+  pisoDeCasos: [(v) => Number.isInteger(v) && v > 0,
+    "um inteiro estritamente positivo (0, negativo, fracionario ou string desarmam o piso)"],
+  blocosNormativos: [listaDeTextos, "uma lista nao vazia de identificadores nao vazios"],
+  casosObrigatorios: [listaDeTextos, "uma lista nao vazia de identificadores nao vazios"],
+};
 // ---------------------------------------------------------------------------
 /** Confere a integridade estatica. Devolve `{ falhas, contrato }` — nunca sai
  *  do processo, para que o `portao.js` possa compor o veredito. */
@@ -168,37 +216,134 @@ function conferir() {
     anota("(contrato)", "SEM_CAMPOS_OBRIGATORIOS",
       "o contrato precisa declarar `camposObrigatoriosPorSuite` — sem isso, apagar um digest desarma a suite em silencio");
   }
-  for (const s of suites) {
+  // A entrada e identificada por POSICAO quando o proprio `id` e o que falta:
+  // `anota(s.id, ...)` com `id` ausente produzia uma falha sem dono.
+  const rotulo = (s, i) => (textoUtil(s && s.id) ? s.id : `suitesObrigatorias[${i}]`);
+  const invalidas = new Set();
+  const idsVistos = new Map();
+  const caminhosVistos = new Map();
+
+  for (let i = 0; i < suites.length; i++) {
+    const s = suites[i];
+    if (!s || typeof s !== "object" || Array.isArray(s)) {
+      anota(`suitesObrigatorias[${i}]`, "ENTRADA_MAL_FORMADA",
+        "uma entrada de `suitesObrigatorias` precisa ser um objeto.");
+      invalidas.add(i);
+      continue;
+    }
     for (const campo of camposExigidos || []) {
       const v = s[campo];
       const vazio = v === undefined || v === null || v === "" ||
         (Array.isArray(v) && v.length === 0);
       if (vazio) {
-        anota(s.id || s.caminho, "CAMPO_OBRIGATORIO_AUSENTE",
+        anota(rotulo(s, i), "CAMPO_OBRIGATORIO_AUSENTE",
           `a entrada nao carrega \`${campo}\`. Sem ele a defesa correspondente nao e avaliada, ` +
           `e a suite pode ser esvaziada sem que nada acenda.`);
+        if (campo === "caminho") invalidas.add(i);
+        continue;
       }
+      const regra = VALIDADORES[campo];
+      if (regra && !regra[0](v)) {
+        anota(rotulo(s, i), "CAMPO_OBRIGATORIO_INVALIDO",
+          `\`${campo}\` = ${JSON.stringify(v)} — esperado ${regra[1]}.\n` +
+          `      Campo presente e invalido desarma a defesa tao bem quanto campo ausente,\n` +
+          `      e sem deixar rastro no diff. Por isso e reprovacao, e nao aviso.`);
+        if (campo === "caminho") invalidas.add(i);
+      }
+    }
+
+    // Unicidade: duas entradas com o mesmo `id` (ou o mesmo `caminho`) fazem uma
+    // esconder a outra, e a segunda vira uma linha decorativa que nao protege nada.
+    if (textoUtil(s.id)) {
+      const chave = s.id.trim();
+      if (idsVistos.has(chave)) {
+        anota(rotulo(s, i), "ENTRADA_DUPLICADA",
+          `o \`id\` \`${chave}\` ja e usado pela entrada ${idsVistos.get(chave)}. ` +
+          `Id repetido torna a lista ambigua, e uma entrada obrigatoria vira decoracao.`);
+      } else idsVistos.set(chave, `suitesObrigatorias[${i}]`);
+    }
+    if (textoUtil(s.caminho)) {
+      const chave = s.caminho.trim().replace(/\\/g, "/");
+      if (caminhosVistos.has(chave)) {
+        anota(rotulo(s, i), "ENTRADA_DUPLICADA",
+          `o \`caminho\` \`${chave}\` ja e protegido pela entrada ${caminhosVistos.get(chave)}.`);
+      } else caminhosVistos.set(chave, `suitesObrigatorias[${i}]`);
     }
   }
 
   // --- as proprias ferramentas do portao estao integras --------------------
+  //
   // Sem isto, adulterar o portao e o caminho mais curto para o verde.
-  for (const f of contrato.ferramentasProtegidas || []) {
-    const abs = path.join(RAIZ, f.caminho);
+  //
+  // DUAS CORRECOES QUE A REHOMOLOGACAO EXIGIU, e a razao de cada uma:
+  //
+  //   1. O DIGEST NAO E OPCIONAL. Era `if (f.digestSha256 && d !== ...)` — o
+  //      MESMO padrao que foi o falso-verde R1/2.2, sobrevivendo aqui depois
+  //      de ter sido corrigido nas suites. Apagar o campo `digestSha256` da
+  //      entrada de `ferramentas/portao.js` apagava a conferencia junto: dava
+  //      para esvaziar o `main()` do portao com `npm test` VERDE, exit 0 e
+  //      ZERO testes executados. E o falso-verde 2.1 de volta por outra porta.
+  //   2. A COBERTURA VEM DO DISCO, nao da lista. Se a lista fosse a autoridade
+  //      sobre o proprio tamanho, esvazia-la desprotegia tudo de uma vez —
+  //      `for (const f of [])` nao confere nada e nao reclama de nada. Aqui
+  //      quem enumera e `ferramentas/*.js`: toda peca presente TEM de estar
+  //      declarada. Lista vazia deixa de ser "nada a conferir" e passa a ser
+  //      "duas ferramentas nao declaradas".
+  const protegidas = Array.isArray(contrato.ferramentasProtegidas)
+    ? contrato.ferramentasProtegidas : [];
+  const declaradas = new Map();
+  for (let i = 0; i < protegidas.length; i++) {
+    const f = protegidas[i] || {};
+    const onde = textoUtil(f.caminho) ? f.caminho : `ferramentasProtegidas[${i}]`;
+    if (!caminhoInterno(f.caminho)) {
+      anota(onde, "FERRAMENTA_MAL_DECLARADA",
+        "`caminho` precisa ser um caminho relativo, dentro do repositorio.");
+      continue;
+    }
+    if (typeof f.digestSha256 !== "string" || !HEX64.test(f.digestSha256)) {
+      anota(onde, "FERRAMENTA_SEM_DIGEST",
+        "a entrada nao carrega um `digestSha256` valido (SHA-256 hexadecimal de 64 caracteres).\n" +
+        "      Uma peca do portao declarada sem digest e uma peca NAO protegida:\n" +
+        "      era por aqui que se esvaziava o `portao.js` com o gate verde.");
+      continue;
+    }
+    declaradas.set(f.caminho.replace(/\\/g, "/"), f.digestSha256);
+  }
+
+  // Cobertura derivada: quem manda e o diretorio, nao a lista digitada.
+  let pecasEmDisco = [];
+  try {
+    pecasEmDisco = fs.readdirSync(__dirname)
+      .filter((n) => n.endsWith(".js"))
+      .map((n) => "ferramentas/" + n)
+      .sort();
+  } catch (e) {
+    anota("(ferramentas)", "FERRAMENTAS_ILEGIVEIS", e.message);
+  }
+  for (const rel of pecasEmDisco) {
+    if (!declaradas.has(rel)) {
+      anota(rel, "FERRAMENTA_NAO_DECLARADA",
+        "esta peca do portao existe em `ferramentas/` e NAO esta em `ferramentasProtegidas`.\n" +
+        "      Ela roda sem que nada confira se foi adulterada. Declare-a com o digest:\n" +
+        "      node ferramentas/gate-de-provas.js --digests");
+    }
+  }
+
+  for (const [rel, esperado] of declaradas) {
+    const abs = path.join(RAIZ, rel);
     if (!fs.existsSync(abs)) {
-      anota(f.caminho, "FERRAMENTA_AUSENTE",
+      anota(rel, "FERRAMENTA_AUSENTE",
         "uma peca do portao sumiu — sem ela nada confere nem executa as provas.");
       continue;
     }
     const d = sha256(lerNormalizado(abs));
-    if (f.digestSha256 && d !== f.digestSha256) {
-      anota(f.caminho, "FERRAMENTA_ADULTERADA",
-        `esperado ${f.digestSha256.slice(0, 16)}…, encontrado ${d.slice(0, 16)}…\n` +
+    if (d !== esperado) {
+      anota(rel, "FERRAMENTA_ADULTERADA",
+        `esperado ${esperado.slice(0, 16)}…, encontrado ${d.slice(0, 16)}…\n` +
         `      Mexer no portao e legitimo; faze-lo em silencio nao e.\n` +
         `      Atualize o contrato NO MESMO commit: node ferramentas/gate-de-provas.js --digests`);
     }
   }
-
   // --- o comando oficial e EXATAMENTE o declarado --------------------------
   // Nao ha mais encadeamento no comando oficial: um unico processo confere,
   // executa e conta. Assim nao existe operador de shell para subverter, e
@@ -247,7 +392,13 @@ function conferir() {
   }
 
   // --- cada suite obrigatoria ---------------------------------------------
-  for (const s of suites) {
+  // Entradas com `caminho` ausente ou invalido ja foram anotadas acima e sao
+  // puladas aqui de proposito: `path.join(RAIZ, undefined)` lanca TypeError, e
+  // um portao que ESTOURA em vez de RECUSAR nao prova que a defesa existe —
+  // prova que alguma coisa quebrou, que e outra afirmacao.
+  for (let i = 0; i < suites.length; i++) {
+    if (invalidas.has(i)) continue;
+    const s = suites[i];
     const abs = path.join(RAIZ, s.caminho);
 
     if (!fs.existsSync(abs)) {
@@ -285,10 +436,17 @@ function conferir() {
         (faltando.length > 8 ? ` … (+${faltando.length - 8})` : ""));
     }
 
+    // O digest declarado ja foi cobrado pelo schema acima (ausente ou malformado
+    // e CAMPO_OBRIGATORIO_AUSENTE / CAMPO_OBRIGATORIO_INVALIDO). Aqui so se
+    // COMPARA, e so quando ha o que comparar: formatar a mensagem com um digest
+    // `undefined` fazia a guarda ESTOURAR em cima da propria reprovacao, trocando
+    // um codigo estavel por um TypeError — o oposto do que a secao 10 pede de uma
+    // defesa. A ausencia continua sendo reprovacao; o que muda e quem a relata.
     const digest = sha256(texto);
-    if (s.digestSha256 && digest !== s.digestSha256) {
+    const declarado = typeof s.digestSha256 === "string" ? s.digestSha256 : null;
+    if (declarado !== null && digest !== declarado) {
       anota(s.id, "DIGEST_DIVERGENTE",
-        `esperado ${s.digestSha256.slice(0, 16)}…, encontrado ${digest.slice(0, 16)}…\n` +
+        `esperado ${declarado.slice(0, 16)}…, encontrado ${digest.slice(0, 16)}…\n` +
         `      Se a mudanca foi deliberada, atualize o contrato NO MESMO commit:\n` +
         `      node ferramentas/gate-de-provas.js --digests`);
     }
