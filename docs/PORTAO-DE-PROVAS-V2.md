@@ -4,6 +4,12 @@ Entregue pela **OS 23.1-P-C2**, sobre a folha da C1
 (`correcao/os23-1-p-c1-gate-produtor-v2` @ `7a858b1`).
 Fecha os dois falsos-verdes que a **OS 23.1-P-R1** mediu e reproduziu.
 
+> **Contrato de prova v3.** A primeira volta da C2 (`55b5a64`) fechou os dois
+> falsos-verdes da R1 e foi auditada de novo antes de virar entrega. A auditoria
+> achou **dez escapes** que sobreviviam a ela — inclusive o padrão exato da
+> R1/2.2 vivo numa segunda lista. A seção 8 deste documento registra o que era,
+> o que fechou, e o que ficou de residual.
+
 Nenhuma linha funcional do Produtor V2 foi tocada: `server.js`,
 `test/produtor_v2.test.js`, `mutacoes_composicao.js`, `mutacoes_os7.js`,
 `contrato/` e o restante de `docs/` estão byte a byte idênticos a
@@ -241,3 +247,131 @@ remoção total vira um diff grande e deliberado.
 Fora do alcance desta arquitetura, e registrado como tal: `buraco-servidor` não
 tem CI. Enquanto isso for verdade, o portão depende de alguém digitar
 `npm test`. Isso é matéria de arbitragem, não desta correção.
+
+---
+
+## 8. A segunda volta: validade não é presença
+
+A primeira volta da C2 cobrou que a entrada obrigatória **carregasse** os
+campos de defesa (`camposObrigatoriosPorSuite`). A auditoria seguinte mediu o
+que sobra quando *carregar* é tudo que se pede — e o que sobra é muito.
+
+### 8.1 Os dez escapes
+
+Todos medidos pelo comando oficial (`npm test`), numa árvore descartável, com
+a folha `55b5a64` intacta. Todos saíam **verdes**.
+
+| # | sabotagem | por que passava |
+|---|---|---|
+| 1 | `id` removido da entrada | nada conferia `id`; ele não estava na lista de campos |
+| 2 | `id` vazio | idem |
+| 3 | `id` só com espaços | `"   "` não é `""`: passava pela checagem de vazio |
+| 4 | `id` duplicado nas duas entradas | não havia checagem de unicidade |
+| 5 | `pisoDeCasos: 0` | o piso vira `casos < 0`, que nunca é verdade |
+| 6 | `pisoDeCasos: -1` | idem |
+| 7 | `pisoDeCasos: 61.5` | `Number.isInteger(61.5)` é falso: o `if` inteiro era pulado |
+| 8 | `pisoDeCasos: "61"` | idem — string não é inteiro, e a comparação sumia |
+| 9 | digest de `portao.js` apagado **+ `portao.js` esvaziado** | `if (f.digestSha256 && …)` |
+| 10 | `ferramentasProtegidas: []` **+ `portao.js` esvaziado** | `for (const f of [])` não confere nem reclama |
+
+Os dois últimos são a falha grave, e merecem o nome certo: **é o falso-verde
+R1/2.1 de volta por outra porta**. Com o digest desarmado, dava para trocar o
+`main()` do portão por um `console.log("PORTAO: APROVADO")` e obter:
+
+```
+> npm test
+integridade das provas: 2 suites obrigatorias conferidas (contrato v2)
+PORTAO: APROVADO (integridade + execucao real + contabilidade + marcador selado)
+EXIT=0
+```
+
+Zero testes executados. A mensagem inteira é literal, e é mentira.
+
+O padrão `if (campo && …)` tinha sido corrigido nas suítes e **sobreviveu
+intacto na lista de ferramentas**, que a própria C2 havia criado. Corrigir uma
+ocorrência de um padrão não corrige o padrão.
+
+### 8.2 O que fechou
+
+**Um schema, não uma lista de nomes.** Cada campo obrigatório passou a ter um
+validador (`VALIDADORES`, em `gate-de-provas.js`):
+
+| campo | regra |
+|---|---|
+| `id` | texto não vazio depois de `trim`, único no contrato |
+| `caminho` | relativo, dentro do repositório, único, existente |
+| `digestSha256` | `/^[0-9a-f]{64}$/i` |
+| `pisoDeCasos` | inteiro **estritamente positivo** |
+| `blocosNormativos` | lista não vazia de textos não vazios |
+| `casosObrigatorios` | lista não vazia de textos não vazios |
+
+Campo ausente é `CAMPO_OBRIGATORIO_AUSENTE`; campo presente e inválido é
+`CAMPO_OBRIGATORIO_INVALIDO`. A distinção existe porque as duas coisas são
+reprovação, mas só a segunda é fácil de confundir com uma configuração legítima
+ao ler o diff.
+
+**Recusar, não estourar.** `caminho` ausente fazia `path.join(RAIZ, undefined)`
+lançar `TypeError`. Vermelho, sim — mas vermelho de código quebrado, que a
+seção 10 da OS recusa como prova ("uma falha de sintaxe acidental não substitui
+a prova de que a defesa correspondente funcionou"). Entradas com caminho
+inválido são anotadas e **puladas**, e `GS-18` exige o código estável junto com
+a ausência de `TypeError` na saída.
+
+**A cobertura das ferramentas vem do disco.** Enquanto `ferramentasProtegidas`
+fosse a autoridade sobre o próprio tamanho, esvaziá-la desprotegia tudo de uma
+vez. Agora quem enumera é `ferramentas/*.js`: toda peça presente **tem** de
+estar declarada, com digest válido. Lista vazia deixou de ser "nada a
+conferir" e passou a ser `FERRAMENTA_NAO_DECLARADA`, duas vezes.
+
+É o mesmo princípio das coleções derivadas: **duas listas digitadas divergem;
+uma lista derivada não tem como.**
+
+### 8.3 Espelhamento externo (seção 9 da OS)
+
+`GS-15`..`GS-21` cobram de fora o que a guarda cobra de dentro, rodando a
+guarda de verdade numa caixa de areia e lendo o código de recusa:
+
+| prova | o que congela |
+|---|---|
+| `GS-15` | `id` e `caminho` estão entre os campos obrigatórios |
+| `GS-16` | piso `0`, negativo, fracionário e string reprovam |
+| `GS-17` | `id` ausente, vazio, em branco e duplicado reprovam |
+| `GS-18` | `caminho` inválido **recusa** em vez de estourar |
+| `GS-19` | digest não hexadecimal ou de tamanho errado reprova |
+| `GS-20` | toda peça de `ferramentas/` está declarada e bate |
+| `GS-21` | desarmar o digest não libera adulterar a ferramenta |
+
+A guarda está sob digest, então alterá-la para ignorar uma checagem acende
+`FERRAMENTA_ADULTERADA` no `pretest` — antes de a checagem alterada rodar.
+As sabotagens `V12` e `V13` medem exatamente isso.
+
+### 8.4 O residual, dito por inteiro
+
+**Invocação direta de um portão adulterado.** As sabotagens 9 e 10 acima são
+detectadas pelo comando oficial, porque quem as pega é o `pretest` — uma etapa
+que o **npm** garante, não o portão. Rodando `node ferramentas/portao.js`
+**diretamente**, com o `main()` esvaziado *e* o digest desarmado no mesmo ato,
+não há quem acenda: um arquivo não pode ser a autoridade sobre a própria
+integridade.
+
+Isso não é conserto pendente, é o limite da forma. O que existe é: o comando
+oficial é `npm test`, e por ele as duas sabotagens são vermelhas; e o desarme
+exige editar o contrato, que é um diff visível e deliberado. Quem auditar este
+portão deve auditar **`npm test`** — invocar o portão à mão pula, por
+construção, a metade externa do mecanismo.
+
+**Cardinalidade de `casosObrigatorios`.** Reduzir a lista no contrato (de 61
+para 1, por exemplo) é aceito pela guarda: `listaDeTextos` só exige que não
+seja vazia. É a mesma escolha de sempre — a expectativa mora no contrato, e
+mexer nela é um ato auditável no diff, não uma perda silenciosa.
+
+### 8.5 Cuidado ao rodar as campanhas
+
+`mutacoes_composicao.js` e `mutacoes_os7.js` mutam o **`server.js` real**, em
+vez de uma cópia, e restauram no fim. Uma execução **interrompida** deixa a
+mutação na árvore de trabalho — e a próxima leitura acusa "a base já está
+vermelha", que parece defeito do servidor e é resíduo do arnês. Confira
+`git status` depois de qualquer campanha interrompida.
+
+(`mutacoes_sobrevivencia.js` não tem esse problema: ele monta uma cópia
+descartável e nunca escreve no original.)
