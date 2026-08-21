@@ -1,0 +1,44 @@
+{
+  "//": "CONTRATO DE PROVA DAS SUITES OBRIGATORIAS. Este arquivo e a lista, VERSIONADA, do que nao pode desaparecer em silencio. Ele existe FORA das suites que protege: uma suite nao pode ser a autoridade sobre a propria existencia.",
+  "//como-atualizar": "Mexeu numa suite obrigatoria? O gate reprova ate que o digest daqui seja atualizado NO MESMO commit. E de proposito: a edicao passa a ser um ato deliberado e auditavel no diff, em vez de uma perda silenciosa. Recalcule com: node ferramentas/gate-de-provas.js --digests",
+  "//normalizacao": "Os digests sao de conteudo NORMALIZADO para LF. `server.js` e as suites deste repo estao em CRLF, e o autocrlf do git pode trocar o EOL no checkout — um digest de bytes crus reprovaria por causa do sistema de arquivos, e nao por perda de prova.",
+  "versaoContratoDeProva": 1,
+  "suitesObrigatorias": [
+    {
+      "id": "produtor-envelope-v2",
+      "os": "OS 23.1-P",
+      "caminho": "test/produtor_v2.test.js",
+      "porque": "As provas do contrato V2 do envelope de encerramento. Sem elas, `npm test` fica verde com 497 casos antigos enquanto o contrato V2 deixa de ser provado — que e exatamente o residual que a OS 23.1-P-C1 fecha.",
+      "digestSha256": "c551de5f574f537f001b8654c1c8d889c4ca4e2d4aef7e13182a1974e0574c4d",
+      "pisoDeCasos": 61,
+      "blocosNormativos": [
+        "V2/CONTRATO",
+        "V2/D1",
+        "V2/D2",
+        "V2/D3",
+        "V2/D4",
+        "V2/D5",
+        "V2/D6",
+        "V2/INVARIANTES",
+        "V2/QUARENTENA",
+        "V2/PRIMEIRA BATIDA"
+      ]
+    },
+    {
+      "id": "gate-sobrevivencia",
+      "os": "OS 23.1-P-C1",
+      "caminho": "test/gate_sobrevivencia.test.js",
+      "porque": "A metade de DENTRO da guarda: e ela que detecta a remocao da guarda externa do comando oficial. Sem exigi-la aqui, apaga-la seria a saida silenciosa.",
+      "digestSha256": "cd8245a2e0f7255c7d4f97ffb64103087291fdecbf55c5595fbe696808201d9d",
+      "pisoDeCasos": 8,
+      "blocosNormativos": [
+        "GATE/SOBREVIVENCIA"
+      ]
+    }
+  ],
+  "comandoOficial": {
+    "//": "O gate confere que o script `test` do package.json (a) chama esta guarda e (b) tem um `node --test` cujo padrao ALCANCA cada suite obrigatoria. Sem (b), alguem poderia estreitar o glob e a suite deixaria de rodar mesmo existindo no disco.",
+    "script": "test",
+    "invocacaoDaGuarda": "ferramentas/gate-de-provas.js"
+  }
+}
