@@ -788,10 +788,22 @@ describe("ADM/FIO — fim a fim, e quem não passa por aqui", () => {
       "o assento aprovado para quem já caiu foi liberado");
   });
 
-  test("FIO-13: o produtor de encerramento segue intacto e sem categoria no envelope", async () => {
-    // §12.27 e §12.28. A composição não tocou no contrato do encerramento: ele
-    // continua na versão 1, com as mesmas chaves, e a categoria competitiva
-    // continua FORA dele — disponível por `categoriaDaSala`, como na OS 1.
+  test("FIO-13: o produtor de encerramento segue intacto, e a categoria atravessa", async () => {
+    // §12.27 e §12.28, ATUALIZADO PELA OS 23.1-P.
+    //
+    // A redação original afirmava que a categoria competitiva continuava FORA do
+    // envelope. Era verdade e era o escopo daquela OS. A arbitragem da OS 23.2
+    // decidiu o contrário: sem a categoria, o destino não distingue
+    // `publica_casual` de `publica_ranqueada`, e essa distinção é a única fonte
+    // de "isto vale ranking" no sistema.
+    //
+    // ESTA MESA É `vip_ranqueada`, o que faz deste o melhor lugar do repositório
+    // para provar D1: a asserção deixou de ser "o campo não existe" e passou a
+    // ser "o campo existe e vale exatamente vip_ranqueada".
+    //
+    // O QUE NÃO MUDOU, e não podia mudar: prova de admissão continua PROIBIDA no
+    // envelope. `admissaoId` fora, e o token `adm-` não pode aparecer em canto
+    // nenhum dele. Essas duas guardas nunca foram sobre a categoria.
     const { srv } = servidorVip({ responder: (_a, n) => respostaOk("adm-" + n) });
     const dono = await cliente(srv, "uid-0");
     await envia(srv, dono, { tipo: "criarMesa", apelido: "Dono" });
@@ -811,9 +823,12 @@ describe("ADM/FIO — fim a fim, e quem não passa por aqui", () => {
     const env = sala.envelopeEncerramento;
     assert.ok(env, "o envelope foi produzido");
     assert.equal(env.versaoContrato, VERSAO_CONTRATO_ENCERRAMENTO);
-    assert.equal(VERSAO_CONTRATO_ENCERRAMENTO, 1);
+    assert.equal(VERSAO_CONTRATO_ENCERRAMENTO, 2, "a OS 23.1-P versionou o contrato para 2");
     assert.equal(env.uidQueBateuFinal, "uid-0");
-    assert.ok(!("categoriaCompetitiva" in env), "§12.28: a categoria não entrou no envelope v1");
+    assert.equal(env.categoriaCompetitiva, "vip_ranqueada",
+      "D1: a natureza competitiva atravessa, e é a que a sala congelou");
+    assert.equal(env.categoriaCompetitiva, sala.categoriaCompetitiva,
+      "e não uma recalculada no caminho");
     assert.ok(!("admissaoId" in env), "nem a admissão");
     assert.ok(!JSON.stringify(env).includes("adm-"), "nenhuma prova de admissão no envelope");
     assert.equal(srv.ger.categoriaDaSala(codigo), "vip_ranqueada", "e continua disponível pela sala");

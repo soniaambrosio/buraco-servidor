@@ -3704,6 +3704,10 @@ const ESTADO = Object.freeze({
   PENDENTE: "pendente",
   ENTREGUE: "entregue",
   FALHOU: "falhou",
+  /** [V2] Contrato incompatível: existe, é legível, e não é traduzível. Nomeado
+   *  aqui — e não inventado pelo transporte — pela mesma razão que os outros
+   *  dois: para que só exista UMA palavra para este estado. */
+  QUARENTENA: "quarentena",
 });
 
 /** Erro de leitura de um registro corrompido. Tipo próprio para que o chamador
@@ -3831,7 +3835,69 @@ function criarOutbox(opts = {}) {
     }
   }
 
-  return { registrar, ler, pendentes, existe, dir: base, ESTADO, RegistroCorrompido };
+    /** [V2] A versao de contrato de um registro, ou  se ausente ou ilegivel.
+   *
+   *  Le o campo do REGISTRO, e nao do envelope:  ja o copia para a
+   *  raiz, entao classificar nao exige entender o envelope inteiro. */
+  function versaoDe(partidaId) {
+    let reg;
+    try { reg = ler(partidaId); } catch (_) { return null; } // corrompido
+    if (!reg) return null;
+    return Number.isInteger(reg.versaoContrato) ? reg.versaoContrato : null;
+  }
+
+  /** A versao alvo e SEMPRE explicita. Sem padrao: a outbox nao tem opiniao
+   *  sobre qual contrato e o corrente — quem sabe isso e o produtor, e um
+   *  padrao aqui viraria uma segunda fonte da verdade no dia em que o contrato
+   *  subisse para 3 e alguem esquecesse deste arquivo. */
+  function exigirVersao(v) {
+    if (!Number.isInteger(v)) {
+      throw new TypeError("outbox: versao alvo obrigatoria (recebido: " + v + ")");
+    }
+    return v;
+  }
+
+  /** [V2] Os pendentes que um transporte futuro poderia traduzir.
+   *
+   *  ADITIVO de proposito.  continua respondendo "o que esta la",
+   *  que e a pergunta de durabilidade e a que as provas do V1 fazem. Esta
+   *  responde outra: "o que e entregavel". Trocar o significado da primeira
+   *  faria uma pergunta deixar de ter resposta. */
+  function pendentesTraduziveis(versaoAlvo) {
+    const alvo = exigirVersao(versaoAlvo);
+    return pendentes().filter((id) => versaoDe(id) === alvo);
+  }
+
+  /** [politica V1/V2] Registros presos por incompatibilidade de contrato.
+   *
+   *  Os campos que o V2 exige nao sao deriveis de um V1: a categoria so existia
+   *  na sala em memoria, o instante nunca foi carimbado e as canastras eram
+   *  zeradas a cada rodada. Converte-los exigiria invente-los.
+   *
+   *  QUARENTENA, E NAO DESCARTE: os arquivos ficam onde estao. Nada aqui apaga,
+   *  reescreve ou converte — so CONTA. E contar e a unica intervencao
+   *  operacional que a arbitragem autorizou. */
+  function quarentena(versaoAlvo) {
+    const alvo = exigirVersao(versaoAlvo);
+    return pendentes().filter((id) => {
+      const v = versaoDe(id);
+      return v !== null && v !== alvo;
+    });
+  }
+
+  /** Registros que existem e nao sao legiveis. Separados da quarentena porque
+   *  sao problemas diferentes: um e contrato velho, o outro e disco. */
+  function corrompidos() {
+    return pendentes().filter((id) => {
+      try { ler(id); return false; } catch (_) { return true; }
+    });
+  }
+
+  return {
+    registrar, ler, pendentes, existe, dir: base, ESTADO, RegistroCorrompido,
+    // [V2] Superficie nova, aditiva. Nenhum nome antigo mudou de significado.
+    versaoDe, pendentesTraduziveis, quarentena, corrompidos,
+  };
 }
 
 module.exports = { criarOutbox, ESTADO, RegistroCorrompido };
@@ -3947,7 +4013,26 @@ const TIPOS_DE_PARTIDA = ["publica", "privada", "simulada"];
 const TIPO_PADRAO = "privada";
 
 /** Versão do contrato do envelope de encerramento. */
-const VERSAO_CONTRATO_ENCERRAMENTO = 1;
+const VERSAO_CONTRATO_ENCERRAMENTO = 2;
+
+/** [V2] Os lados da mesa, na ordem canônica. `nos` = assentos 0 e 2;
+ *  `eles` = 1 e 3. Mesma identidade que o destino usa — não se traduz. */
+const LADOS_DA_MESA = Object.freeze(["nos", "eles"]);
+
+/** [V2] Códigos de invariante do envelope. Existem como constantes para que o
+ *  log, o teste e a recusa falem a MESMA palavra: um código digitado à mão em
+ *  três lugares diverge no primeiro dia em que alguém renomeia um deles. */
+const INVARIANTE = Object.freeze({
+  ORDEM_TEMPORAL: "I1_ordem_temporal",
+  VENCEDOR_E_MOTIVO: "I2_vencedor_e_motivo",
+  BATIDA_DO_VENCEDOR: "I3_batida_do_vencedor",
+  QUATRO_ASSENTOS: "I4_quatro_assentos",
+  DUPLA_DO_ASSENTO: "I5_dupla_do_assento",
+  HUMANO_TEM_UID: "I6_humano_tem_uid",
+  UID_UNICO: "I7_uid_unico",
+  CATEGORIA_AUSENTE: "I9_categoria_ausente",
+  CANASTRAS_AUSENTES: "I10_canastras_ausentes",
+});
 
 /** Único motivo de encerramento que este servidor sabe produzir.
  *
@@ -4483,6 +4568,70 @@ function uidDoAssento(sala, assento) {
  *  campo de mensagem, e nunca de `sala.assentos` no momento da captura: aquele
  *  vira bot quando alguém cai, e quem bateu antes de cair continua sendo quem
  *  bateu. */
+/** [V2] As invariantes do envelope, conferidas ANTES de persistir.
+ *
+ *  Devolve a lista de códigos violados — vazia quando o envelope fecha. Todas
+ *  descrevem coisas que o PRÓPRIO produtor monta, então uma violação aqui não é
+ *  entrada malformada de terceiro: é defeito interno, e persistir mesmo assim
+ *  gravaria um registro envenenado que só seria descoberto do outro lado.
+ *
+ *  `I8` (mesa simulada) NÃO mora aqui de propósito: simulada PRODUZ envelope, e
+ *  a recusa dela é do tradutor. Persistir o fato e recusar a tradução são coisas
+ *  diferentes, e confundi-las perderia o registro de uma partida que aconteceu. */
+function invariantesVioladas(envelope) {
+  const v = [];
+  if (!envelope) return [INVARIANTE.ORDEM_TEMPORAL];
+
+  // I1 — a partida não pode ter sido criada depois de terminar.
+  if (!envelope.partidaCriadaEm ||
+      !(String(envelope.partidaCriadaEm) <= String(envelope.encerradaEm))) {
+    v.push(INVARIANTE.ORDEM_TEMPORAL);
+  }
+  // I2 — vencedor existe se, e só se, o motivo foi a meta.
+  const porMeta = envelope.motivoEncerramento === MOTIVO_META;
+  if (porMeta !== (envelope.duplaVencedora !== null)) v.push(INVARIANTE.VENCEDOR_E_MOTIVO);
+
+  const ps = Array.isArray(envelope.participantes) ? envelope.participantes : [];
+  // I4 — exatamente quatro assentos, 0..3, sem repetição.
+  const assentos = ps.map((p) => p && p.assento);
+  const distintos = new Set(assentos.filter((a) => Number.isInteger(a) && a >= 0 && a <= 3));
+  if (ps.length !== 4 || distintos.size !== 4) v.push(INVARIANTE.QUATRO_ASSENTOS);
+  // I5 — a dupla é função do assento, e não um campo livre.
+  // I6 — humano tem uid; bot não tem.
+  // I7 — nenhum uid ocupa dois assentos.
+  const vistos = new Set();
+  let duplaErrada = false, uidErrado = false, uidRepetido = false;
+  for (const p of ps) {
+    if (!p) { duplaErrada = true; continue; }
+    if (p.dupla !== (p.assento % 2 === 0 ? "nos" : "eles")) duplaErrada = true;
+    if ((p.tipo === "humano") !== (p.uid !== null && p.uid !== undefined)) uidErrado = true;
+    if (p.uid != null) {
+      if (vistos.has(p.uid)) uidRepetido = true;
+      vistos.add(p.uid);
+    }
+  }
+  if (duplaErrada) v.push(INVARIANTE.DUPLA_DO_ASSENTO);
+  if (uidErrado) v.push(INVARIANTE.HUMANO_TEM_UID);
+  if (uidRepetido) v.push(INVARIANTE.UID_UNICO);
+
+  // I3 — quem bateu, quando há vencedor, é do lado vencedor.
+  const a = envelope.assentoQueBateuFinal;
+  if (Number.isInteger(a) && envelope.duplaVencedora !== null) {
+    const dono = ps.find((p) => p && p.assento === a);
+    if (!dono || dono.dupla !== envelope.duplaVencedora) v.push(INVARIANTE.BATIDA_DO_VENCEDOR);
+  }
+  // I9 — categoria ausente ou fora do enum recusa; NUNCA vira "casual".
+  if (!CATEGORIAS_COMPETITIVAS.includes(envelope.categoriaCompetitiva)) {
+    v.push(INVARIANTE.CATEGORIA_AUSENTE);
+  }
+  // I10 — canastras ausentes recusam; NUNCA viram zero.
+  const c = envelope.canastrasLimpasFinais;
+  if (!c || !LADOS_DA_MESA.every((l) => Number.isInteger(c[l]) && c[l] >= 0)) {
+    v.push(INVARIANTE.CANASTRAS_AUSENTES);
+  }
+  return v;
+}
+
 function montarEnvelopeEncerramento(sala, agoraIso) {
   const jogo = sala.jogo;
   const placar = { nos: jogo.placar.nos, eles: jogo.placar.eles };
@@ -4510,14 +4659,32 @@ function montarEnvelopeEncerramento(sala, agoraIso) {
     versaoContrato: VERSAO_CONTRATO_ENCERRAMENTO,
     partidaId: sala.partidaId,
     versaoEstadoFinal: jogo.rodada,
+    // [V2 · D2] Congelado em `iniciarPartida`. `null` se a sala foi montada
+    // por fora — e `null` reprova na validação, em vez de virar a data de agora.
+    partidaCriadaEm: sala.partidaCriadaEm || null,
     encerradaEm: agoraIso,
     motivoEncerramento: motivo,
     modalidade: sala.modalidade,
     tipoPartida: sala.tipoPartida,
+    // [V2 · D1] A SEGUNDA DIMENSÃO. `tipoPartida` é TOPOLOGIA (como se chega à
+    // mesa); esta é NATUREZA COMPETITIVA (o que a partida vale). O destino
+    // precisa das duas para resolver o tipo dele, e derivar uma da outra seria
+    // inventar exatamente o fato que decide se a partida altera ranking.
+    //
+    // Vem da sala, onde é IMUTÁVEL por `defineProperty`, e a sala a recebeu da
+    // configuração do processo. Nenhuma mensagem de cliente a alcança.
+    categoriaCompetitiva: sala.categoriaCompetitiva || null,
     validaParaConquistas,
     rodadaFinal: jogo.rodada,
     meta: jogo.metaPontos,
     placarFinal: placar,
+    // [V2 · D3] Total da PARTIDA, por lado. Cópia do acumulado, não recontagem.
+    // `null` quando o acumulador não existe — e `null` reprova, porque
+    // canastra limpa ausente não é "nenhuma canastra": é dado perdido, e ele
+    // decide desempate de torneio.
+    canastrasLimpasFinais: sala.canastrasLimpasFinais
+      ? { nos: sala.canastrasLimpasFinais.nos, eles: sala.canastrasLimpasFinais.eles }
+      : null,
     duplaVencedora,
     duplaQueBateuUltimaRodada: jogo.duplaQueBateu || null,
     assentoQueBateuFinal: assentoFinal,
@@ -4871,6 +5038,27 @@ function criarGerenciador(opts = {}) {
     // dele existe UMA partida, com um id que não se repete nem numa revanche na
     // mesma sala, porque a revanche passa por este mesmo caminho.
     sala.partidaId = novoPartidaId();
+    // [V2 · D2] INSTANTE AUTORITATIVO DE CRIAÇÃO DA PARTIDA.
+    //
+    // Carimbado AQUI, no mesmo ponto em que o `partidaId` é cunhado, porque o
+    // destino pergunta pela criação DA IDENTIDADE — e a identidade é este id.
+    // `criarMesa` responderia outra coisa: antes deste ponto existe uma SALA,
+    // reaproveitável, e a revanche na mesma sala herdaria a data da primeira
+    // partida.
+    //
+    // O relógio é o `agoraIso()` do gerenciador — o MESMO que carimba
+    // `encerradaEm`, `desdeIso` e `voltouEmIso`. Nenhum `new Date()` solto
+    // entra aqui: fosse assim, a suíte não conseguiria fixar o tempo.
+    sala.partidaCriadaEm = agoraIso();
+    // [V2 · D3] Canastras limpas da PARTIDA, por dupla. Vive na SALA e não no
+    // `jogo` pela razão que o próprio motor documenta: `distribuirRodada` zera
+    // `pontosRodada`, então o total da partida é a soma das apurações e quem
+    // soma é quem conduz o ciclo da rodada.
+    sala.canastrasLimpasFinais = { nos: 0, eles: 0 };
+    // Rodada cujas canastras já foram absorvidas. Torna `absorverCanastras`
+    // idempotente: chamá-la duas vezes na mesma rodada não conta em dobro, e é
+    // isso que permite chamá-la nos três pontos onde a rodada pode fechar.
+    sala.rodadaAbsorvida = 0;
     sala.envelopeEncerramento = null;
     // Mapa assento → identidade, congelado no início. Congelado de propósito:
     // durante a partida um assento pode virar bot (queda/AFK) e a conexão pode
@@ -4960,6 +5148,9 @@ function criarGerenciador(opts = {}) {
       });
       return null;
     }
+    // [V2 · D3] A ÚLTIMA rodada só é absorvida aqui: depois dela não se
+    // distribui rodada nenhuma, então o caminho da transição nunca a alcança.
+    absorverCanastras(sala);
     const envelope = montarEnvelopeEncerramento(sala, agoraIso());
     sala.envelopeEncerramento = envelope;
 
@@ -4984,6 +5175,17 @@ function criarGerenciador(opts = {}) {
               ? "tipo_nao_conta"
               : "sem_vencedor"),
       }));
+    }
+
+    // [V2] PORTÃO FAIL-CLOSED. Uma invariante violada descreve defeito do
+    // próprio produtor, e gravar assim mesmo produziria um registro que só o
+    // outro lado descobriria quebrado — tarde, e sem como voltar atrás. Falha
+    // ALTO no log, com os códigos, e não persiste.
+    const violadas = invariantesVioladas(envelope);
+    if (violadas.length > 0) {
+      console.error("[encerramento] envelope invalido, nao persistido",
+        Object.assign({}, base, { invariantes: violadas }));
+      return envelope;
     }
 
     if (!outbox) return envelope;
@@ -5031,6 +5233,38 @@ function criarGerenciador(opts = {}) {
     }
   }
 
+  /** [V2 · D3] Soma as canastras limpas da rodada recém-apurada ao total da
+   *  partida.
+   *
+   *  NÃO CONTA NADA: `contarPontos` já classificou cada canastra e deixou o
+   *  detalhe em `jogo.pontosRodada`. Esta função só SOMA — a definição de
+   *  "limpa" continua morando no motor, e duplicá-la aqui criaria uma segunda
+   *  regra de pontuação.
+   *
+   *  As TRÊS faixas contam (`limpas`, `de500`, `asas`) porque as três são
+   *  canastras de zero curinga, que é a definição que o destino usa. `sujas`
+   *  não entra.
+   *
+   *  IDEMPOTENTE por número de rodada: a rodada N é absorvida uma vez só,
+   *  aconteça a chamada uma ou dez vezes. É o que torna seguro chamá-la tanto
+   *  antes de distribuir a próxima rodada quanto no encerramento — e a última
+   *  rodada da partida SÓ é alcançada pelo segundo caminho, porque depois dela
+   *  não se distribui rodada nenhuma. */
+  function absorverCanastras(sala) {
+    const jogo = sala && sala.jogo;
+    if (!jogo || !sala.canastrasLimpasFinais) return;
+    const r = jogo.pontosRodada;
+    if (!r) return;                             // rodada ainda não apurada
+    if (sala.rodadaAbsorvida === jogo.rodada) return; // já somada
+    for (const lado of LADOS_DA_MESA) {
+      const det = r[lado] && r[lado].detalhe;
+      if (!det) continue;
+      const n = (x) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? Math.floor(x) : 0);
+      sala.canastrasLimpasFinais[lado] += n(det.limpas) + n(det.de500) + n(det.asas);
+    }
+    sala.rodadaAbsorvida = jogo.rodada;
+  }
+
   /** Avança o jogo enquanto for a vez de um BOT (ou entre rodadas). Para quando
    *  chega a vez de um humano, ou a partida encerra. */
   function avancarBots(sala) {
@@ -5040,6 +5274,7 @@ function criarGerenciador(opts = {}) {
       if (jogo.encerrada) break;
       if (jogo.rodadaEncerrada) {
         // rodada acabou mas a partida não: distribui a próxima (mantém placar)
+        absorverCanastras(sala); // [V2 · D3] antes de zerar pontosRodada
         J.distribuirRodada(jogo);
         continue;
       }
@@ -5085,7 +5320,11 @@ function criarGerenciador(opts = {}) {
     if (!sala || !sala.jogo) return { jogou: false };
     const j = sala.jogo;
     if (j.encerrada) { liquidar(sala); return { jogou: false }; }
-    if (j.rodadaEncerrada) { J.distribuirRodada(j); return { jogou: false, transicao: true }; }
+    if (j.rodadaEncerrada) {
+      absorverCanastras(sala); // [V2 · D3] antes de zerar pontosRodada
+      J.distribuirRodada(j);
+      return { jogou: false, transicao: true };
+    }
     const v = j.assentos[j.vez];
     if (!v) return { jogou: false };
     // [CONTROLADOR §6] Mesma fronteira segura do laço síncrono: um passo da
@@ -5493,6 +5732,10 @@ function criarGerenciador(opts = {}) {
     salas, criarMesa, entrarMesa, iniciarPartida, aplicarJogada, avancarBots,
     vezEhBot, jogarUmBot, visao, visaoEspectador, visaoPara, metadadosDe, sair,
     liquidar, outbox,
+    // [V2] Superfície de prova do contrato V2. `absorverCanastras` é exportada
+    // para que a suíte exercite a IDEMPOTÊNCIA dela diretamente, em vez de
+    // inferi-la pelo total no fim.
+    absorverCanastras,
     // [CONTROLADOR] superfície da OS 7
     ausentar, retornar, reconectar, verificarAusencias, proporAcaoDoAssento,
     controleDe, assentoEhDeBot, donoDoAssento, gracaAusenciaMs,
@@ -5510,6 +5753,11 @@ module.exports = {
   // reimplementá-lo: o vocabulário de motivo/tipo é o mesmo que o envelope usa.
   montarEnvelopeEncerramento, mapaDeParticipantes, novoPartidaId,
   VERSAO_CONTRATO_ENCERRAMENTO, MOTIVO_META, MOTIVO_DESCONHECIDO,
+  // [V2] O verificador de invariantes e o vocabulario dele. Expostos para que a
+  // suite afirme cada invariante com um envelope montado a mao, um campo por
+  // vez — provar I5 pelo caminho do servidor exigiria primeiro conseguir
+  // quebrar o mapa de participantes, que e justamente o que ele impede.
+  invariantesVioladas, INVARIANTE, LADOS_DA_MESA,
   TIPOS_DE_PARTIDA, TIPOS_VALIDOS_PARA_CONQUISTA,
   // [VERSAO] Expostos para a suíte afirmar idempotência e detecção de mudança
   // direto na primitiva, sem ter que montar servidor e conexão para cada caso.

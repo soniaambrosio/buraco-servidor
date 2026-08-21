@@ -735,11 +735,23 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
   });
 
   test("MESA-10: o produtor da Primeira Batida Real segue intacto", async () => {
-    // §10.18. O envelope de encerramento NÃO mudou de forma: o contrato segue
-    // na versão 1 e com as mesmas chaves. A categoria competitiva fica
-    // DISPONÍVEL ao encerramento pela sala (`categoriaDaSala`), e não dentro do
-    // envelope — acrescentar campo a um contrato congelado seria mudança de
-    // contrato, e esta OS não a autoriza.
+    // §10.18, ATUALIZADO PELA OS 23.1-P.
+    //
+    // A redação original dizia "o contrato segue na versão 1" e "o envelope não
+    // ganhou campo novo", e fechava com a razão: acrescentar campo seria mudança
+    // de contrato, "e esta OS não a autoriza". "Esta OS" era a do GATE VIP. A
+    // arbitragem da OS 23.2 decidiu o contrário e a OS 23.1-P executou: a
+    // categoria competitiva PRECISA atravessar, porque sem ela o destino não
+    // consegue distinguir `publica_casual` de `publica_ranqueada` — e essa
+    // distinção é a única fonte de "isto vale ranking" no sistema.
+    //
+    // As duas linhas ficaram MAIS FORTES, e não mais fracas. Antes exigiam que o
+    // campo NÃO existisse; agora exigem que ele exista E que seja exatamente o
+    // que a sala congelou — o que também prova que ninguém o inventou no caminho.
+    //
+    // O que MESA-10 guarda de verdade não mudou: a Primeira Batida Real continua
+    // resolvendo assento → UID, o motivo continua sendo a meta, e
+    // `versaoEstadoFinal` continua intocado.
     const srv = novoServidor();
     const dono = await cliente(srv, "uid-0");
     dono.envia({ tipo: "criarMesa", apelido: "Dono" });
@@ -758,10 +770,12 @@ describe("GATE-VIP/MESA — o comportamento no fio", () => {
     const env = sala.envelopeEncerramento;
     assert.ok(env, "o envelope foi produzido");
     assert.equal(env.versaoContrato, VERSAO_CONTRATO_ENCERRAMENTO);
-    assert.equal(VERSAO_CONTRATO_ENCERRAMENTO, 1, "o contrato não foi versionado por esta OS");
+    assert.equal(VERSAO_CONTRATO_ENCERRAMENTO, 2, "a OS 23.1-P versionou o contrato para 2");
     assert.equal(env.uidQueBateuFinal, "uid-0", "a batida real continua resolvendo para o uid");
     assert.equal(env.motivoEncerramento, "meta_alcancada");
-    assert.ok(!("categoriaCompetitiva" in env), "o envelope não ganhou campo novo");
+    assert.ok("categoriaCompetitiva" in env, "o envelope V2 carrega a segunda dimensão");
+    assert.equal(env.categoriaCompetitiva, sala.categoriaCompetitiva,
+      "e ela é EXATAMENTE a que a sala congelou — não uma recalculada no caminho");
     assert.equal(env.versaoEstadoFinal, sala.jogo.rodada, "versaoEstadoFinal intocado");
 
     // ...e a categoria está disponível para quem for consumir o encerramento.
