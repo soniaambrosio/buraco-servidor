@@ -349,4 +349,184 @@ describe("GATE/SOBREVIVENCIA", () => {
         "o marcador tem de descrever a execucao real, nao o que alguem escreveu nele");
     } finally { limpar(caixa); }
   });
+
+  // -------------------------------------------------------------------------
+  // GS-15..GS-21 — O SCHEMA DA SECAO 8, ESPELHADO DE FORA.
+  //
+  // A primeira volta da C2 exigiu que a entrada CARREGASSE os campos de defesa,
+  // e parou ai. A rehomologacao mostrou o que sobra quando "carregar" e tudo
+  // que se pede: `pisoDeCasos: 0` e um campo presente que desliga o piso;
+  // `pisoDeCasos: "61"` e um campo presente que pula a comparacao inteira; um
+  // `id` de tres espacos e um campo presente que nao identifica nada. Todos
+  // passavam. Estas provas cobram VALIDADE, nao presenca — e cobram de fora da
+  // guarda, rodando a guarda de verdade numa caixa de areia e lendo o codigo de
+  // recusa. Uma guarda alterada para ignorar um campo derruba a prova aqui.
+
+  test("GS-15: os campos obrigatorios incluem identidade e caminho", () => {
+    const exigidos = contrato().camposObrigatoriosPorSuite;
+    for (const campo of ["id", "caminho", "digestSha256", "pisoDeCasos",
+                         "blocosNormativos", "casosObrigatorios"]) {
+      assert.ok(exigidos.includes(campo),
+        `\`${campo}\` deixou de ser exigido das entradas obrigatorias`);
+    }
+  });
+
+  test("GS-16: a guarda REPROVA piso invalido (0, negativo, fracionario, string)", () => {
+    // O piso e uma comparacao numerica. Zero e negativo a tornam sempre falsa;
+    // fracionario e string a fazem ser PULADA. Nos quatro casos o campo esta la,
+    // e a defesa nao esta.
+    for (const piso of [0, -1, 61.5, "61"]) {
+      const caixa = criarCaixa({
+        suites: { "viva.test.js": SUITE_OK },
+        suitesObrigatorias: [{ id: "viva", caminho: "test/viva.test.js", pisoDeCasos: piso,
+                              blocosNormativos: ["X/BLOCO"], casosObrigatorios: ["X-01", "X-02"] }],
+        contratoExtra: { camposObrigatoriosPorSuite: ["id", "caminho", "digestSha256",
+                          "pisoDeCasos", "blocosNormativos", "casosObrigatorios"] },
+      });
+      try {
+        const r = rodarNaCaixa(caixa, "gate-de-provas.js");
+        assert.notEqual(r.codigo, 0,
+          `pisoDeCasos ${JSON.stringify(piso)} passou pela guarda:\n` + r.saida);
+        assert.match(r.saida, /CAMPO_OBRIGATORIO_(INVALIDO|AUSENTE)/,
+          `pisoDeCasos ${JSON.stringify(piso)} reprovou por outro motivo:\n` + r.saida);
+      } finally { limpar(caixa); }
+    }
+  });
+
+  test("GS-17: a guarda REPROVA `id` ausente, em branco ou duplicado", () => {
+    const comum = {
+      blocosNormativos: ["X/BLOCO"], casosObrigatorios: ["X-01", "X-02"], pisoDeCasos: 2,
+    };
+    const extra = { camposObrigatoriosPorSuite: ["id", "caminho", "digestSha256",
+                     "pisoDeCasos", "blocosNormativos", "casosObrigatorios"] };
+    const cenarios = [
+      ["ausente", [{ caminho: "test/viva.test.js", ...comum }], /CAMPO_OBRIGATORIO_AUSENTE/],
+      ["vazio", [{ id: "", caminho: "test/viva.test.js", ...comum }], /CAMPO_OBRIGATORIO_AUSENTE/],
+      ["so espacos", [{ id: "   ", caminho: "test/viva.test.js", ...comum }], /CAMPO_OBRIGATORIO_INVALIDO/],
+      ["duplicado", [{ id: "viva", caminho: "test/viva.test.js", ...comum },
+                     { id: "viva", caminho: "test/outra.test.js", ...comum }], /ENTRADA_DUPLICADA/],
+    ];
+    for (const [nome, suitesObrigatorias, esperado] of cenarios) {
+      const caixa = criarCaixa({
+        suites: { "viva.test.js": SUITE_OK, "outra.test.js": SUITE_OK },
+        suitesObrigatorias, contratoExtra: extra,
+      });
+      try {
+        const r = rodarNaCaixa(caixa, "gate-de-provas.js");
+        assert.notEqual(r.codigo, 0, `\`id\` ${nome} passou pela guarda:\n` + r.saida);
+        assert.match(r.saida, esperado, `\`id\` ${nome} reprovou por outro motivo:\n` + r.saida);
+      } finally { limpar(caixa); }
+    }
+  });
+
+  test("GS-18: a guarda RECUSA `caminho` invalido em vez de estourar", () => {
+    // A diferenca entre RECUSAR e ESTOURAR e a prova. `path.join(RAIZ, undefined)`
+    // lanca TypeError: vermelho, sim, mas vermelho de codigo quebrado — nao
+    // prova que a defesa existe. Aqui se exige o codigo estavel.
+    const comum = { blocosNormativos: ["X/BLOCO"], casosObrigatorios: ["X-01", "X-02"], pisoDeCasos: 2 };
+    const extra = { camposObrigatoriosPorSuite: ["id", "caminho", "digestSha256",
+                     "pisoDeCasos", "blocosNormativos", "casosObrigatorios"] };
+    const digest = "a".repeat(64);
+    const cenarios = [
+      ["ausente", { id: "viva", digestSha256: digest, ...comum }, /CAMPO_OBRIGATORIO_AUSENTE/],
+      ["vazio", { id: "viva", caminho: "", digestSha256: digest, ...comum }, /CAMPO_OBRIGATORIO_AUSENTE/],
+      ["escapa da raiz", { id: "viva", caminho: "../fora.test.js", digestSha256: digest, ...comum },
+        /CAMPO_OBRIGATORIO_INVALIDO/],
+      ["absoluto", { id: "viva", caminho: path.resolve(__dirname, "..", "test", "viva.test.js"),
+        digestSha256: digest, ...comum }, /CAMPO_OBRIGATORIO_INVALIDO/],
+    ];
+    for (const [nome, entrada, esperado] of cenarios) {
+      const caixa = criarCaixa({
+        suites: { "viva.test.js": SUITE_OK },
+        suitesObrigatorias: [], contratoExtra: extra,
+      });
+      try {
+        // A entrada e escrita crua: `criarCaixa` calcularia um digest a partir do
+        // caminho, e e justamente o caminho que esta sob teste.
+        const cPath = path.join(caixa, "ferramentas", "contrato-de-provas.json");
+        const c = JSON.parse(fs.readFileSync(cPath, "utf8"));
+        c.suitesObrigatorias = [entrada];
+        fs.writeFileSync(cPath, JSON.stringify(c, null, 2), "utf8");
+        const r = rodarNaCaixa(caixa, "gate-de-provas.js");
+        assert.notEqual(r.codigo, 0, `\`caminho\` ${nome} passou pela guarda:\n` + r.saida);
+        assert.match(r.saida, esperado, `\`caminho\` ${nome} reprovou por outro motivo:\n` + r.saida);
+        assert.doesNotMatch(r.saida, /ERR_INVALID_ARG_TYPE|TypeError/,
+          `\`caminho\` ${nome} ESTOUROU em vez de recusar:\n` + r.saida);
+      } finally { limpar(caixa); }
+    }
+  });
+
+  test("GS-19: a guarda REPROVA digest malformado", () => {
+    const extra = { camposObrigatoriosPorSuite: ["id", "caminho", "digestSha256",
+                     "pisoDeCasos", "blocosNormativos", "casosObrigatorios"] };
+    for (const digest of ["z".repeat(64), "a".repeat(63), "a".repeat(65), "nao-e-digest"]) {
+      const caixa = criarCaixa({
+        suites: { "viva.test.js": SUITE_OK },
+        suitesObrigatorias: [{ id: "viva", caminho: "test/viva.test.js", digestSha256: digest,
+                              pisoDeCasos: 2, blocosNormativos: ["X/BLOCO"],
+                              casosObrigatorios: ["X-01", "X-02"] }],
+        contratoExtra: extra,
+      });
+      try {
+        const r = rodarNaCaixa(caixa, "gate-de-provas.js");
+        assert.notEqual(r.codigo, 0, `digest ${digest.slice(0, 12)} passou:\n` + r.saida);
+        assert.match(r.saida, /CAMPO_OBRIGATORIO_INVALIDO/,
+          `digest ${digest.slice(0, 12)} reprovou por outro motivo:\n` + r.saida);
+      } finally { limpar(caixa); }
+    }
+  });
+
+  test("GS-20: toda peca de `ferramentas/` esta declarada sob digest valido", () => {
+    // Cobertura DERIVADA do disco, conferida aqui contra o disco de verdade: se
+    // alguem acrescentar uma peca ao portao sem declara-la, esta prova acende
+    // junto com a guarda. Duas autoridades, nenhuma delas dona de si mesma.
+    const declaradas = new Map(
+      (contrato().ferramentasProtegidas || []).map((f) => [String(f.caminho), f]));
+    const emDisco = fs.readdirSync(FERRAMENTAS).filter((n) => n.endsWith(".js")).sort();
+    assert.ok(emDisco.length > 0, "nenhuma peca .js em ferramentas/ — o portao sumiu");
+    for (const nome of emDisco) {
+      const rel = "ferramentas/" + nome;
+      const f = declaradas.get(rel);
+      assert.ok(f, `\`${rel}\` roda no portao e nao esta em \`ferramentasProtegidas\``);
+      assert.match(String(f.digestSha256), /^[0-9a-f]{64}$/i,
+        `\`${rel}\` esta declarada sem um digest valido — declarada e desprotegida`);
+      assert.equal(sha256(lf(path.join(RAIZ, rel))), f.digestSha256,
+        `\`${rel}\` foi adulterada sem o contrato acompanhar`);
+    }
+  });
+
+  test("GS-21: desarmar o digest de uma ferramenta nao libera adultera-la", () => {
+    // O escape mais grave da primeira volta da C2, e o motivo de GS-20 existir:
+    // `if (f.digestSha256 && ...)` deixava a conferencia sumir junto com o campo.
+    // Apagar o digest do `portao.js` e esvaziar o `main()` dava `npm test` VERDE,
+    // exit 0 e ZERO testes executados — o falso-verde R1/2.1 por outra porta.
+    for (const modo of ["sem-digest", "lista-vazia"]) {
+      const caixa = criarCaixa({
+        suites: { "viva.test.js": SUITE_OK },
+        suitesObrigatorias: [{ id: "viva", caminho: "test/viva.test.js",
+                              pisoDeCasos: 2, blocosNormativos: ["X/BLOCO"],
+                              casosObrigatorios: ["X-01", "X-02"] }],
+      });
+      try {
+        const cPath = path.join(caixa, "ferramentas", "contrato-de-provas.json");
+        const c = JSON.parse(fs.readFileSync(cPath, "utf8"));
+        if (modo === "lista-vazia") c.ferramentasProtegidas = [];
+        else for (const f of c.ferramentasProtegidas) {
+          if (/portao/.test(f.caminho)) delete f.digestSha256;
+        }
+        fs.writeFileSync(cPath, JSON.stringify(c, null, 2), "utf8");
+
+        // e agora o portao e esvaziado, que e o que o desarme viabilizava
+        const pPath = path.join(caixa, "ferramentas", "portao.js");
+        fs.writeFileSync(pPath, fs.readFileSync(pPath, "utf8").replace(
+          "function main() {", "function main() { console.log(\"PORTAO: APROVADO\"); return;"),
+          "utf8");
+
+        const r = rodarNaCaixa(caixa, "gate-de-provas.js");
+        assert.notEqual(r.codigo, 0, `[${modo}] a guarda aprovou o portao desarmado:\n` + r.saida);
+        assert.match(r.saida, /FERRAMENTA_SEM_DIGEST|FERRAMENTA_NAO_DECLARADA/,
+          `[${modo}] reprovou por outro motivo:\n` + r.saida);
+      } finally { limpar(caixa); }
+    }
+  });
 });
