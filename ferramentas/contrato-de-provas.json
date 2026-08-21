@@ -1,14 +1,33 @@
 {
-  "//": "CONTRATO DE PROVA DAS SUITES OBRIGATORIAS. Este arquivo e a lista, VERSIONADA, do que nao pode desaparecer em silencio. Ele existe FORA das suites que protege: uma suite nao pode ser a autoridade sobre a propria existencia.",
-  "//como-atualizar": "Mexeu numa suite obrigatoria? O gate reprova ate que o digest daqui seja atualizado NO MESMO commit. E de proposito: a edicao passa a ser um ato deliberado e auditavel no diff, em vez de uma perda silenciosa. Recalcule com: node ferramentas/gate-de-provas.js --digests",
-  "//normalizacao": "Os digests sao de conteudo NORMALIZADO para LF. `server.js` e as suites deste repo estao em CRLF, e o autocrlf do git pode trocar o EOL no checkout — um digest de bytes crus reprovaria por causa do sistema de arquivos, e nao por perda de prova.",
-  "versaoContratoDeProva": 1,
+  "//": "CONTRATO DE PROVA DAS SUITES OBRIGATORIAS. Este arquivo e a lista, VERSIONADA, do que nao pode desaparecer nem encolher em silencio. Ele existe FORA das suites que protege — uma suite nao pode ser a autoridade sobre a propria existencia — e FORA das ferramentas, que tambem entram aqui pelo digest.",
+  "//como-atualizar": "Mexeu numa suite obrigatoria, na guarda ou no portao? O gate reprova ate que o digest daqui seja atualizado NO MESMO commit. E de proposito: a edicao passa a ser um ato deliberado e auditavel no diff, em vez de uma perda silenciosa. Recalcule com: npm run test:digests",
+  "//normalizacao": "Os digests sao de conteudo NORMALIZADO para LF. O repositorio esta em CRLF e o autocrlf do git pode trocar o EOL no checkout — um digest de bytes crus reprovaria por causa do sistema de arquivos, e nao por perda de prova.",
+  "//v2": "A versao 2 fecha os dois falsos-verdes medidos pela OS 23.1-P-R1: (a) `camposObrigatoriosPorSuite` impede desarmar uma entrada apagando seus campos de defesa; (b) `comandoOficial.invocacaoExata` mais `execucao` tiram o encadeamento de shell do caminho oficial e exigem execucao real contada, em vez de mensagem de sucesso.",
+  "versaoContratoDeProva": 2,
+  "//camposObrigatoriosPorSuite": "Toda entrada de `suitesObrigatorias` TEM de carregar estes campos. Sem esta lista, `if (s.digestSha256 && ...)` faz a defesa sumir junto com o campo — que foi exatamente o falso-verde 2.2 da OS 23.1-P-R1.",
+  "camposObrigatoriosPorSuite": [
+    "digestSha256",
+    "pisoDeCasos",
+    "blocosNormativos",
+    "casosObrigatorios"
+  ],
+  "//ferramentasProtegidas": "As pecas do portao tambem sao provas. Sem digest aqui, adulterar o proprio portao era o caminho mais curto para o verde, e nada olhava. Quem confere estes digests e `test/gate_sobrevivencia.test.js`, de dentro do glob: as ferramentas nao podem ser a unica autoridade sobre si mesmas.",
+  "ferramentasProtegidas": [
+    {
+      "caminho": "ferramentas/gate-de-provas.js",
+      "digestSha256": "cd2a43a4b58f7880e2ae178f50e3308c383f9cca5f2562971c576d26e4b31cbd"
+    },
+    {
+      "caminho": "ferramentas/portao.js",
+      "digestSha256": "2f169a72151e82b511cb986f006cdd5ebb0c277a59c58dd3646a0eebf52c17f4"
+    }
+  ],
   "suitesObrigatorias": [
     {
       "id": "produtor-envelope-v2",
       "os": "OS 23.1-P",
       "caminho": "test/produtor_v2.test.js",
-      "porque": "As provas do contrato V2 do envelope de encerramento. Sem elas, `npm test` fica verde com 497 casos antigos enquanto o contrato V2 deixa de ser provado — que e exatamente o residual que a OS 23.1-P-C1 fecha.",
+      "porque": "As provas do contrato V2 do envelope de encerramento. Sem elas, o portao fica verde com os casos antigos enquanto o contrato V2 deixa de ser provado.",
       "digestSha256": "c551de5f574f537f001b8654c1c8d889c4ca4e2d4aef7e13182a1974e0574c4d",
       "pisoDeCasos": 61,
       "blocosNormativos": [
@@ -22,23 +41,112 @@
         "V2/INVARIANTES",
         "V2/QUARENTENA",
         "V2/PRIMEIRA BATIDA"
+      ],
+      "//casosObrigatorios": "Os identificadores estaveis de cada prova, declarados FORA do arquivo que protegem. A guarda confere que estao no texto; o portao exige que cada um tenha REALMENTE passado na execucao. E a defesa contra reduzir a suite preservando so a aparencia — e contra atualizar a expectativa dentro do proprio arquivo adulterado.",
+      "casosObrigatorios": [
+        "C-01",
+        "C-02",
+        "C-03",
+        "C-04",
+        "C-05",
+        "C-06",
+        "D1-01",
+        "D1-02",
+        "D1-03",
+        "D1-04",
+        "D1-05",
+        "D1-06",
+        "D2-01",
+        "D2-02",
+        "D2-03",
+        "D2-04",
+        "D2-05",
+        "D2-06",
+        "D2-07",
+        "D3-01",
+        "D3-02",
+        "D3-03",
+        "D3-04",
+        "D3-05",
+        "D3-06",
+        "D3-07",
+        "D3-08",
+        "D3-09",
+        "D4-01",
+        "D4-02",
+        "D4-03",
+        "D4-05",
+        "D4-04",
+        "D5-01",
+        "D5-02",
+        "D5-03",
+        "D5-04",
+        "D6-01",
+        "D6-02",
+        "D6-03",
+        "I-00",
+        "I2",
+        "I3",
+        "I4",
+        "I5",
+        "I6",
+        "I7",
+        "I-FECHO",
+        "Q-01",
+        "Q-02",
+        "Q-03",
+        "Q-04",
+        "Q-05",
+        "Q-06",
+        "Q-07",
+        "Q-08",
+        "Q-09",
+        "PB-01",
+        "PB-02",
+        "PB-03",
+        "PB-04"
       ]
     },
     {
       "id": "gate-sobrevivencia",
-      "os": "OS 23.1-P-C1",
+      "os": "OS 23.1-P-C1 / C2",
       "caminho": "test/gate_sobrevivencia.test.js",
-      "porque": "A metade de DENTRO da guarda: e ela que detecta a remocao da guarda externa do comando oficial. Sem exigi-la aqui, apaga-la seria a saida silenciosa.",
-      "digestSha256": "cd8245a2e0f7255c7d4f97ffb64103087291fdecbf55c5595fbe696808201d9d",
-      "pisoDeCasos": 8,
+      "porque": "A metade de DENTRO do portao: e ela que detecta a adulteracao das ferramentas e a volta do comando encadeado. Sem exigi-la aqui, apaga-la seria a saida silenciosa.",
+      "digestSha256": "eb9a76337f1a15ff1b95f01f1004eab5e97bb7227aa148d1f1406c4edb33284a",
+      "pisoDeCasos": 14,
       "blocosNormativos": [
         "GATE/SOBREVIVENCIA"
+      ],
+      "casosObrigatorios": [
+        "GS-01",
+        "GS-02",
+        "GS-03",
+        "GS-04",
+        "GS-05",
+        "GS-06",
+        "GS-07",
+        "GS-08",
+        "GS-09",
+        "GS-10",
+        "GS-11",
+        "GS-12",
+        "GS-13",
+        "GS-14"
       ]
     }
   ],
+  "//execucao": "O alvo real do `node --test`, declarado aqui e nao no script. A guarda confere que os padroes ALCANCAM cada suite obrigatoria; o portao os usa para executar. `totalMinimoDeTestes` e o piso global: zero testes, ou uma reducao macica, deixam de passar por execucao normal.",
+  "execucao": {
+    "padroes": [
+      "test/*.test.js"
+    ],
+    "totalMinimoDeTestes": 572
+  },
+  "//comandoOficial": "O comando oficial e um PROCESSO UNICO, e o script tem de ser identico a esta string. Encadear (`&&`, `;`, `|`) reabre o caminho medido pela OS 23.1-P-R1: no `cmd.exe` o `;` nao separa comandos, e o `node --test` simplesmente nao roda enquanto o portao imprime sucesso.",
   "comandoOficial": {
-    "//": "O gate confere que o script `test` do package.json (a) chama esta guarda e (b) tem um `node --test` cujo padrao ALCANCA cada suite obrigatoria. Sem (b), alguem poderia estreitar o glob e a suite deixaria de rodar mesmo existindo no disco.",
     "script": "test",
-    "invocacaoDaGuarda": "ferramentas/gate-de-provas.js"
+    "invocacaoExata": "node ferramentas/portao.js",
+    "scriptPrevio": "pretest",
+    "invocacaoPreviaExata": "node ferramentas/gate-de-provas.js"
   }
 }
