@@ -4819,6 +4819,21 @@ function criarGerenciador(opts = {}) {
     if (veredito.admissaoId) assentoZero.admissaoId = veredito.admissaoId;
     salas[codigo] = {
       codigo, modalidade,
+      // [DESCOBERTA §5] INSTANTE DE NASCIMENTO DA SALA, em ms do relógio
+      // INJETÁVEL do gerenciador (`agora`), o mesmo que decide expiração de
+      // graça. Existe por uma razão só: o desempate da ordenação pública tem
+      // de favorecer quem espera há mais tempo, e "há mais tempo" não é
+      // derivável de nenhum campo que já existisse — `log` só cresce depois de
+      // a partida começar, e o código é sorteado.
+      //
+      // NÃO vem de mensagem: nenhum parâmetro de `criarMesa` o carrega e o
+      // despachante não o monta. É por isso que o cliente não consegue
+      // comprar posição na lista dizendo que chegou antes.
+      //
+      // Sendo CONSTANTE pela vida da sala, ele entra na impressão do estado
+      // como qualquer outro campo autoritativo e nunca faz a versão andar
+      // sozinha — exatamente como `categoriaCompetitiva` e `metaPontos`.
+      criadaEm: agora(),
       // [META] O valor JA VALIDADO, nunca o cru que chegou por mensagem.
       metaPontos: meta,
       // [ECONOMIA] Entrada por jogador (0 = sem aposta). Vem da CONSTRUCAO do
@@ -4876,6 +4891,14 @@ function criarGerenciador(opts = {}) {
     // caminho futuro escreva neste campo, e caminho futuro sempre existe.
     Object.defineProperty(salas[codigo], "metaPontos", {
       value: meta, writable: false, configurable: false, enumerable: true,
+    });
+    // [DESCOBERTA §5] IMUTÁVEL pela terceira vez, e aqui a razão é a
+    // ordenação: se este campo pudesse ser reescrito, uma mesa recém-criada
+    // poderia se declarar antiga e subir na lista pública passando na frente
+    // de quem realmente espera há mais tempo. Desempate manipulável não é
+    // desempate.
+    Object.defineProperty(salas[codigo], "criadaEm", {
+      value: salas[codigo].criadaEm, writable: false, configurable: false, enumerable: true,
     });
     return { codigo, assento: 0 };
     });
@@ -5758,6 +5781,639 @@ module.exports = {
   // reescrever as strings — teste que redigita "bot_substituto" não detecta
   // renomeação, só a repete.
   CONTROLE, MOTIVO_CONTROLE, GRACA_AUSENCIA_PADRAO_MS,
+};
+
+  };
+
+  __fabricas["presenca"] = function (module, exports, require) {
+// servidor/presenca.js — PRESENÇA AGREGADA V1 (OS 38.1, §6)
+//
+// UMA PERGUNTA SÓ: quantas PESSOAS distintas estão no aplicativo agora?
+//
+// Não é "quantos sockets", não é "quantas abas", não é "quantos aparelhos" e
+// não é "quantas vezes alguém reconectou". Essas quatro coisas são o que um
+// contador ingênuo mede, e as quatro inflam o número exatamente nos momentos em
+// que a rede está pior — que é quando o número mais é olhado.
+//
+// A CHAVE DE DEDUPLICAÇÃO É O `uid` AUTENTICADO, e não pode ser outra coisa.
+// Ele é derivado do `sub` do token verificado por `vincularIdentidade`, é
+// `writable:false` na conexão, e nenhum campo de mensagem o alcança
+// (`identidadeDivergente` recusa antes). Deduplicar por id de conexão contaria
+// abas; deduplicar por `jogadorId` recebido contaria o que o cliente quisesse.
+//
+// O MODELO É DE LEASE (arrendamento), não de contador.
+//
+// Um contador (`entrou++` / `saiu--`) só está certo se TODA saída for
+// observada. Queda abrupta — cabo arrancado, aplicativo morto pelo sistema,
+// rede de celular que some — não produz evento de saída nenhum, e o contador
+// fica alto para sempre. Isso é o "fantasma" que a §6.3 manda tratar.
+//
+// Com lease não existe fantasma por construção: a presença é uma AFIRMAÇÃO COM
+// VALIDADE. Quem está vivo renova; quem morreu simplesmente para de renovar e
+// vence sozinho. A limpeza não depende de ninguém avisar nada.
+//
+// EXPIRAÇÃO PREGUIÇOSA, e é de propósito. O vencimento é avaliado em toda
+// LEITURA, com o relógio injetado — nunca por um temporizador que pode não ter
+// rodado ainda (processo suspenso, relógio falso de teste, máquina dormindo).
+// É a mesma disciplina da guarda de credencial em `processar`: validade se
+// confere no ato, não se espera do agendador.
+//
+// O CLIENTE RENOVA; O CLIENTE NÃO DECLARA (§6.3). A única coisa que entra aqui
+// por vontade do cliente é "eu ainda estou aqui", e ela vale para o `uid` DELE
+// e só para ele. Não existe caminho por onde um total, uma contagem ou a
+// presença de terceiro cheguem de fora: `renovar` recebe dois argumentos e os
+// dois são do próprio portador da conexão.
+"use strict";
+
+/** Validade de uma renovação. Folga deliberada sobre o keepalive de 20 s do
+ *  transporte: duas batidas perdidas ainda não derrubam a presença, e três
+ *  derrubam. Curto demais faz o total piscar em rede ruim; longo demais deixa
+ *  fantasma de pé tempo demais depois de uma queda abrupta. */
+const TTL_PADRAO_MS = 45000;
+
+function ehTexto(v) { return typeof v === "string" && v !== ""; }
+
+/** Registro de presença por lease. Sem disco, sem rede, sem temporizador. */
+function criarRegistroDePresenca(opts = {}) {
+  const agora = opts.agora || (() => Date.now());
+  const ttlMs = Number.isFinite(opts.ttlMs) && opts.ttlMs > 0
+    ? Math.floor(opts.ttlMs)
+    : TTL_PADRAO_MS;
+
+  // uid -> Map<sessaoId, expiraEm>. O segundo nível existe para que ENCERRAR
+  // UMA sessão (uma aba fechada) não derrube as outras do mesmo jogador — e
+  // para que o total continue sendo o tamanho do primeiro nível, que é o
+  // número de PESSOAS.
+  const porUid = new Map();
+
+  /** Varre e remove o que venceu. Devolve o que foi removido, para o chamador
+   *  poder registrar limpeza sem ter que comparar contagens. */
+  function expirarVencidas() {
+    const t = agora();
+    let sessoes = 0, jogadores = 0;
+    for (const [uid, mapa] of porUid) {
+      for (const [sid, expiraEm] of mapa) {
+        if (expiraEm <= t) { mapa.delete(sid); sessoes++; }
+      }
+      if (mapa.size === 0) { porUid.delete(uid); jogadores++; }
+    }
+    return { sessoesRemovidas: sessoes, jogadoresRemovidos: jogadores };
+  }
+
+  /** Renova (ou abre) o lease de UMA sessão de UM jogador.
+   *
+   *  Idempotente por (uid, sessaoId): chamar dez vezes na mesma janela não
+   *  cria dez presenças — reescreve o vencimento da mesma. É o que faz
+   *  "renovar a cada mensagem" ser barato e correto ao mesmo tempo. */
+  function renovar(uid, sessaoId) {
+    if (!ehTexto(uid) || !ehTexto(sessaoId)) return null;
+    let mapa = porUid.get(uid);
+    if (!mapa) { mapa = new Map(); porUid.set(uid, mapa); }
+    const expiraEm = agora() + ttlMs;
+    mapa.set(sessaoId, expiraEm);
+    return { expiraEm, ttlMs };
+  }
+
+  /** Fecha UMA sessão. Saída limpa (socket fechado, credencial vencida).
+   *  A queda suja não passa por aqui — quem trata dela é o vencimento. */
+  function encerrarSessao(uid, sessaoId) {
+    if (!ehTexto(uid) || !ehTexto(sessaoId)) return false;
+    const mapa = porUid.get(uid);
+    if (!mapa) return false;
+    const havia = mapa.delete(sessaoId);
+    if (mapa.size === 0) porUid.delete(uid);
+    return havia;
+  }
+
+  /** O conjunto de PESSOAS presentes agora. Vencidas já foram embora. */
+  function uidsPresentes() {
+    expirarVencidas();
+    return new Set(porUid.keys());
+  }
+
+  function estaPresente(uid) {
+    if (!ehTexto(uid)) return false;
+    expirarVencidas();
+    return porUid.has(uid);
+  }
+
+  /** O total do §6.1: PESSOAS únicas, nunca sockets. */
+  function totalDeJogadores() {
+    expirarVencidas();
+    return porUid.size;
+  }
+
+  /** Quantas sessões abertas um jogador tem. Diagnóstico e prova — não é o
+   *  total, e é justamente por não ser que existe separado. */
+  function sessoesDe(uid) {
+    if (!ehTexto(uid)) return 0;
+    expirarVencidas();
+    const mapa = porUid.get(uid);
+    return mapa ? mapa.size : 0;
+  }
+
+  /** Retrato para log e teste. NUNCA devolve uid: só as contagens. */
+  function estado() {
+    expirarVencidas();
+    let sessoes = 0;
+    for (const mapa of porUid.values()) sessoes += mapa.size;
+    return { jogadores: porUid.size, sessoes, ttlMs };
+  }
+
+  return {
+    renovar, encerrarSessao, expirarVencidas,
+    uidsPresentes, estaPresente, totalDeJogadores, sessoesDe, estado,
+    ttlMs,
+  };
+}
+
+module.exports = { criarRegistroDePresenca, TTL_PADRAO_MS };
+
+  };
+
+  __fabricas["descoberta"] = function (module, exports, require) {
+// servidor/descoberta.js — PROJEÇÃO AUTORITATIVA DE MESAS PÚBLICAS V1
+// (OS 38.1, §4/§5/§6.2/§7/§8)
+//
+// SÓ LEITURA. Este módulo não cria mesa, não senta ninguém, não move assento e
+// não fala com o controlador. Ele olha o registro autoritativo (`ger.salas`) e
+// devolve um retrato. Toda a autoridade continua exatamente onde estava.
+//
+// POR QUE UMA PROJEÇÃO, E NÃO "mandar a sala pelo fio"
+//
+// `sala` carrega `assentos[i].jogadorId` — que É o uid do Firebase, o mesmo que
+// serve `/avatar/<id>`. Carrega `admissaoId`. Carrega `jogo`, com as mãos. Um
+// endpoint que serializasse a sala vazaria os três de uma vez. A projeção é uma
+// LISTA BRANCA construída campo a campo: o que não foi escrito aqui não sai.
+//
+// TRÊS FILTROS, E OS TRÊS SÃO FAIL-CLOSED
+//
+// 1. TOPOLOGIA. Só `tipoPartida === "publica"`. O campo mora na sala e foi
+//    carimbado a partir da CONFIGURAÇÃO DO PROCESSO — `criarMesa` não o recebe
+//    e o despachante não o monta, então não há mensagem que promova uma mesa
+//    privada a pública. Um valor que não seja exatamente `"publica"` (inclusive
+//    `undefined` numa sala malformada) não passa.
+// 2. NATUREZA COMPETITIVA. Só `casual`. `vip_ranqueada` fica fora porque a
+//    admissão dela exige direito próprio de cada ocupante (e listar a mesa
+//    convidaria a bater numa porta que vai recusar); `desconhecida` fica fora
+//    porque mesa desconhecida não admite ninguém.
+// 3. INTEGRIDADE. Meta fora de `METAS_CANONICAS`, modalidade fora da tabela do
+//    motor, `assentos` que não seja um vetor de 4, código vazio, sala já
+//    encerrada ou liquidada — nada disso aparece. §4 diz que mesa inválida ou
+//    não publicável não pode aparecer, e "não sei descrever esta mesa" é o caso
+//    mais claro de não publicável que existe.
+//
+// A MODALIDADE É CONFERIDA CONTRA O MOTOR, NÃO CONTRA UMA LISTA DIGITADA AQUI
+//
+// `criarMesa` hoje aceita `msg.modalidade` cru: o motor resolve qualquer valor
+// desconhecido para as regras do `sbtl` (`regrasDaModalidade`). Uma lista
+// redigitada neste arquivo seria uma SEGUNDA fonte da mesma verdade, e duas
+// listas divergem no primeiro ajuste. Então a lista é DERIVADA de
+// `MODALIDADES`, a tabela do motor — acrescentar uma modalidade lá a torna
+// listável aqui, sem tocar neste arquivo, e nenhuma string inventada pelo
+// cliente atravessa. É o §8 ("não confiar em modalidade enviada pelo cliente")
+// resolvido sem reescrever a criação de mesa, que é autoridade de outra OS.
+//
+// REVISÃO: UMA SEQUÊNCIA SÓ, MONOTÔNICA
+//
+// Cada mesa e o retrato inteiro carregam `revisao`, tirada de UM contador que
+// só sobe. Isso resolve três coisas de uma vez (§7):
+//
+//   • atualização fora de ordem — quem recebe revisão menor ou igual à que já
+//     tem descarta, e não existe empate ambíguo;
+//   • código reaproveitado — uma sala nova com um código que já existiu recebe
+//     revisão NOVA, maior que a da sala morta, e não herda a antiga;
+//   • retrato atrasado — chegou tarde, chega com o número velho, e se identifica
+//     como velho sozinho.
+//
+// A impressão que decide se a revisão sobe IGNORA os campos derivados do
+// relógio (`aguardandoHaMs`, `geradoEm`). Sem isso, a revisão subiria a cada
+// consulta e o número deixaria de significar "algo mudou" — passaria a
+// significar "alguém perguntou", que é a mesma coisa que não significar nada.
+//
+// `geracao` é sorteado no nascimento do registro. A sequência é da VIDA DO
+// PROCESSO: reiniciar o servidor volta a revisão para zero. Em vez de fingir
+// durabilidade que não existe, o retrato diz de qual geração ele é — geração
+// diferente é ordem de descartar tudo e ressincronizar, não de comparar
+// números que não são comparáveis.
+"use strict";
+
+const crypto = require("crypto");
+const { MODALIDADES } = require("./bot");
+const { METAS_CANONICAS, CATEGORIA_PADRAO } = require("./salas");
+
+const ESQUEMA = "descoberta-mesas-v1";
+const TIPO_PUBLICO = "publica";
+// A mesa pública é a CASUAL. Vem da constante do gate, não de uma segunda
+// digitação da palavra.
+const CATEGORIA_PUBLICA = CATEGORIA_PADRAO;
+const CAPACIDADE = 4;
+const APELIDO_MAX = 24; // o mesmo corte que o cofre de contas aplica
+
+/** DERIVADA da tabela do motor. Ver o cabeçalho: nunca redigitar. */
+const MODALIDADES_PUBLICAS = Object.freeze(Object.keys(MODALIDADES).slice().sort());
+
+/** Estado de ingresso, enumeração fechada.
+ *
+ *  `em_andamento` existe porque a §4 manda decidir a partir do CICLO DE VIDA
+ *  REAL, e o ciclo de vida real é este: `entrarMesa` numa sala iniciada recusa
+ *  todo mundo, menos o titular de um assento voltando (que é reconexão, não
+ *  ingresso). Então mesa iniciada NÃO é ingressável — mas continua existindo,
+ *  continua tendo gente dentro e continua podendo ser assistida. Escondê-la
+ *  faria a lista mentir sobre onde as pessoas estão; marcá-la de ingressável
+ *  faria o jogador bater numa porta fechada. Ela aparece, marcada. */
+const INGRESSO = Object.freeze({
+  AGUARDANDO: "aguardando",
+  CHEIA: "cheia",
+  EM_ANDAMENTO: "em_andamento",
+});
+
+/** Campos que NÃO entram na impressão que decide a revisão. Ver o cabeçalho. */
+const CAMPOS_FORA_DA_REVISAO = Object.freeze(["aguardandoHaMs", "revisao"]);
+
+function ehTexto(v) { return typeof v === "string" && v !== ""; }
+
+/** A sala é publicável? Ver os três filtros no cabeçalho. Fail-closed em toda
+ *  aresta: qualquer coisa que não se saiba afirmar responde `false`. */
+function ehPublicavel(sala) {
+  if (!sala || typeof sala !== "object") return false;
+  if (!ehTexto(sala.codigo)) return false;
+  if (sala.tipoPartida !== TIPO_PUBLICO) return false;
+  if (sala.categoriaCompetitiva !== CATEGORIA_PUBLICA) return false;
+  if (!Array.isArray(sala.assentos) || sala.assentos.length !== CAPACIDADE) return false;
+  if (!METAS_CANONICAS.includes(sala.metaPontos)) return false;
+  if (!MODALIDADES_PUBLICAS.includes(sala.modalidade)) return false;
+  // Encerrada. Os dois marcadores, porque eles não nascem juntos: o envelope é
+  // produzido no fim da partida e a liquidação é a escrituração no cofre.
+  if (sala.envelopeEncerramento) return false;
+  if (sala.liquidada) return false;
+  return true;
+}
+
+function apelidoPublico(v) {
+  if (!ehTexto(v)) return null;
+  return v.slice(0, APELIDO_MAX);
+}
+
+/** O ÚNICO dado de avatar que atravessa: o índice da galeria.
+ *
+ *  `avatarTipo === "foto"` fica de fora DE PROPÓSITO. A foto é servida em
+ *  `/avatar/<jogadorId>`, e `jogadorId` é o uid — publicar a foto na descoberta
+ *  seria publicar o uid com outro nome. O índice da galeria é um número de
+ *  catálogo: não identifica ninguém e não abre rota nenhuma. */
+function avatarDeGaleria(contas, jogadorId) {
+  if (!contas || !ehTexto(jogadorId)) return null;
+  let c = null;
+  try { c = contas.obter(jogadorId); } catch (_) { return null; }
+  if (!c || c.avatarTipo !== "galeria") return null;
+  const n = Number(c.avatarId);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Ocupação SANITIZADA: quatro posições, sempre, na ordem dos assentos.
+ *
+ *  Lista branca literal. `jogadorId`, `admissaoId` e qualquer coisa que o
+ *  assento venha a carregar amanhã não têm por onde sair daqui — o objeto de
+ *  saída é construído do zero, nunca copiado do de entrada. */
+function ocupacaoSanitizada(sala, contas) {
+  const saida = [];
+  for (let i = 0; i < CAPACIDADE; i++) {
+    const a = sala.assentos[i];
+    if (!a || typeof a !== "object") {
+      saida.push({ assento: i, ocupado: false, tipo: null, apelido: null, avatarGaleria: null });
+      continue;
+    }
+    const humano = a.tipo === "humano";
+    saida.push({
+      assento: i,
+      ocupado: true,
+      tipo: humano ? "humano" : "bot",
+      apelido: apelidoPublico(a.apelido),
+      avatarGaleria: humano ? avatarDeGaleria(contas, a.jogadorId) : null,
+    });
+  }
+  return saida;
+}
+
+/** Identificação pública da mesa. O domínio não tem campo de nome, e inventar
+ *  um campo novo na sala para isto seria autoridade nova por conveniência de
+ *  tela. O nome é DERIVADO de quem está sentado — apelido já é público na mesa
+ *  e é o que a pessoa reconhece. Sem humano nenhum, cai no código. */
+function nomePublico(sala, assentos) {
+  const criador = assentos[sala.criadorAssento];
+  if (criador && criador.tipo === "humano" && criador.apelido) return "Mesa de " + criador.apelido;
+  for (const a of assentos) {
+    if (a.tipo === "humano" && a.apelido) return "Mesa de " + a.apelido;
+  }
+  return "Mesa " + sala.codigo;
+}
+
+/** ORDENAÇÃO CANÔNICA (§5). Ordem total e determinística — duas execuções sobre
+ *  o mesmo estado devolvem exatamente a mesma sequência.
+ *
+ *  1. INGRESSÁVEL PRIMEIRO. A lista serve para entrar; o que não dá para entrar
+ *     desce, por mais cheio que esteja.
+ *  2. MAIS PERTO DE COMPLETAR. 3 antes de 2, 2 antes de 1. É a preferência que
+ *     a §5 exige, e ela é sobre HUMANOS: uma mesa com três pessoas está a uma
+ *     pessoa de começar; uma com um humano e dois bots, não.
+ *  3. ESPERANDO HÁ MAIS TEMPO. `criadaEm` é do relógio do servidor, imutável, e
+ *     nenhuma mensagem o alcança — o cliente não compra posição.
+ *  4. CÓDIGO. Último desempate, para que a ordem seja TOTAL. Sem ele, duas
+ *     mesas idênticas criadas no mesmo milissegundo ficariam em ordem
+ *     dependente da iteração do objeto — instável entre execuções, e é
+ *     exatamente o tipo de instabilidade que faz a lista "pular" na tela sem
+ *     nada ter acontecido. O código é sorteado pelo servidor: não é
+ *     escolhível, então não é manipulável. */
+function compararMesas(a, b) {
+  if (a.ingressavel !== b.ingressavel) return a.ingressavel ? -1 : 1;
+  if (a.jogadores !== b.jogadores) return b.jogadores - a.jogadores;
+  if (a.criadaEm !== b.criadaEm) return a.criadaEm - b.criadaEm;
+  if (a.codigo < b.codigo) return -1;
+  if (a.codigo > b.codigo) return 1;
+  return 0;
+}
+
+function impressaoDe(valor) {
+  try {
+    return crypto.createHash("sha1").update(JSON.stringify(valor)).digest("hex");
+  } catch (e) {
+    // Mesma disciplina de `impressaoDoEstado`: entre repetir uma revisão que
+    // talvez tenha mudado e avançar uma que talvez não tenha, só a segunda é
+    // segura. O cliente reprocessa um retrato igual; nunca descarta um novo.
+    return "indeterminada-" + crypto.randomUUID();
+  }
+}
+
+/** A impressão de UMA mesa, sem os campos derivados do relógio. */
+function impressaoDaMesa(mesa) {
+  const estavel = {};
+  for (const chave of Object.keys(mesa).sort()) {
+    if (CAMPOS_FORA_DA_REVISAO.includes(chave)) continue;
+    estavel[chave] = mesa[chave];
+  }
+  return impressaoDe(estavel);
+}
+
+/** Registro de descoberta: guarda as revisões e projeta.
+ *
+ *  Tem estado (o contador e as impressões) e por isso é uma fábrica, não uma
+ *  função solta. O estado é SÓ do retrato — nenhuma sala é tocada. */
+function criarRegistroDeDescoberta(opts = {}) {
+  const agora = opts.agora || (() => Date.now());
+  const agoraIso = opts.agoraIso || (() => new Date().toISOString());
+  const geracao = ehTexto(opts.geracao) ? opts.geracao : crypto.randomUUID();
+
+  // A sequência ÚNICA. Mesa e retrato bebem dela, então uma revisão de mesa e
+  // uma revisão global nunca significam coisas diferentes.
+  let sequencia = 0;
+  const porMesa = new Map(); // codigo -> { revisao, impressao }
+  let revisao = 0;
+  let impressaoGlobal = null;
+  // Contagem de descartes por invariante violada. É CONTAGEM, nunca o dado:
+  // mesmo padrão do tripwire da visão do espectador.
+  let descartadasPorInvariante = 0;
+
+  /** Monta o registro interno de uma mesa. `criadaEm` e `uids` ficam AQUI e não
+   *  saem: são o que a ordenação e a contagem precisam, e o que o jogador não
+   *  pode ver. */
+  function registroDaMesa(sala, contas) {
+    const assentos = ocupacaoSanitizada(sala, contas);
+    let ocupados = 0, jogadores = 0;
+    const uids = [];
+    for (let i = 0; i < CAPACIDADE; i++) {
+      if (!assentos[i].ocupado) continue;
+      ocupados++;
+      if (assentos[i].tipo !== "humano") continue;
+      jogadores++;
+      const jid = sala.assentos[i] && sala.assentos[i].jogadorId;
+      if (ehTexto(jid)) uids.push(jid);
+    }
+    const bots = ocupados - jogadores;
+    const vagas = CAPACIDADE - ocupados;
+
+    // INVARIANTES (§7). Violada qualquer uma, a mesa é DESCARTADA — não
+    // corrigida. Publicar um número consertado esconderia o defeito que o
+    // produziu; publicar nada o mantém visível na contagem e não mente para
+    // ninguém. Nenhum destes casos é alcançável pelo caminho normal: eles
+    // existem para o dia em que alguém acrescentar um caminho de escrita novo.
+    if (ocupados < 0 || jogadores < 0 || bots < 0 || vagas < 0) return null;
+    if (ocupados > CAPACIDADE) return null;
+    if (jogadores > ocupados) return null;
+
+    const estadoIngresso = sala.iniciada
+      ? INGRESSO.EM_ANDAMENTO
+      : (vagas > 0 ? INGRESSO.AGUARDANDO : INGRESSO.CHEIA);
+
+    return {
+      criadaEm: Number.isFinite(sala.criadaEm) ? sala.criadaEm : 0,
+      uids,
+      mesa: {
+        codigo: sala.codigo,
+        nome: nomePublico(sala, assentos),
+        modalidade: sala.modalidade,
+        metaPontos: sala.metaPontos,
+        capacidade: CAPACIDADE,
+        jogadores,
+        bots,
+        ocupados,
+        vagas,
+        assentos,
+        estadoIngresso,
+        ingressavel: estadoIngresso === INGRESSO.AGUARDANDO,
+        // preenchidos depois: dependem do relógio e da sequência
+        aguardandoHaMs: 0,
+        revisao: 0,
+      },
+    };
+  }
+
+  /**
+   * O RETRATO. Coerente por construção: é montado de uma vez, numa única linha
+   * de execução síncrona, do mesmo `salas` — não existe ponto de suspensão
+   * entre ler uma mesa e ler a seguinte, então não há retrato meio novo.
+   *
+   * @param {object}   e.salas        registro autoritativo (`ger.salas`)
+   * @param {object}   e.contas       cofre, só para o índice de galeria do avatar
+   * @param {object}   e.presenca     registro de leases
+   * @param {Iterable} e.espectadores uids autenticados assistindo alguma mesa
+   */
+  function projetar({ salas, contas = null, presenca = null, espectadores = null } = {}) {
+    const t = agora();
+    const registros = [];
+    const fonte = salas && typeof salas === "object" ? salas : {};
+    for (const codigo of Object.keys(fonte)) {
+      const sala = fonte[codigo];
+      if (!ehPublicavel(sala)) continue;
+      const r = registroDaMesa(sala, contas);
+      if (!r) { descartadasPorInvariante++; continue; }
+      registros.push(r);
+    }
+    registros.sort((x, y) => compararMesas(
+      { ingressavel: x.mesa.ingressavel, jogadores: x.mesa.jogadores, criadaEm: x.criadaEm, codigo: x.mesa.codigo },
+      { ingressavel: y.mesa.ingressavel, jogadores: y.mesa.jogadores, criadaEm: y.criadaEm, codigo: y.mesa.codigo },
+    ));
+
+    // ---- revisão por mesa -------------------------------------------------
+    const vistos = new Set();
+    for (const r of registros) {
+      const codigo = r.mesa.codigo;
+      vistos.add(codigo);
+      // O CAMPO DO RELÓGIO É PREENCHIDO ANTES DA IMPRESSÃO, DE PROPÓSITO.
+      //
+      // Preenchê-lo depois deixaria `aguardandoHaMs` valendo zero na hora do
+      // cálculo, e a exclusão declarada em `CAMPOS_FORA_DA_REVISAO` viraria
+      // letra morta: a revisão ficaria estável por ACIDENTE DE ORDEM, e quem um
+      // dia trocasse as duas linhas de lugar quebraria a estabilidade sem tocar
+      // em nada que se pareça com a defesa. Aqui o valor é REAL quando a
+      // impressão é tirada, então quem o mantém fora da revisão é a LISTA — que
+      // é onde a decisão está escrita.
+      r.mesa.aguardandoHaMs = Math.max(0, t - r.criadaEm);
+      const imp = impressaoDaMesa(r.mesa);
+      const anterior = porMesa.get(codigo);
+      if (!anterior || anterior.impressao !== imp) {
+        porMesa.set(codigo, { revisao: ++sequencia, impressao: imp });
+      }
+      r.mesa.revisao = porMesa.get(codigo).revisao;
+    }
+    // Mesa que saiu da projeção sai do registro. Segura porque a sequência é
+    // global: um código reaproveitado nunca recebe uma revisão menor do que a
+    // que ele já teve.
+    for (const codigo of Array.from(porMesa.keys())) {
+      if (!vistos.has(codigo)) porMesa.delete(codigo);
+    }
+
+    const mesas = registros.map((r) => r.mesa);
+    const presencaAgregada = agregarPresenca({ registros, presenca, espectadores });
+
+    // ---- revisão global ---------------------------------------------------
+    const impGlobal = impressaoDe({
+      mesas: mesas.map((m) => ({ codigo: m.codigo, revisao: m.revisao })),
+      presenca: presencaAgregada,
+    });
+    if (impressaoGlobal !== impGlobal) {
+      impressaoGlobal = impGlobal;
+      revisao = ++sequencia;
+    }
+
+    return {
+      esquema: ESQUEMA,
+      geracao,
+      revisao,
+      geradoEm: agoraIso(),
+      mesas,
+      presenca: presencaAgregada,
+    };
+  }
+
+  /** CONTAGENS (§6.2). Todas por PESSOA (uid único), nunca por assento.
+   *
+   *  A regra que costura tudo: só conta quem TEM PRESENÇA VÁLIDA. Um assento
+   *  fica reservado enquanto o dono está ausente (graça do controlador), então
+   *  contar assentos faria "jogadores em mesas públicas" passar de
+   *  "jogadores online" — dois números que precisam ser somáveis passariam a
+   *  se contradizer. A ocupação da mesa (`jogadores`, na entrada da lista) é
+   *  outra pergunta e continua sendo por assento: ela descreve a MESA, não
+   *  quem está acordado. */
+  function agregarPresenca({ registros, presenca, espectadores }) {
+    const presente = (uid) => (presenca ? presenca.estaPresente(uid) : true);
+
+    const emMesas = new Set();
+    const aguardando = new Set();
+    const emAndamento = new Set();
+    const porModalidade = {};
+    for (const m of MODALIDADES_PUBLICAS) {
+      porModalidade[m] = {
+        mesas: 0, mesasComVagas: 0,
+        jogadores: 0, jogadoresAguardando: 0, jogadoresEmAndamento: 0,
+        _uids: new Set(), _aguardando: new Set(), _emAndamento: new Set(),
+      };
+    }
+
+    let mesasComVagas = 0;
+    for (const r of registros) {
+      const mod = porModalidade[r.mesa.modalidade];
+      if (mod) mod.mesas++;
+      // "COM VAGAS" É SOBRE INGRESSO, e não sobre aritmética de assento. Uma
+      // mesa em andamento pode ter assento vazio (alguém saiu) e mesmo assim
+      // não aceita ninguém. Contá-la aqui produziria o número mais cruel que
+      // uma lista pode ter: vagas que não existem.
+      if (r.mesa.ingressavel) { mesasComVagas++; if (mod) mod.mesasComVagas++; }
+      for (const uid of r.uids) {
+        if (!presente(uid)) continue;
+        emMesas.add(uid);
+        if (mod) mod._uids.add(uid);
+        if (r.mesa.estadoIngresso === INGRESSO.EM_ANDAMENTO) {
+          emAndamento.add(uid);
+          if (mod) mod._emAndamento.add(uid);
+        } else {
+          aguardando.add(uid);
+          if (mod) mod._aguardando.add(uid);
+        }
+      }
+    }
+
+    // ESPECTADOR NÃO É JOGADOR (§6.1). Ele está no aplicativo — e por isso
+    // conta no total geral, que é presença do APP — mas não ocupa assento e não
+    // entra em nenhuma contagem de jogadores. Quem está sentado numa mesa
+    // pública E assistindo outra por uma segunda conexão é contado como
+    // jogador, não como espectador: os dois conjuntos são DISJUNTOS de
+    // propósito, para que os números possam ser somados sem contar ninguém
+    // duas vezes.
+    const espectadoresUnicos = new Set();
+    if (espectadores) {
+      for (const uid of espectadores) {
+        if (!ehTexto(uid) || emMesas.has(uid) || !presente(uid)) continue;
+        espectadoresUnicos.add(uid);
+      }
+    }
+
+    const saidaPorModalidade = {};
+    for (const m of MODALIDADES_PUBLICAS) {
+      const d = porModalidade[m];
+      saidaPorModalidade[m] = {
+        mesas: d.mesas,
+        mesasComVagas: d.mesasComVagas,
+        jogadores: d._uids.size,
+        jogadoresAguardando: d._aguardando.size,
+        jogadoresEmAndamento: d._emAndamento.size,
+      };
+    }
+
+    const total = presenca ? presenca.totalDeJogadores() : emMesas.size;
+
+    return {
+      // §6.1 — PESSOAS no aplicativo, qualquer que seja o que estejam fazendo.
+      // Espectador entra aqui (está no app) e em nenhuma contagem de jogadores.
+      jogadoresOnlineTotal: total,
+      espectadoresOnline: espectadoresUnicos.size,
+      // §6.2 — a contagem pública, com o corte que a OS exige que seja dito em
+      // voz alta: o total INCLUI mesas em andamento, e os dois pedaços vêm
+      // separados para que ninguém tenha que adivinhar.
+      jogadoresEmMesasPublicas: emMesas.size,
+      jogadoresEmMesasPublicasAguardando: aguardando.size,
+      jogadoresEmMesasPublicasEmAndamento: emAndamento.size,
+      mesasPublicas: registros.length,
+      // NÚMERO SOBRE MESAS, deliberadamente longe dos de jogadores.
+      mesasPublicasComVagas: mesasComVagas,
+      porModalidade: saidaPorModalidade,
+    };
+  }
+
+  function diagnostico() {
+    return {
+      geracao, revisao, mesasRastreadas: porMesa.size,
+      descartadasPorInvariante,
+    };
+  }
+
+  return { projetar, diagnostico, geracao };
+}
+
+module.exports = {
+  criarRegistroDeDescoberta,
+  ehPublicavel, ocupacaoSanitizada, compararMesas, nomePublico, avatarDeGaleria,
+  ESQUEMA, INGRESSO, MODALIDADES_PUBLICAS, CAPACIDADE,
+  TIPO_PUBLICO, CATEGORIA_PUBLICA, CAMPOS_FORA_DA_REVISAO,
 };
 
   };
@@ -7112,6 +7768,10 @@ module.exports = {
 // conexão, e nenhum `msg.jogadorId` é lido em lugar nenhum deste arquivo.
 
 const { criarGerenciador, MOTIVO_CONTROLE, CONTROLE } = require("./salas");
+// [DESCOBERTA] As duas autoridades novas da OS 38.1. Nenhuma delas escreve em
+// sala, assento ou jogo — a primeira guarda leases, a segunda monta retratos.
+const { criarRegistroDePresenca } = require("./presenca");
+const { criarRegistroDeDescoberta } = require("./descoberta");
 
 // ===========================================================================
 // [CHAT] PRODUTOR DO CANAL — o contexto estável que a autoridade consome.
@@ -7360,6 +8020,28 @@ const PROTOCOLO_MINIMO = 2;
 // Carência para renovar a credencial de uma conexão que expirou em pleno uso.
 // Curta de propósito: é só o tempo de o cliente pedir um token novo ao SDK.
 const CARENCIA_RENOVACAO_MS = 30000;
+
+// [DESCOBERTA §7/§8] VOCABULÁRIO DO FIO. Nomes curtos, `tipo` no mesmo padrão
+// do resto do despachante — nenhum protocolo paralelo foi criado: as duas
+// mensagens andam no MESMO WebSocket autenticado, atrás da MESMA fronteira.
+const DESCOBERTA_FIO = Object.freeze({
+  PEDIDO: "descobrirMesas",
+  RESPOSTA: "mesas",
+  PULSO: "presenca_ping",
+  RECIBO_PULSO: "presenca_ok",
+});
+
+// [DESCOBERTA §8] LIMITE DE FREQUÊNCIA, por conexão.
+//
+// A consulta varre todas as salas e monta o retrato inteiro. Sem limite, um
+// cliente em laço apertado transforma a lista pública no caminho mais barato
+// para ocupar o processo — e o processo é UM só, o mesmo que roda as partidas.
+//
+// O limite recusa e NÃO enfileira: enfileirar guardaria trabalho para depois,
+// que é o mesmo custo com outro nome. E recusa ANTES de tocar em `salas`, então
+// o pedido excedente não custa nem a varredura.
+const RITMO_DESCOBERTA_MS = 1000;
+const RITMO_PULSO_MS = 5000;
 
 // [PATCH WS-AUTH] Campos de identidade que o cliente PODE mandar por hábito ou
 // por má-fé. Nenhum deles autentica nada; se vierem divergindo da identidade
@@ -7614,6 +8296,18 @@ function criarServidor(opts = {}) {
   const conexoes = {}; // id -> { id, enviar, codigo, assento, jogadorId, uidAutenticado, estadoAuth, expiraEm }
   let seq = 0;
 
+  // [DESCOBERTA §6] PRESENÇA. A sessão é a CONEXÃO (`c.id`) e a pessoa é o
+  // `uid` — é essa distinção, e só ela, que faz duas abas do mesmo jogador
+  // contarem uma vez. Compartilha o relógio injetado com o resto do servidor,
+  // então a suíte controla vencimento sem dormir.
+  const presenca = criarRegistroDePresenca({ agora, ttlMs: opts.presencaTtlMs });
+  // [DESCOBERTA §7] REGISTRO DO RETRATO. Guarda revisões, nunca estado de jogo.
+  const descoberta = criarRegistroDeDescoberta({
+    agora,
+    agoraIso: opts.agoraIso,
+    geracao: opts.geracaoDescoberta,
+  });
+
   function conectar(enviar, opcoes = {}) {
     const id = "c" + ++seq;
     conexoes[id] = {
@@ -7649,6 +8343,15 @@ function criarServidor(opts = {}) {
     if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} }
     c.expiraEm = expiraEm;
     c.estadoAuth = AUTH.AUTENTICADO;
+    // [DESCOBERTA §6] A PRESENÇA COMEÇA AQUI, e não em `conectar`.
+    //
+    // Conexão sem identidade não tem quem contar: contá-la seria contar
+    // sockets, que é exatamente o que a §6.1 proíbe. O lease nasce do uid
+    // VERIFICADO, e este é o ponto por onde passam os DOIS caminhos que deixam
+    // uma conexão autenticada — a autenticação nova (logo depois de
+    // `vincularIdentidade`) e a RENOVAÇÃO de credencial numa conexão que já
+    // tinha identidade. Pendurar no primeiro só deixaria a renovação de fora.
+    presenca.renovar(c.uidAutenticado, c.id);
     const falta = Math.max(0, expiraEm - agora());
     c._cancelarExpiracao = agendarEm(falta, () => expirar(c));
   }
@@ -7664,6 +8367,10 @@ function criarServidor(opts = {}) {
   function expirar(c) {
     if (!conexoes[c.id] || c.estadoAuth !== AUTH.AUTENTICADO) return;
     c.estadoAuth = AUTH.EXPIRADA;
+    // [DESCOBERTA §6.1] "sessões expiradas" não contam. A conexão ainda existe
+    // (está na carência para reapresentar credencial), mas ela deixou de valer
+    // como presença no mesmo instante em que deixou de valer como comando.
+    presenca.encerrarSessao(c.uidAutenticado, c.id);
     c._cancelarExpiracao = agendarEm(carenciaMs, () => {
       if (conexoes[c.id] && c.estadoAuth === AUTH.EXPIRADA) {
         console.warn("[auth] conexão " + c.id + " encerrada: credencial expirada e não renovada");
@@ -7950,6 +8657,11 @@ function criarServidor(opts = {}) {
   function desconectar(id) {
     const c = conexoes[id];
     if (!c) return;
+    // [DESCOBERTA §6.3] SAÍDA LIMPA. Fecha ESTA sessão, e só ela: as outras
+    // abas ou aparelhos do mesmo jogador continuam de pé, e o jogador continua
+    // presente. Queda SUJA nunca chega aqui — quem a resolve é o vencimento do
+    // lease, e é por isso que o vencimento não pode ser removido junto.
+    presenca.encerrarSessao(c.uidAutenticado, c.id);
     // [PATCH WS-AUTH] não deixa timer de expiração pendurado numa conexão morta
     if (c._cancelarExpiracao) { try { c._cancelarExpiracao(); } catch (_) {} c._cancelarExpiracao = null; }
     if (c.codigo != null && c.assento != null) {
@@ -7977,6 +8689,66 @@ function criarServidor(opts = {}) {
   function enviarPara(id, msg) {
     const c = conexoes[id];
     if (c && typeof c.enviar === "function") c.enviar(msg);
+  }
+
+  /** [DESCOBERTA §8] Portão de frequência, por conexão e por assunto.
+   *
+   *  O carimbo mora NA CONEXÃO, não num mapa por uid: reconectar não devolve
+   *  crédito acumulado (a conexão nova nasce sem carimbo, e é o que se quer —
+   *  ela vai fazer um pedido, não mil), e desconectar não deixa lixo para trás.
+   *
+   *  Usa o relógio injetado, então a suíte prova o limite sem dormir. */
+  function liberarRitmo(c, campo, intervaloMs) {
+    const t = agora();
+    const ultimo = c[campo];
+    if (typeof ultimo === "number" && t - ultimo < intervaloMs) return false;
+    c[campo] = t;
+    return true;
+  }
+
+  /** [DESCOBERTA §6.2] Os uids autenticados que estão ASSISTINDO alguma mesa.
+   *
+   *  Espectador é exatamente isto: está numa mesa (`codigo`) e não tem assento
+   *  (`assento === null`). É a mesma definição que `papelDe` usa — não uma
+   *  segunda, que divergiria dela. */
+  function uidsEspectando() {
+    const s = new Set();
+    for (const cid in conexoes) {
+      const c = conexoes[cid];
+      if (!c || c.estadoAuth !== AUTH.AUTENTICADO) continue;
+      if (c.codigo == null || c.assento != null) continue;
+      if (!c.uidAutenticado) continue;
+      s.add(c.uidAutenticado);
+    }
+    return s;
+  }
+
+  /** [DESCOBERTA] O retrato. Ponto ÚNICO: quem responde `descobrirMesas` e
+   *  quem quiser diagnosticar passam por aqui, e não por duas montagens que
+   *  poderiam discordar. */
+  function projetarDescoberta() {
+    return descoberta.projetar({
+      salas: ger.salas,
+      contas,
+      presenca,
+      espectadores: uidsEspectando(),
+    });
+  }
+
+  /** [DESCOBERTA §6.3] PULSO DO TRANSPORTE.
+   *
+   *  O transporte manda um PING de WebSocket a cada 20 s e o cliente responde
+   *  PONG no nível do protocolo, sem que uma linha de JSON trafegue. Esse PONG
+   *  é a prova mais barata que existe de que alguém está do outro lado — e ele
+   *  chega mesmo de um jogador parado, olhando a tela sem tocar em nada.
+   *
+   *  Ligá-lo aqui é o que faz a presença não depender de o aplicativo
+   *  implementar coisa alguma: o TTL de 45 s cobre duas batidas perdidas.
+   *  Não vincula identidade e não autentica nada — conexão sem uid não pulsa. */
+  function pulsar(id) {
+    const c = conexoes[id];
+    if (!c || c.estadoAuth !== AUTH.AUTENTICADO || !c.uidAutenticado) return false;
+    return Boolean(presenca.renovar(c.uidAutenticado, c.id));
   }
 
   function processar(id, msg) {
@@ -8010,6 +8782,18 @@ function criarServidor(opts = {}) {
       }
       return enviarPara(id, { tipo: "erro", motivo: "conexão não autenticada", codigo: "NAO_AUTENTICADO" });
     }
+    // [DESCOBERTA §6.3] Toda mensagem AUTENTICADA renova a presença.
+    //
+    // Fica exatamente aqui — depois da fronteira e da guarda de expiração —
+    // porque só passa deste ponto quem tem identidade verificada e credencial
+    // válida. Mensagem de conexão não autenticada não move a presença, e
+    // credencial vencida também não: `expirar` já fechou a sessão acima.
+    //
+    // Renovar por mensagem é barato (reescreve um vencimento) e cobre o
+    // jogador ATIVO sem depender de o cliente implementar coisa nenhuma. Quem
+    // está parado é coberto pelo PONG do keepalive do transporte, que também
+    // pulsa aqui — ver `pulsar`.
+    presenca.renovar(c.uidAutenticado, c.id);
     // [CONTROLADOR §5.6] Toda mensagem é uma oportunidade de perceber que uma
     // graça venceu. Fica DEPOIS da fronteira de autenticação e ANTES do
     // despacho: mensagem de conexão não autenticada não move o controlador.
@@ -8029,6 +8813,52 @@ function criarServidor(opts = {}) {
       case CHAT_FIO.PEDIDO: {
         processarChatEnviar(id, msg);
         return;
+      }
+
+      // [DESCOBERTA §7] A CONSULTA. Só leitura, e o retrato inteiro de uma vez.
+      //
+      // Nada de delta: o cliente recebe um estado completo e coerente, e não
+      // tem o que reconstruir por conta própria — que é o §2.9 ("sem fabricar
+      // estado no Flutter"). O que ele guarda é `revisao`, e só para saber se
+      // um retrato que chegou atrasado deve ser jogado fora.
+      //
+      // NÃO MUTA NADA. Não toca em assento, não move o controlador, não
+      // carimba versão de sala. `msg` não contribui com um único campo: não há
+      // filtro, não há paginação, não há "modalidade" vinda do cliente. A
+      // resposta é função do ESTADO DO SERVIDOR e mais nada.
+      case DESCOBERTA_FIO.PEDIDO: {
+        if (!liberarRitmo(c, "_ritmoDescoberta", RITMO_DESCOBERTA_MS)) {
+          return enviarPara(id, {
+            tipo: "erro", codigo: "DESCOBERTA_RITMO",
+            motivo: "consulta de mesas em ritmo excessivo",
+            aguardeMs: RITMO_DESCOBERTA_MS,
+          });
+        }
+        return enviarPara(id, Object.assign({ tipo: DESCOBERTA_FIO.RESPOSTA }, projetarDescoberta()));
+      }
+      // [DESCOBERTA §6.3] O PULSO. O cliente diz "ainda estou aqui" — sobre ELE
+      // mesmo, para o uid da própria conexão.
+      //
+      // `msg` é ignorada por inteiro. Não existe campo de total, de contagem, de
+      // outro jogador ou de tempo: o argumento é a identidade da conexão e o
+      // relógio é o do servidor. É assim que "o cliente renova mas não declara"
+      // deixa de ser promessa e vira ausência de caminho.
+      case DESCOBERTA_FIO.PULSO: {
+        if (!liberarRitmo(c, "_ritmoPulso", RITMO_PULSO_MS)) {
+          return enviarPara(id, {
+            tipo: "erro", codigo: "PRESENCA_RITMO",
+            motivo: "pulso de presença em ritmo excessivo",
+            aguardeMs: RITMO_PULSO_MS,
+          });
+        }
+        // A renovação já aconteceu na entrada de `processar`. Aqui só se
+        // devolve o contrato do ritmo, para o cliente saber de quanto em quanto
+        // tempo pulsar sem ter o número escrito na mão.
+        return enviarPara(id, {
+          tipo: DESCOBERTA_FIO.RECIBO_PULSO,
+          ttlMs: presenca.ttlMs,
+          intervaloSugeridoMs: Math.max(1000, Math.floor(presenca.ttlMs / 3)),
+        });
       }
 
       case "criarMesa": {
@@ -8307,7 +9137,13 @@ function criarServidor(opts = {}) {
   // decidido pelo servidor. Perder qualquer um dos dois quebraria uma suíte
   // inteira — e silenciosamente, já que ambos são lidos por testes, não pelo
   // caminho de produção.
-  return { conectar, desconectar, processar, autenticar, broadcastSala, papelDe, ger, conexoes };
+  return {
+    conectar, desconectar, processar, autenticar, broadcastSala, papelDe, ger, conexoes,
+    // [DESCOBERTA] `pulsar` é para o TRANSPORTE (o PONG do keepalive);
+    // `projetarDescoberta` e os dois registros são a superfície que a suíte
+    // afirma sem ter que reimplementar a projeção do lado do teste.
+    pulsar, projetarDescoberta, presenca, descoberta,
+  };
 }
 
 module.exports = { criarServidor, AUTH, PROTOCOLO_ATUAL, PROTOCOLO_MINIMO };
@@ -8326,6 +9162,11 @@ module.exports.CHAT_PAPEL = CHAT_PAPEL;
 module.exports.CHAT_FIO = CHAT_FIO;
 module.exports.CHAT_ACK = CHAT_ACK;
 module.exports.CHAT_RECUSA = CHAT_RECUSA;
+// [DESCOBERTA] Mesma razão: o vocabulário do fio e os limites de frequência são
+// contrato, e teste que os redigita não detecta renomeação — só a repete.
+module.exports.DESCOBERTA_FIO = DESCOBERTA_FIO;
+module.exports.RITMO_DESCOBERTA_MS = RITMO_DESCOBERTA_MS;
+module.exports.RITMO_PULSO_MS = RITMO_PULSO_MS;
 
 
   };
@@ -8454,7 +9295,11 @@ function criarConexao(socket, handlers) {
 
       if (opcode === OP.CLOSE) { handlers.close(); fechar(1000); return; }
       if (opcode === OP.PING) { try { socket.write(encodeFrame(OP.PONG, payload)); } catch (_) {} continue; }
-      if (opcode === OP.PONG) continue;
+      // [DESCOBERTA §6.3] O PONG deixou de ser descartado em silêncio: ele é o
+      // sinal de vida do keepalive, e é o que mantém a presença de quem está
+      // conectado e parado. Continua não sendo mensagem de aplicação — não
+      // autentica, não comanda e não chega ao despachante.
+      if (opcode === OP.PONG) { if (handlers.pong) { try { handlers.pong(); } catch (_) {} } continue; }
 
       // TEXT / BIN / CONT — monta a mensagem (suporta fragmentação)
       if (opcode === OP.TEXT || opcode === OP.BIN) { frags = [payload]; fragOp = opcode; }
@@ -8691,6 +9536,10 @@ function iniciar(porta, opts = {}) {
         servidor.processar(idConn, msg);
       },
       close: () => { if (idConn) { servidor.desconectar(idConn); idConn = null; } },
+      // [DESCOBERTA §6.3] O PONG do keepalive renova a presença. É a única
+      // coisa que este handler faz: não vira mensagem, não vira comando e não
+      // alcança o despachante.
+      pong: () => { if (idConn) servidor.pulsar(idConn); },
     });
     idConn = servidor.conectar(
       (msg) => conn.enviarTexto(JSON.stringify(msg)),

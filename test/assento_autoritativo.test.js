@@ -25,6 +25,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { cliente, novoServidor } = require("./ajuda.js");
+const { conferirCenso } = require("./censo_de_suites.js");
 
 const bundle = require("../server.js");
 const {
@@ -601,6 +602,15 @@ describe("ASSENTO/ESTRUTURA — onde a decisão mora", () => {
     g.entrarMesa({ codigo, jogadorId: "uid-1", uidAutenticado: "uid-1", assento: 2 });
     // Regime casual é síncrono: a reserva nasce e morre dentro da chamada.
     assert.deepEqual(sala.reservas, [null, null, null, null], "reserva sobreviveu ao caminho síncrono");
+  });
+
+  test("EST-05: as suítes obrigatórias da composição continuam no portão", () => {
+    // [OS 44] CENSO RECÍPROCO. Esta suíte é uma das protegidas e uma das que
+    // protegem: se `descoberta.test.js` ou a suíte de costura saírem do glob,
+    // este caso fica vermelho. É o que impede que uma composição perca a suíte
+    // de uma das entradas em silêncio — o portão aqui é um glob, e glob não
+    // sabe o que deveria existir. Ver `test/censo_de_suites.js`.
+    conferirCenso();
   });
 
   test("EST-04: `ehAssentoPedido` é a única leitura do que é um pedido válido", () => {
