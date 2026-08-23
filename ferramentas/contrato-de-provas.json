@@ -2,9 +2,10 @@
   "//": "CONTRATO DE PROVA DAS SUITES OBRIGATORIAS. Este arquivo e a lista, VERSIONADA, do que nao pode desaparecer nem encolher em silencio. Ele existe FORA das suites que protege — uma suite nao pode ser a autoridade sobre a propria existencia — e FORA das ferramentas, que tambem entram aqui pelo digest.",
   "//como-atualizar": "Mexeu numa suite obrigatoria, na guarda ou no portao? O gate reprova ate que o digest daqui seja atualizado NO MESMO commit. E de proposito: a edicao passa a ser um ato deliberado e auditavel no diff, em vez de uma perda silenciosa. Recalcule com: npm run test:digests",
   "//normalizacao": "Os digests sao de conteudo NORMALIZADO para LF. O repositorio esta em CRLF e o autocrlf do git pode trocar o EOL no checkout — um digest de bytes crus reprovaria por causa do sistema de arquivos, e nao por perda de prova.",
+  "//v4": "A versao 4 fecha os dois escapes medidos pela OS 23.1-P-R2. FORJA-01, a atribuicao: os casos obrigatorios eram cobrados de um conjunto PLANO de identificadores, somado de todos os arquivos, e um arquivo NAO REGISTRADO podia emprestar os 61 identificadores para uma casca com digest e piso realinhados. Agora cada caso e cobrado DO ARQUIVO DECLARADO, com a atribuicao vinda da stream de eventos do executor (`execucao.relatorDeAtribuicao`), que carrega a origem — coisa que o TAP nao carrega. FER-02, o executor: neutralizar o `portao.js` com `if (false) main();` e REALINHAR o digest deixava o `npm test` verde, com zero teste, sem marcador e sem veredito. Agora (a) o comando oficial e um TRIO obrigatorio — `pretest`, `test` e `posttest` —, (b) o `posttest` (`ferramentas/aferidor.js`) exige a prova selada de que o portao falou, e (c) a guarda SONDA o alcance de toda peca de `ferramentas/`, medindo comportamento em vez de bytes: uma peca com o executor retirado sai com codigo zero em vez de recusar, e digest realinhado nao muda isso.",
   "//v3": "A versao 3 fecha os dez escapes medidos na rehomologacao da C2: (a) o schema da secao 8 passa a VALIDAR cada campo, e nao so exigir presenca; (b) `id` e `caminho` entram nos campos obrigatorios; (c) o digest das ferramentas deixa de ser condicional e a cobertura de `ferramentasProtegidas` passa a ser DERIVADA de `ferramentas/*.js`, para que esvaziar a lista nao desproteja o portao.",
   "//v2": "A versao 2 fecha os dois falsos-verdes medidos pela OS 23.1-P-R1: (a) `camposObrigatoriosPorSuite` impede desarmar uma entrada apagando seus campos de defesa; (b) `comandoOficial.invocacaoExata` mais `execucao` tiram o encadeamento de shell do caminho oficial e exigem execucao real contada, em vez de mensagem de sucesso.",
-  "versaoContratoDeProva": 3,
+  "versaoContratoDeProva": 4,
   "//camposObrigatoriosPorSuite": "Toda entrada de `suitesObrigatorias` TEM de carregar estes campos. Sem esta lista, `if (s.digestSha256 && ...)` faz a defesa sumir junto com o campo — que foi exatamente o falso-verde 2.2 da OS 23.1-P-R1.",
   "//validacaoDeCampos": "Carregar o campo nao basta: cada um e VALIDADO pelo schema da secao 8. `id` e texto nao vazio e unico; `caminho` e relativo, existente e nao escapa do repositorio; `digestSha256` e hexadecimal de 64 caracteres; `pisoDeCasos` e inteiro estritamente positivo; `blocosNormativos` e `casosObrigatorios` sao listas nao vazias de identificadores nao vazios. Campo presente e invalido — `pisoDeCasos: 0`, `pisoDeCasos: \"61\"` — desarma a defesa tao bem quanto campo ausente, e sem rastro no diff.",
   "camposObrigatoriosPorSuite": [
@@ -15,15 +16,23 @@
     "blocosNormativos",
     "casosObrigatorios"
   ],
-  "//ferramentasProtegidas": "As pecas do portao tambem sao provas. Sem digest aqui, adulterar o proprio portao era o caminho mais curto para o verde, e nada olhava. Quem confere estes digests e `test/gate_sobrevivencia.test.js`, de dentro do glob: as ferramentas nao podem ser a unica autoridade sobre si mesmas.",
+  "//ferramentasProtegidas": "As pecas do portao tambem sao provas. Sem digest aqui, adulterar o proprio portao era o caminho mais curto para o verde, e nada olhava. Quem confere estes digests e `test/gate_sobrevivencia.test.js`, de dentro do glob: as ferramentas nao podem ser a unica autoridade sobre si mesmas. A cobertura e DERIVADA de `ferramentas/*.js`: toda peca em disco tem de estar aqui. E digest nao basta — a guarda tambem SONDA o alcance do executor de cada peca, porque um digest realinhado re-abencoa uma ferramenta neutralizada (escape FER-02).",
   "ferramentasProtegidas": [
     {
       "caminho": "ferramentas/gate-de-provas.js",
-      "digestSha256": "aacb0cde6234169ea1574705d22cee93c08e549f3099805d33a05c9eccc97523"
+      "digestSha256": "8a9c83a124e522c77b75e1e1230365ec336912edda0881d5a4ddec7531162b07"
     },
     {
       "caminho": "ferramentas/portao.js",
-      "digestSha256": "2f169a72151e82b511cb986f006cdd5ebb0c277a59c58dd3646a0eebf52c17f4"
+      "digestSha256": "68595a1597965ee95f9dc53fcd03e8df1076ad2caacf0a9cc56ff4965ed64205"
+    },
+    {
+      "caminho": "ferramentas/aferidor.js",
+      "digestSha256": "1ba7cae6a01e893aa29b8f16b07b434f106084c9e40778a27bad058151169a71"
+    },
+    {
+      "caminho": "ferramentas/relator-de-atribuicao.js",
+      "digestSha256": "05b63e2eb9c64c4de14fe813e4f7ee7bdab05753fb806ba847328e7c6f1a7f05"
     }
   ],
   "suitesObrigatorias": [
@@ -116,8 +125,8 @@
       "os": "OS 23.1-P-C1 / C2",
       "caminho": "test/gate_sobrevivencia.test.js",
       "porque": "A metade de DENTRO do portao: e ela que detecta a adulteracao das ferramentas e a volta do comando encadeado. Sem exigi-la aqui, apaga-la seria a saida silenciosa.",
-      "digestSha256": "d439d98c7a757591a4b6101ba8ba445132b84199ca4a661f26f1c3abdec76736",
-      "pisoDeCasos": 21,
+      "digestSha256": "91e2a664949ef3137084f5a1fffe8f4fc9712958871080b0f90077e2151fd123",
+      "pisoDeCasos": 36,
       "blocosNormativos": [
         "GATE/SOBREVIVENCIA"
       ],
@@ -142,22 +151,41 @@
         "GS-18",
         "GS-19",
         "GS-20",
-        "GS-21"
+        "GS-21",
+        "GS-22",
+        "GS-23",
+        "GS-24",
+        "GS-25",
+        "GS-26",
+        "GS-27",
+        "GS-28",
+        "GS-29",
+        "GS-30",
+        "GS-31",
+        "GS-32",
+        "GS-33",
+        "GS-34",
+        "GS-35",
+        "GS-36"
       ]
     }
   ],
   "//execucao": "O alvo real do `node --test`, declarado aqui e nao no script. A guarda confere que os padroes ALCANCAM cada suite obrigatoria; o portao os usa para executar. `totalMinimoDeTestes` e o piso global: zero testes, ou uma reducao macica, deixam de passar por execucao normal.",
+  "//relatorDeAtribuicao": "Quem responde QUEM executou cada caso. O TAP nao carrega a origem: com `describe` no topo, o executor ica os blocos para a raiz do relatorio e o nome do arquivo desaparece. A stream de eventos carrega `file`, e este relator a escreve como uma linha JSON por evento. Sem ele o portao volta a comparar identificadores num conjunto plano, que foi o escape FORJA-01. Tem de morar em `ferramentas/`, para ficar sob a cobertura derivada por digest e sob a sonda de alcance.",
   "execucao": {
     "padroes": [
       "test/*.test.js"
     ],
-    "totalMinimoDeTestes": 579
+    "relatorDeAtribuicao": "ferramentas/relator-de-atribuicao.js",
+    "totalMinimoDeTestes": 594
   },
-  "//comandoOficial": "O comando oficial e um PROCESSO UNICO, e o script tem de ser identico a esta string. Encadear (`&&`, `;`, `|`) reabre o caminho medido pela OS 23.1-P-R1: no `cmd.exe` o `;` nao separa comandos, e o `node --test` simplesmente nao roda enquanto o portao imprime sucesso.",
+  "//comandoOficial": "O comando oficial e um TRIO de processos unicos, e cada script tem de ser identico a sua string. Encadear (`&&`, `;`, `|`) reabre o caminho medido pela OS 23.1-P-R1: no `cmd.exe` o `;` nao separa comandos, e o `node --test` simplesmente nao roda enquanto o portao imprime sucesso. Os tres nomes sao os do ciclo do npm — `pretest`, `test`, `posttest` — porque e o npm, e nao um operador de shell, que garante que os tres rodem. Os seis campos sao OBRIGATORIOS: apagar a declaracao de um par apagava a conferencia do script junto com ela.",
   "comandoOficial": {
     "script": "test",
     "invocacaoExata": "node ferramentas/portao.js",
     "scriptPrevio": "pretest",
-    "invocacaoPreviaExata": "node ferramentas/gate-de-provas.js"
+    "invocacaoPreviaExata": "node ferramentas/gate-de-provas.js --pretest",
+    "scriptPosterior": "posttest",
+    "invocacaoPosteriorExata": "node ferramentas/aferidor.js"
   }
 }

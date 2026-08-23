@@ -4,11 +4,18 @@ Entregue pela **OS 23.1-P-C2**, sobre a folha da C1
 (`correcao/os23-1-p-c1-gate-produtor-v2` @ `7a858b1`).
 Fecha os dois falsos-verdes que a **OS 23.1-P-R1** mediu e reproduziu.
 
-> **Contrato de prova v3.** A primeira volta da C2 (`55b5a64`) fechou os dois
+> **Contrato de prova v4.** A primeira volta da C2 (`55b5a64`) fechou os dois
 > falsos-verdes da R1 e foi auditada de novo antes de virar entrega. A auditoria
 > achou **dez escapes** que sobreviviam a ela — inclusive o padrão exato da
-> R1/2.2 vivo numa segunda lista. A seção 8 deste documento registra o que era,
-> o que fechou, e o que ficou de residual.
+> R1/2.2 vivo numa segunda lista. A seção 8 registra o que era, o que fechou, e
+> o que ficou de residual.
+>
+> **A terceira volta (OS 23.1-P-C3)** fecha os dois escapes que a **OS 23.1-P-R2**
+> mediu em `c9edff1`, os dois com `npm test` verde: `FORJA-01` (o identificador
+> obrigatório não estava atribuído ao arquivo) e `FER-02` (o executor podia ser
+> neutralizado com o digest realinhado). O comando oficial passou a ser um trio —
+> `pretest`, `test`, `posttest` — e a seção 9 registra a arquitetura, as provas
+> novas e o residual atualizado.
 
 Nenhuma linha funcional do Produtor V2 foi tocada: `server.js`,
 `test/produtor_v2.test.js`, `mutacoes_composicao.js`, `mutacoes_os7.js`,
@@ -375,3 +382,213 @@ vermelha", que parece defeito do servidor e é resíduo do arnês. Confira
 
 (`mutacoes_sobrevivencia.js` não tem esse problema: ele monta uma cópia
 descartável e nunca escreve no original.)
+
+## 9. A terceira volta: atribuição e executor (OS 23.1-P-C3)
+
+A rehomologação independente da C2 (OS 23.1-P-R2) fechou dois escapes, os dois
+com `npm test` **verde** e `exit 0`, e os dois pela mesma pergunta mal feita:
+*a expectativa está atribuída a quem tem de cumpri-la?*
+
+### 9.1 `FORJA-01` — o identificador não estava preso ao arquivo
+
+O portão juntava os identificadores aprovados num `Set` **plano**, somado de
+todos os arquivos, e depois perguntava apenas *"o `C-01` está aí?"*. Então:
+
+1. `test/produtor_v2.test.js` vira casca — os dez `describe` normativos ficam
+   vazios e os 61 `test("<ID>: …")` vão para dentro de um `if (false)`;
+2. digest e piso são **realinhados pelo procedimento documentado** (§6), o que
+   deixa a guarda impecável: o texto ainda tem 61 ocorrências de `test(` e ainda
+   contém os 61 identificadores;
+3. um `test/zz_falso.test.js` **não registrado** executa os mesmos 61 nomes.
+
+Saída: `PORTAO: APROVADO`, e a linha
+`test/produtor_v2.test.js: 61/61 casos obrigatórios aprovados` **sobre um arquivo
+que executou zero**. Nenhuma ferramenta havia sido tocada.
+
+**O conserto: atribuição por arquivo de origem.** A pergunta passou a ser *"o
+`C-01` passou **no arquivo que o contrato manda prová-lo**?"*.
+
+O relatório TAP **não carrega essa informação**. Quando um arquivo declara
+`describe`/`test` no topo, o executor iça os blocos para o nível raiz do
+relatório e o nome do arquivo simplesmente não aparece — só o arquivo *vazio*
+vira uma linha com nome de arquivo. Não há, no TAP, o que atribuir. A *stream de
+eventos* do executor, essa sim, carrega `file` em cada `test:pass`/`test:fail`.
+
+Daí `ferramentas/relator-de-atribuicao.js`: um `--test-reporter` que escreve uma
+linha JSON por evento. O TAP continua sendo emitido **em paralelo, no mesmo
+processo**, e toda a contabilidade da C2 continua lendo o TAP palavra por
+palavra — nada do que ela afirma passou a depender da peça nova.
+
+O que a atribuição acrescenta ao veredito:
+
+| código | o que pega |
+|---|---|
+| `CASO_OBRIGATORIO_FORA_DO_ARQUIVO` | o ID passou, mas em **outro** arquivo |
+| `CASO_OBRIGATORIO_NAO_EXECUTADO` | o ID não passou em lugar nenhum |
+| `ABAIXO_DO_PISO_EXECUTADO` | o arquivo executou menos casos que seu piso |
+| `ATRIBUICAO_AUSENTE` / `ATRIBUICAO_VAZIA` | não há registro: **não há veredito** |
+| `ATRIBUICAO_INCOMPLETA` | o registro e o rodapé do TAP discordam |
+| `ATRIBUICAO_DIVERGENTE` | o registro em disco não é o que o marcador selou |
+
+Note o par `pisoDeCasos`: a guarda conta `test(` no **texto**, o portão conta o
+que **executou naquele arquivo**. Sessenta e um casos dentro de um `if (false)`
+passam no primeiro e morrem no segundo.
+
+### 9.2 `FER-02` — a integridade da ferramenta não estava presa a ninguém
+
+Tornar inalcançável a chamada final de `main()` no `portao.js` e **atualizar** a
+linha do digest no contrato deixava o `npm test` sair com código zero, sem
+marcador e sem veredito. O `pretest` conferia o digest — e o digest estava em
+dia. A campanha da C2 realinhava digest de **suíte** em nove cenários e **nunca**
+de **ferramenta**: media o digest, nunca o comportamento de uma peça enfraquecida
+com o contrato em ordem. Era a única combinação que ficava verde.
+
+O conserto tem três partes, e nenhuma delas é mais digest.
+
+**(a) O comando oficial virou um trio.** `pretest` → `test` → `posttest`, os três
+garantidos pelo **npm**, não por operador de shell. O `posttest` é
+`ferramentas/aferidor.js`, a única voz **depois** do portão. Os seis campos de
+`comandoOficial` são obrigatórios: a versão anterior fazia
+`if (!nome || !esperado) continue;`, então apagar a declaração apagava a
+conferência junto — o mesmo padrão "campo ausente desarma a defesa" que a C2
+fechou nas suítes e deixou vivo aqui.
+
+**(b) A sonda de alcance mede comportamento, não bytes.** A guarda invoca **toda**
+peça de `ferramentas/` (cobertura derivada do disco, §8.2) com um argumento que
+nenhuma delas aceita, e exige recusa explícita e `exit != 0`. Uma peça com o
+executor retirado, tornado inalcançável, ou com o corpo esvaziado, carrega, não
+faz nada e sai **zero** — e é esse zero que acende `EXECUTOR_INALCANCAVEL`.
+Digest responde *"o arquivo é o mesmo?"*; só a execução responde *"ele ainda
+fala?"*.
+
+A sonda tenta até três vezes enquanto o que vê for falha de **ambiente** (o V8
+não conseguir nem iniciar sob pressão de memória, o que acontece de verdade
+quando dezenas de processos de teste correm juntos). Persistindo, é reprovação
+com código próprio, `EXECUTOR_NAO_SONDAVEL`: *"não consegui medir"* nunca vira
+*"está tudo bem"*, e um gate que dá falso vermelho é desligado na primeira
+semana.
+
+**(c) O aperto de mão amarra os três scripts a uma execução.** O `pretest` apaga
+as sobras e emite um **desafio** (um nonce em disco). O portão o lê, executa, e
+sela o marcador com um HMAC chaveado por esse nonce. O aferidor relê os dois,
+confere o selo, **reconta a evidência crua** — o registro de atribuição, cujo
+digest o marcador jurou — e consome o desafio.
+
+| sabotagem | o que acontece |
+|---|---|
+| portão não rodou | não há marcador → `EXECUCAO_NAO_ACONTECEU` |
+| marcador de ontem | o `pretest` já o apagou; e o selo não bateria |
+| marcador escrito à mão | `SELO_DE_DESAFIO_NAO_CONFERE` |
+| portão que só **imprime** a frase | a sonda passa (ele ainda recusa argumento), o aferidor não: sem marcador |
+
+A frase `PORTAO: APROVADO` deixou de ser o veredito. O veredito é prova selada.
+
+### 9.3 `--pretest`, e por que ele não é decorativo
+
+Emitir o desafio e apagar as sobras são **efeitos** sobre estado compartilhado, e
+efeito só pode acontecer quando a guarda está de fato abrindo uma execução.
+
+Sem essa separação, qualquer prova que rode a guarda contra a árvore de verdade
+— `GS-08` roda, e roda **no meio** de uma execução do próprio portão — apagaria
+a atribuição da execução que a estava executando e trocaria o desafio que o
+portão já tinha lido. Isso aconteceu, e o sintoma foi `ATRIBUICAO_AUSENTE` numa
+árvore intacta.
+
+Então: `node ferramentas/gate-de-provas.js --pretest` tem efeito; sem o
+argumento, a guarda é **somente-leitura** e diz isso na saída. A forma exata está
+em `comandoOficial.invocacaoPreviaExata` e é conferida caractere a caractere.
+
+O portão, por sua vez, confere no estágio 5 que o desafio **em disco ainda é o
+mesmo** que ele leu no estágio 2 (`DESAFIO_TROCADO`) — para que um desafio
+reemitido no meio do caminho vire um vermelho sobre a coisa certa.
+
+### 9.4 A ordem dos estágios foi medida
+
+A integridade vem **antes** do desafio. Quando falta o desafio, quase sempre
+falta porque o `pretest` sumiu do `package.json` — e quem sabe dizer *isso*, com
+código estável, é a guarda (`COMANDO_OFICIAL_AUSENTE`). Perguntando pelo desafio
+primeiro, a resposta seria `DESAFIO_AUSENTE`: verdadeira, e mudando de assunto.
+`E4c` de `mutacoes_sobrevivencia.js` mede exatamente esta diferença.
+
+### 9.5 A âncora ambígua, que quase custou quatro provas
+
+As provas negativas `GS-26`..`GS-33` sabotam uma cópia da ferramenta por
+**texto exato**. Na primeira escrita, o comentário de cabeçalho do `portao.js`
+**citava** a linha do executor para explicar o escape FER-02 — e
+`String.replace` com texto literal troca só a **primeira** ocorrência. A
+sabotagem reescreveu a citação, o código ficou intacto, e quatro provas
+negativas ficaram verdes medindo uma caixa que nunca foi sabotada.
+
+Duas consequências, e as duas ficaram no código:
+
+* `mutarPeca()` exige que a âncora ocorra **exatamente uma vez**. Zero é
+  sabotagem que não aplica; duas é sabotagem que aplica no lugar errado. As duas
+  são falso-verde.
+* As peças do portão mantêm a chamada final de `main()` em **uma linha só**, e
+  não a repetem em comentário. Há uma nota nos arquivos dizendo isso.
+
+### 9.6 Espelhamento externo — `GS-22`..`GS-36`
+
+Quinze provas novas em `test/gate_sobrevivencia.test.js`, todas medindo o
+**ciclo oficial inteiro** (`pretest` + `test` + `posttest`) numa caixa de areia,
+e todas passando por `realinharDigestsDasFerramentas()` — o gesto que a campanha
+da C2 nunca fez e por isso não viu o `FER-02`.
+
+| id | o que congela |
+|---|---|
+| `GS-22` | identificador servido por arquivo isca não aprova o protegido |
+| `GS-23` | provas movidas para fora do alvo não contam |
+| `GS-24` | piso **executado** por arquivo é independente do piso textual |
+| `GS-25` | trocar o conteúdo do arquivo protegido, com digests em dia |
+| `GS-26` | executor do portão inalcançável, digest realinhado |
+| `GS-27` | executor do portão **retirado**, digest realinhado |
+| `GS-28` | portão que só imprime o veredito → o `posttest` recusa |
+| `GS-29` | `posttest` retirado do pacote **ou** do contrato |
+| `GS-30` | aferidor apagado **ou** neutralizado |
+| `GS-31` | guarda sem `node --test`; e o marcador de ontem não serve |
+| `GS-32` | o relator não pode ser desligado pelo contrato |
+| `GS-33` | atribuição e executor retirados **juntos** |
+| `GS-34` | **o controle**: o ciclo intacto aprova, e as três vozes falam |
+| `GS-35` | o portão sozinho, sem o `pretest`, recusa |
+| `GS-36` | atribuição adulterada depois da execução não passa |
+
+### 9.7 O residual, dito por inteiro
+
+**O que a C3 fechou do residual da §8.4.** Aquela seção dizia que o escape só
+existia invocando `node ferramentas/portao.js` **diretamente**. Isso deixou de
+ser verdade nos dois sentidos: pelo comando oficial, a sonda de alcance pega o
+executor neutralizado **mesmo com o digest realinhado**; e a invocação direta
+agora **recusa** (`DESAFIO_AUSENTE`), porque o portão exige ter sido alcançado
+pelo `pretest`.
+
+**O que continua sendo limite da forma, e não conserto pendente.**
+
+*Neutralizar as três peças ao mesmo tempo.* Guarda, portão e aferidor sondam uns
+aos outros; qualquer subconjunto próprio que seja silenciado deixa um sondador
+vivo, e ele acende. Silenciar **as três** de uma vez, com os três digests
+realinhados, não deixa ninguém para falar. Isso não é uma brecha nova: é a
+remoção total do portão, que a §7 já declarava fora de escopo — e é um diff que
+toca todas as ferramentas e todas as linhas de digest.
+
+*Reescrever o `portao.js` inteiro num forjador.* Um portão que leia o desafio,
+não execute nada e fabrique um marcador selado com o nonce (que está em disco,
+legível) passa pela sonda e pelo aferidor. Exige reescrever o corpo do portão e
+realinhar o digest. Nenhuma peça dentro do repositório pode distinguir isso de
+uma execução real, porque a chave do selo é, por construção, legível por quem
+está dentro. O que existe contra isso é o mesmo de sempre: o diff.
+
+*Cardinalidade de `casosObrigatorios`.* Continua como na §8.4 — reduzir a lista
+no contrato é aceito, porque a expectativa mora no contrato e mexer nela é ato
+auditável no diff.
+
+**Onde auditar.** Continua valendo, e agora com mais força: auditar este portão é
+auditar **`npm test`**. As três metades do mecanismo são três scripts do ciclo do
+npm, e invocar qualquer uma delas à mão pula, por construção, as outras duas.
+
+### 9.8 Custo
+
+O ciclo oficial passou de ~22 s para ~40 s numa árvore intacta. A diferença é a
+sonda de alcance (quatro processos por `conferir()`, três `conferir()` por ciclo)
+e as quinze provas negativas novas, cada uma montando e rodando um ciclo inteiro
+em caixa de areia. A execução da suíte em si não mudou: continua um único
+`node --test`, com dois relatores no mesmo processo.

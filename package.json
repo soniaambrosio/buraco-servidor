@@ -5,12 +5,14 @@
   "description": "Servidor de salas (multiplayer) do Buraco Master VIP — Node puro, arquivo único.",
   "scripts": {
     "start": "node server.js",
-    "pretest": "node ferramentas/gate-de-provas.js",
+    "pretest": "node ferramentas/gate-de-provas.js --pretest",
     "test": "node ferramentas/portao.js",
+    "posttest": "node ferramentas/aferidor.js",
     "check": "node --check server.js",
     "test:digests": "node ferramentas/gate-de-provas.js --digests",
     "test:integridade": "node ferramentas/gate-de-provas.js",
-    "test:marcador": "node ferramentas/portao.js --marcador"
+    "test:marcador": "node ferramentas/portao.js --marcador",
+    "test:aferir": "node ferramentas/aferidor.js"
   },
   "engines": {
     "node": ">=20"

@@ -35,16 +35,43 @@
 //      preservando so a aparencia.
 //
 // Uso:
-//   node ferramentas/gate-de-provas.js            confere (sai != 0 se reprovar)
+//   node ferramentas/gate-de-provas.js --pretest  o `pretest` do ciclo oficial
+//   node ferramentas/gate-de-provas.js            confere, e SO confere
 //   node ferramentas/gate-de-provas.js --digests  recalcula e imprime os digests
+//
+// POR QUE O `--pretest` EXISTE, e por que ele nao e decorativo. Emitir o desafio
+// e apagar as sobras sao EFEITOS sobre estado compartilhado, e efeito so pode
+// acontecer quando a guarda esta de fato abrindo uma execucao. Sem essa
+// separacao, qualquer prova que rodasse a guarda contra a arvore de verdade —
+// `GS-08` roda — apagaria, no meio do caminho, a atribuicao da execucao que a
+// estava rodando, e trocaria o desafio que o portao ja tinha lido. O modo sem
+// argumento e puro: le, confere, imprime, e nao mexe em nada.
+//
+// A forma exata `node ferramentas/gate-de-provas.js --pretest` esta declarada em
+// `comandoOficial.invocacaoPreviaExata` e e conferida caractere a caractere, de
+// modo que retirar o `--pretest` do `package.json` e uma divergencia, e nao um
+// detalhe.
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
 
 const RAIZ = path.resolve(__dirname, "..");
 const CONTRATO = path.join(__dirname, "contrato-de-provas.json");
+
+// Os tres artefatos efemeros do aperto de mao entre os tres scripts oficiais.
+// Moram aqui, e nao em cada peca, porque as tres precisam do MESMO caminho: o
+// `pretest` emite o desafio e limpa as sobras, o `test` produz marcador e
+// atribuicao, o `posttest` rele os tres e confere.
+const MARCADOR = path.join(__dirname, ".marcador-de-execucao.json");
+const DESAFIO = path.join(__dirname, ".desafio-de-execucao.json");
+const ATRIBUICAO = path.join(__dirname, ".atribuicao-de-execucao.jsonl");
+
+/** O argumento invalido com que a sonda de alcance bate na porta de cada
+ *  executor. Nao existe peca que o aceite: quem responde, responde recusando. */
+const SONDA_DE_ALCANCE = "--sonda-de-alcance-do-executor";
 
 /** Conteudo normalizado para LF.
  *
@@ -58,6 +85,149 @@ function lerNormalizado(arquivo) {
 
 function sha256(texto) {
   return crypto.createHash("sha256").update(texto, "utf8").digest("hex");
+}
+
+/** HMAC de uma carga por uma chave. E o selo do aperto de mao: o `pretest`
+ *  emite a chave, o `test` sela com ela, o `posttest` confere. Um marcador
+ *  sobrado de outra execucao nao conhece a chave desta. */
+function selarCom(carga, chave) {
+  return crypto.createHmac("sha256", String(chave))
+    .update(JSON.stringify(carga), "utf8")
+    .digest("hex");
+}
+
+/** O identificador estavel na frente do nome de um caso (`C-01: ...` -> `C-01`).
+ *
+ *  Vive aqui, e nao no portao, porque TRES pecas precisam da mesma leitura: a
+ *  guarda confere presenca textual, o portao confere execucao atribuida e o
+ *  aferidor reconta a evidencia crua. Duas leituras diferentes do mesmo
+ *  identificador seriam, na pratica, duas listas de obrigatorios diferentes. */
+function idDeCaso(nome) {
+  return (String(nome).match(/^([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)?)\s*:/) || [])[1] || null;
+}
+
+/** O ambiente sem as marcas do executor de testes.
+ *
+ *  A sonda spawna processos a partir de dentro do `node --test` (as provas de
+ *  sobrevivencia rodam la). Herdar `NODE_TEST_CONTEXT` faz o node concluir que e
+ *  recursao e mudar de comportamento — a sonda mediria o arnes, nao a peca. */
+function ambienteLimpo() {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith("NODE_TEST")) delete env[k];
+  return env;
+}
+
+// Sondagem memorizada por processo, com a chave derivada do CONTEUDO de cada
+// peca: a mesma arvore nao e sondada duas vezes, e uma peca alterada invalida
+// a memoria sozinha.
+const _sondagens = new Map();
+
+/** Espera sincrona. A sonda vive dentro de `conferir()`, que e sincrona por
+ *  contrato — o portao compoe o veredito com o retorno dela. */
+function esperar(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** A falha e do AMBIENTE, e nao da peca?
+ *
+ *  ISTO NAO E COMPLACENCIA, E PONTARIA. Esta sonda spawna processos de dentro de
+ *  uma arvore que ja esta rodando `node --test` com dezenas de filhos, e alguns
+ *  deles montam caixas de areia que spawnam mais. Sob essa pressao o V8 as vezes
+ *  nao consegue nem iniciar: sai com um codigo estranho e a frase
+ *  `Fatal process out of memory` antes de qualquer linha de codigo nosso.
+ *  Chamar isso de "peca muda" seria acusar a defesa de um crime da maquina — e
+ *  um gate que da falso vermelho e desligado na primeira semana.
+ *
+ *  O que NAO muda: falha de ambiente que persiste continua sendo REPROVACAO,
+ *  com codigo proprio (`EXECUTOR_NAO_SONDAVEL`). "Nao consegui medir" nunca vira
+ *  "esta tudo bem". O que muda e so quantas vezes se tenta antes de desistir, e
+ *  o nome que se da ao que se viu. */
+function falhaDeAmbiente(r, saida) {
+  if (r.error) return true;
+  if (r.status === null) return true;
+  if (r.status === 0) return false;
+  if (saida.trim() === "") return true;
+  return /Fatal process out of memory|ENOMEM|EAGAIN|out of memory|Worker terminated|UV_/i.test(saida);
+}
+
+const TENTATIVAS_DA_SONDA = 3;
+
+/** TODA peca de `ferramentas/` ainda EXECUTA quando invocada?
+ *
+ *  POR QUE COMPORTAMENTO, E NAO DIGEST. O escape `FER-02` da OS 23.1-P-R2 nao
+ *  apagou digest nenhum: tornou inalcancavel a chamada final de `main()` no
+ *  `portao.js` e ATUALIZOU a linha do contrato. Com o contrato em dia, toda
+ *  conferencia de integridade fica verde — e o portao nao roda. Digest responde
+ *  "o arquivo e o mesmo?"; so a execucao responde "ele ainda fala?".
+ *
+ *  A prova e a RECUSA. Cada peca e invocada com um argumento que nenhuma delas
+ *  aceita, e tem de sair != 0 dizendo `ARGUMENTO_INESPERADO`. Uma peca com o
+ *  executor retirado — ou tornado inalcancavel, ou com o `main()` esvaziado —
+ *  carrega, nao faz nada e sai ZERO. E esse zero que acende aqui.
+ *
+ *  A sonda nao PERGUNTA a peca se ela esta viva: ela mede de fora, em outro
+ *  processo, o codigo de saida. Uma peca muda nao tem como responder que fala. */
+function sondarExecutores(pecas) {
+  const falhas = [];
+  for (const rel of pecas) {
+    const abs = path.join(RAIZ, rel);
+    // Peca ausente ja e cobrada por FERRAMENTA_AUSENTE; sondar o vazio so
+    // trocaria um codigo estavel por um erro de modulo.
+    if (!fs.existsSync(abs)) continue;
+    let chave;
+    try {
+      chave = rel + ":" + sha256(lerNormalizado(abs));
+    } catch (e) {
+      falhas.push([rel, "EXECUTOR_ILEGIVEL", e.message]);
+      continue;
+    }
+    if (!_sondagens.has(chave)) {
+      // Ate tres tentativas, e so enquanto o que se ve for falha de AMBIENTE.
+      // Uma peca neutralizada sai ZERO na primeira e em todas — e verdicto
+      // definitivo, nao se repete. Ver `falhaDeAmbiente`.
+      let r, saida;
+      for (let tentativa = 1; tentativa <= TENTATIVAS_DA_SONDA; tentativa++) {
+        r = spawnSync(process.execPath, [abs, SONDA_DE_ALCANCE], {
+          cwd: RAIZ, encoding: "utf8", timeout: 60000, env: ambienteLimpo(),
+        });
+        saida = String(r.stdout || "") + String(r.stderr || "");
+        if (!falhaDeAmbiente(r, saida)) break;
+        if (tentativa < TENTATIVAS_DA_SONDA) esperar(250 * tentativa);
+      }
+      let veredito = null;
+      let definitivo = true;
+      if (falhaDeAmbiente(r, saida)) {
+        definitivo = false;
+        veredito = ["EXECUTOR_NAO_SONDAVEL",
+          `nao foi possivel medir se a peca ainda executa (${TENTATIVAS_DA_SONDA} tentativas).\n` +
+          "      Isto e reprovacao: `nao consegui medir` nunca pode virar `esta tudo bem`.\n" +
+          "      A assinatura abaixo costuma ser da MAQUINA (memoria, limite de processos),\n" +
+          "      e nao da peca — repita o comando oficial com a maquina mais folgada.\n" +
+          "      codigo " + r.status + (r.error ? " / " + r.error.message : "") + "\n" +
+          "      saida: " + saida.trim().split("\n").slice(0, 3).join(" | ").slice(0, 300)];
+      } else if (r.status === 0) {
+        veredito = ["EXECUTOR_INALCANCAVEL",
+          "invocada com argumento invalido, a peca saiu com codigo ZERO em vez de recusar.\n" +
+          "      E o desenho do escape FER-02: a chamada final de `main()` tornada\n" +
+          "      inalcancavel, ou o corpo esvaziado, com o digest realinhado.\n" +
+          "      Digest em dia nao prova que a peca ainda executa — so a execucao prova."];
+      } else if (!/ARGUMENTO_INESPERADO/.test(saida)) {
+        veredito = ["EXECUTOR_MUDO",
+          "a peca saiu com codigo " + r.status + " sem dizer `ARGUMENTO_INESPERADO`.\n" +
+          "      Vermelho de codigo quebrado nao e prova de defesa: a recusa tem de ser\n" +
+          "      explicita e com codigo estavel, para a sonda distinguir uma coisa da outra.\n" +
+          "      saida: " + saida.trim().split("\n").slice(0, 3).join(" | ").slice(0, 300)];
+      }
+      // So verdictos DEFINITIVOS entram na memoria. Uma falha de ambiente pode
+      // nao se repetir na proxima chamada deste mesmo processo, e memoriza-la
+      // transformaria um tropeco da maquina em sentenca.
+      if (definitivo) _sondagens.set(chave, veredito);
+      else { falhas.push([rel, veredito[0], veredito[1]]); continue; }
+    }
+    const veredito = _sondagens.get(chave);
+    if (veredito) falhas.push([rel, veredito[0], veredito[1]]);
+  }
+  return falhas;
 }
 
 /** Casos declarados: `test("...")` no inicio de uma linha (com indentacao).
@@ -366,12 +536,39 @@ function conferir() {
   // seu proprio primeiro conferente. Com ele, a guarda roda antes e confere o
   // DIGEST do portao — e a adulteracao acende sem que o portao precise
   // cooperar.
-  const paresExigidos = [
-    [oficial.script || "test", oficial.invocacaoExata],
-    [oficial.scriptPrevio, oficial.invocacaoPreviaExata],
+  // TRES scripts, e os tres exatos — nao dois. O `posttest` entrou na C3 e e a
+  // unica peca que fala DEPOIS do portao; sem ele, um portao neutralizado sai
+  // com codigo zero e ninguem nota que nao houve veredito (escape FER-02).
+  //
+  // E o trio e OBRIGATORIO, nao opcional. A versao anterior fazia
+  // `if (!nome || !esperado) continue;`: apagar `scriptPrevio` do contrato
+  // apagava a conferencia do `pretest` junto, em silencio. E o mesmo padrao
+  // "campo ausente desarma a defesa" que a C2 fechou nas suites e deixou vivo
+  // aqui. Agora a AUSENCIA da declaracao e ela propria uma reprovacao.
+  const trioExigido = [
+    ["script", "invocacaoExata", "test"],
+    ["scriptPrevio", "invocacaoPreviaExata", "pretest"],
+    ["scriptPosterior", "invocacaoPosteriorExata", "posttest"],
   ];
+  const paresExigidos = [];
+  for (const [campoNome, campoInvocacao, esperadoNome] of trioExigido) {
+    if (!textoUtil(oficial[campoNome]) || !textoUtil(oficial[campoInvocacao])) {
+      anota("(contrato)", "COMANDO_OFICIAL_INCOMPLETO",
+        `\`comandoOficial.${campoNome}\` e \`comandoOficial.${campoInvocacao}\` sao obrigatorios.\n` +
+        `      Sem a declaracao, a conferencia do script \`${esperadoNome}\` some junto com ela,\n` +
+        `      e o script pode ser retirado do package.json sem que nada acenda.`);
+      continue;
+    }
+    if (oficial[campoNome].trim() !== esperadoNome) {
+      anota("(contrato)", "COMANDO_OFICIAL_RENOMEADO",
+        `\`comandoOficial.${campoNome}\` = ${JSON.stringify(oficial[campoNome])} — esperado \`${esperadoNome}\`.\n` +
+        `      Os tres nomes sao os do ciclo do npm: so \`pretest\`, \`test\` e \`posttest\` sao\n` +
+        `      executados pelo proprio npm. Apontar para outro nome tira o script do caminho.`);
+      continue;
+    }
+    paresExigidos.push([oficial[campoNome].trim(), oficial[campoInvocacao]]);
+  }
   for (const [nome, esperado] of paresExigidos) {
-    if (!nome || !esperado) continue;
     const script = scripts ? scripts[nome] : null;
     if (script === undefined || script === null) {
       anota("(package.json)", "COMANDO_OFICIAL_AUSENTE",
@@ -389,6 +586,36 @@ function conferir() {
   if (!Array.isArray(padroes) || padroes.length === 0) {
     anota("(contrato)", "SEM_PADROES_DE_EXECUCAO",
       "o contrato precisa declarar `execucao.padroes` — sem alvo, nada roda");
+  }
+
+  // --- o relator que atribui cada caso ao seu arquivo ----------------------
+  // O TAP nao carrega a origem de um caso: quando o arquivo declara `describe`
+  // no topo, o executor ica os blocos para a raiz do relatorio e o nome do
+  // arquivo nao aparece. A stream de eventos carrega. Sem este relator o portao
+  // volta a comparar identificadores num conjunto PLANO, que foi exatamente o
+  // escape FORJA-01. Declara-lo aqui o obriga a existir dentro de
+  // `ferramentas/`, e portanto sob digest e sob sonda de alcance.
+  const relator = (contrato.execucao || {}).relatorDeAtribuicao;
+  const relatorNormalizado = textoUtil(relator) ? String(relator).replace(/\\/g, "/") : null;
+  if (!textoUtil(relator)) {
+    anota("(contrato)", "SEM_RELATOR_DE_ATRIBUICAO",
+      "o contrato precisa declarar `execucao.relatorDeAtribuicao`.\n" +
+      "      Sem atribuicao, `61/61 casos obrigatorios aprovados` pode estar descrevendo\n" +
+      "      um arquivo que executou ZERO — o escape FORJA-01 da OS 23.1-P-R2.");
+  } else if (!/^ferramentas\/[A-Za-z0-9._-]+\.js$/.test(relatorNormalizado)) {
+    anota("(contrato)", "RELATOR_FORA_DAS_FERRAMENTAS",
+      `\`execucao.relatorDeAtribuicao\` = ${JSON.stringify(relator)} — esperado um \`.js\` dentro de \`ferramentas/\`.\n` +
+      "      Fora de `ferramentas/` ele escapa da cobertura derivada por digest e da sonda\n" +
+      "      de alcance: seria uma peca do portao que ninguem confere.");
+  } else if (!fs.existsSync(path.join(RAIZ, relatorNormalizado))) {
+    anota(relatorNormalizado, "RELATOR_AUSENTE",
+      "o relator de atribuicao declarado nao existe — sem ele nada atribui caso a arquivo.");
+  }
+
+  // --- toda peca do portao ainda EXECUTA ----------------------------------
+  // A metade que digest nenhum alcanca. Ver `sondarExecutores`.
+  for (const [rel, codigo, detalhe] of sondarExecutores(pecasEmDisco)) {
+    anota(rel, codigo, detalhe);
   }
 
   // --- cada suite obrigatoria ---------------------------------------------
@@ -477,7 +704,8 @@ function main() {
   // Recusar argumento desconhecido transforma esse silencio em vermelho.
   const args = process.argv.slice(2);
   const modoDigests = args.length === 1 && args[0] === "--digests";
-  if (args.length > 0 && !modoDigests) {
+  const modoPretest = args.length === 1 && args[0] === "--pretest";
+  if (args.length > 0 && !modoDigests && !modoPretest) {
     console.error(
       "\n=== GATE DE PROVAS: REPROVADO ===\n\n" +
       "  [ARGUMENTO_INESPERADO] argumento nao reconhecido: " + JSON.stringify(args) + "\n" +
@@ -506,12 +734,36 @@ function main() {
 
   const { falhas, contrato } = conferir();
   if (falhas.length === 0) {
+    if (modoPretest) {
+      // AS SOBRAS MORREM AQUI, e nao so no portao. O portao tambem apaga o
+      // marcador ao comecar — mas um portao NEUTRALIZADO nao apaga coisa
+      // nenhuma, e era assim que um marcador de ontem podia sobreviver a um
+      // `test` que nao fez nada. Quem limpa e o `pretest`, que o npm garante.
+      for (const efemero of [MARCADOR, ATRIBUICAO]) {
+        try { fs.unlinkSync(efemero); } catch (_) {}
+      }
+
+      // O DESAFIO. Um nonce novo, em disco, que o portao tem de repassar dentro
+      // do selo do marcador e que o aferidor confere e consome. E o fio que
+      // amarra os tres scripts do ciclo do npm a UMA execucao.
+      const desafio = {
+        nonce: crypto.randomBytes(32).toString("hex"),
+        emitidoEm: Date.now(),
+        contratoVersao: contrato.versaoContratoDeProva,
+        digestDoContrato: sha256(lerNormalizado(CONTRATO)),
+      };
+      fs.writeFileSync(DESAFIO, JSON.stringify(desafio, null, 2) + "\n", "utf8");
+    }
+
     const total = (contrato.suitesObrigatorias || []).length;
     console.log(
       `integridade das provas: ${total} suite${total === 1 ? "" : "s"} obrigatoria${total === 1 ? "" : "s"} ` +
       `conferida${total === 1 ? "" : "s"} (contrato v${contrato.versaoContratoDeProva})`
     );
     console.log("  (integridade NAO e aprovacao: quem aprova e o portao, depois de contar os testes)");
+    if (!modoPretest) {
+      console.log("  (modo somente-leitura: sem `--pretest` esta invocacao nao abre execucao nenhuma)");
+    }
     return;
   }
   relatar(falhas);
@@ -519,9 +771,10 @@ function main() {
 }
 
 module.exports = {
-  RAIZ, CONTRATO,
+  RAIZ, CONTRATO, MARCADOR, DESAFIO, ATRIBUICAO, SONDA_DE_ALCANCE,
   conferir, relatar,
-  lerNormalizado, sha256, contarCasos, idsDeCasos, temBloco, padraoAlcanca, globParaRegex,
+  lerNormalizado, sha256, selarCom, idDeCaso, contarCasos, idsDeCasos, temBloco,
+  padraoAlcanca, globParaRegex, sondarExecutores,
 };
 
 if (require.main === module) main();
