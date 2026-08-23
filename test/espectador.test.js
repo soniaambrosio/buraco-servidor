@@ -210,7 +210,19 @@ describe("P0-02 — UID de terceiro", () => {
     exigirTudoLimpo(legitimo, sala.jogo, "P0-02/legítimo");
   });
 
-  test("P0-02: o assento pedido no payload é ignorado ao entrar na mesa", async () => {
+  test("P0-02: o assento pedido no payload não toma o assento de ninguém", async () => {
+    // [ASSENTO] ESTE CASO MUDOU DE FORMA, E FICOU MAIS FORTE — leia antes de
+    // comparar com a versão anterior.
+    //
+    // O título antigo era "o assento pedido no payload é IGNORADO", e a
+    // asserção era `notEqual(entrou.assento, 0)`: o pedido caía no laço
+    // automático e a pessoa entrava em OUTRO lugar. Ignorar era, na prática,
+    // o fallback silencioso — e ele passou a ser recusa tipada.
+    //
+    // O que esta prova guarda é o que sempre importou, e agora é medido
+    // inteiro: o dono não perde o lugar, e quem pediu o lugar dele não entra
+    // em lugar NENHUM. A versão anterior só sabia dizer "não foi o 0"; um
+    // servidor que sentasse o intruso no assento 2 passava por ela.
     const srv = novoServidor();
     // [COMPOSIÇÃO] Cada conexão autentica com o uid que ela declara: o alvo
     // deste teste é o ASSENTO pedido no payload, não a identidade.
@@ -222,8 +234,14 @@ describe("P0-02 — UID de terceiro", () => {
     const outro = await cliente(srv, "uid-9");
     outro.envia({ tipo: "entrarMesa", codigo, apelido: "Outro", jogadorId: "uid-9", assento: 0 });
 
-    assert.notEqual(outro.ultimo("entrou").assento, 0, "assento do payload não pode ser honrado");
+    assert.equal(outro.ultimo("entrou"), null, "pedido de assento ocupado não pode sentar ninguém");
+    const erro = outro.ultimo("erro");
+    assert.ok(erro, "recusa tipada, não silêncio");
+    assert.equal(erro.codigo, "ASSENTO_OCUPADO");
     assert.equal(srv.conexoes[dono.id].assento, 0, "o dono não pode perder o assento");
+    assert.equal(srv.conexoes[outro.id].assento, null, "quem foi recusado não ficou com assento");
+    // E o pedido recusado não deixa rastro: a mesa continua com um ocupante só.
+    assert.equal(srv.ger.salas[codigo].assentos.filter(Boolean).length, 1);
   });
 });
 

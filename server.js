@@ -4029,6 +4029,22 @@ const CATEGORIA_DESCONHECIDA = "desconhecida";
 const RECUSA_VIP_INDISPONIVEL = "ADMISSAO_VIP_INDISPONIVEL";
 const RECUSA_CATEGORIA_DESCONHECIDA = "ADMISSAO_CATEGORIA_DESCONHECIDA";
 
+/** [ASSENTO] Codigos de recusa da ESCOLHA DE ASSENTO. Estaveis, e o cliente
+ *  ramifica neles: e por eles que um seletor de cadeira sabe se deve pedir
+ *  outra cadeira (ocupada) ou consertar o proprio pedido (invalido).
+ *
+ *  ELES SAO DISTINGUIVEIS, E A ADMISSAO NAO E — e a diferenca nao e descuido.
+ *  A recusa de admissao usa uma mensagem unica de proposito: motivos
+ *  diferentes contariam, a quem insistisse, o direito que falta a quem tentou.
+ *  A ocupacao de um assento nao e desse tipo de fato — ela ja vai, assento a
+ *  assento, em toda visao de estado que qualquer espectador recebe. Um codigo
+ *  que diga "ocupado" nao revela nada que a mesa ja nao mostre, e calar sobre
+ *  ele so obrigaria o cliente a adivinhar. */
+const RECUSA_ASSENTO_INVALIDO = "ASSENTO_INVALIDO";
+const RECUSA_ASSENTO_OCUPADO = "ASSENTO_OCUPADO";
+const ERRO_ASSENTO_INVALIDO = "assento inválido";
+const ERRO_ASSENTO_OCUPADO = "assento ocupado";
+
 /** Mensagem unica das recusas de admissao. Uma so, de proposito: mensagens
  *  diferentes por motivo viram oraculo - quem tentar entrar varias vezes le nas
  *  diferencas o estado interno que o codigo de recusa nao conta. */
@@ -4146,6 +4162,82 @@ function assentoDoTitular(sala, jogadorId) {
     if (a && a.tipo === "humano" && a.jogadorId != null && String(a.jogadorId) === alvo) return i;
   }
   return -1;
+}
+
+/** [ASSENTO] Recusa da escolha de assento, na forma que as portas de mesa ja
+ *  devolvem — `erro` mais `codigoRecusa`. Passa por `erroDeAdmissao` sem
+ *  nenhum caso especial no despachante, que e o ponto: recusa de assento e
+ *  recusa de entrada, e nao um segundo vocabulario de erro. */
+function recusaDeAssento(codigoRecusa, erro) {
+  return Object.freeze({ erro, codigoRecusa });
+}
+
+/** [ASSENTO] O que E um pedido de assento: inteiro de 0 a 3, e mais nada.
+ *
+ *  `Number.isInteger` recusa `"2"`, `2.0000001`, `NaN`, `Infinity`, `true`,
+ *  `null` e objeto — e recusar em vez de coagir e a decisao. Coagir `"2"` para
+ *  2 faria o servidor adivinhar a intencao de um cliente que ja errou o
+ *  contrato, e adivinhar e como se volta ao fallback por outro caminho. */
+function ehAssentoPedido(v) {
+  return Number.isInteger(v) && v >= 0 && v < 4;
+}
+
+/** [ASSENTO] Marca opaca de UMA tentativa de reserva.
+ *
+ *  Sorteada, como `novaTentativaEntradaId`: ela existe para responder "esta
+ *  reserva ainda e a MINHA?" depois de uma espera, e um valor derivado de
+ *  assento, sala ou uid responderia "sim" para a tentativa de outra pessoa no
+ *  mesmo lugar — que e exatamente a colisao que a reserva existe para pegar. */
+function novaMarcaDeReserva() {
+  return "res_" + crypto.randomUUID();
+}
+
+/** [ASSENTO] O registro de reservas de uma sala, criado sob demanda.
+ *
+ *  Sob demanda porque sala forjada por teste — e a suite forja varias, para
+ *  alcancar estados que nenhum caminho de producao alcanca — nao passa por
+ *  `criarMesa` e nao teria o campo. Sem isto, a trava atomica sumiria
+ *  justamente nos cenarios montados a mao, que sao os que a exercitam. */
+function garantirReservas(sala) {
+  if (!Array.isArray(sala.reservas)) sala.reservas = [null, null, null, null];
+  return sala.reservas;
+}
+
+/** [ASSENTO] A reserva vigente do assento `i`, ou null. Leitura, so. */
+function reservaDe(sala, i) {
+  return Array.isArray(sala.reservas) ? (sala.reservas[i] || null) : null;
+}
+
+/** [ASSENTO] Assento que pode ser PEDIDO agora: vazio e sem reserva em voo.
+ *
+ *  As duas condicoes, e nao uma. `assentos[i] === null` sozinho e a leitura
+ *  que o codigo anterior fazia, e ela e verdadeira durante toda a espera da
+ *  admissao VIP — entao dois pedidos concorrentes pelo mesmo lugar liam
+ *  "livre" os dois, e o segundo a escrever apagava o primeiro. */
+function assentoLivre(sala, i) {
+  return sala.assentos[i] === null && reservaDe(sala, i) === null;
+}
+
+/** [ASSENTO] TOMA o assento `i` para esta tentativa. Sincrono e sem ponto de
+ *  suspensao entre a leitura de `assentoLivre` e esta escrita — e e so isso
+ *  que torna a disputa decidivel: o Node roda uma linha de execucao, entao a
+ *  segunda tentativa encontra a marca da primeira ja gravada. */
+function reservarAssento(sala, i, marca) {
+  garantirReservas(sala);
+  sala.reservas[i] = marca;
+}
+
+/** [ASSENTO] Solta a reserva — SO se ela ainda for a desta tentativa.
+ *
+ *  A guarda pela marca nao e zelo: sem ela, uma tentativa que termina tarde
+ *  soltaria a reserva de outra pessoa que ja tomou o lugar, e a trava atomica
+ *  viraria uma trava que se desarma sozinha. */
+function liberarReserva(sala, i, marca) {
+  // Sem marca nao houve reserva — e a reentrada de quem ja esta sentado nao
+  // reserva nada, porque nao ha ocupacao nova a disputar. Sair aqui evita que
+  // uma tentativa sem reserva escreva `null` sobre a reserva de outra pessoa.
+  if (marca == null) return;
+  if (Array.isArray(sala.reservas) && sala.reservas[i] === marca) sala.reservas[i] = null;
 }
 
 /** PONTO UNICO DE ADMISSAO AO ASSENTO.
@@ -4365,6 +4457,7 @@ function avaliarAdmissaoAoAssento({
 const CAMPOS_FORA_DA_IMPRESSAO = new Set([
   "versaoEstado", "eventoId", "impressaoEstado", // o carimbo
   "fimEmitido",                                   // escrituração de emissão
+  "reservas",                                     // [ASSENTO] trava em voo
 ]);
 
 /** Impressão do estado autoritativo da sala.
@@ -4733,6 +4826,11 @@ function criarGerenciador(opts = {}) {
       aposta: apostaDeEntrada,
       criadorAssento: 0,
       assentos: [assentoZero, null, null, null],
+      // [ASSENTO] Reservas em voo, por assento. Nasce vazio e NAO e estado da
+      // partida: e a trava que decide a disputa enquanto a admissao nao
+      // respondeu. Fica fora da impressao do estado por isso — ver
+      // `CAMPOS_FORA_DA_IMPRESSAO`.
+      reservas: [null, null, null, null],
       iniciada: false,
       jogo: null,
       liquidada: false,   // já contabilizou o resultado no cofre?
@@ -4783,6 +4881,27 @@ function criarGerenciador(opts = {}) {
     });
   }
 
+  /** [ASSENTO §2/§3] A ESCOLHA DE ASSENTO, E QUEM MANDA NELA.
+   *
+   *  `assento` e PREFERENCA, e preferencia so existe ANTES da ocupacao. Depois
+   *  que alguem senta, o servidor e autoridade absoluta: nenhum campo de
+   *  mensagem move, troca ou toma um assento ja ocupado.
+   *
+   *  O QUE MUDOU. Ate esta OS, um pedido que nao pudesse ser atendido — lugar
+   *  ocupado, numero fora da faixa, tipo errado — caia no laco automatico e a
+   *  pessoa sentava em OUTRO lugar, sem que nada dissesse isso. Era o fallback
+   *  silencioso: um seletor de cadeira construido sobre ele mostra a cadeira
+   *  errada e nao tem como descobrir. Agora sao QUATRO respostas, e so quatro:
+   *
+   *    sem pedido .......... escolha automatica, na ORDEM parceiro-primeiro;
+   *    valido e livre ...... exatamente ele, ou nada;
+   *    ocupado ............. recusa tipada, sem segunda tentativa;
+   *    invalido ............ recusa tipada.
+   *
+   *  AUSENCIA E `undefined`, E SO. `null` no fio e um valor que alguem
+   *  escreveu, nao um campo que nao veio — e aceita-lo como ausencia reabriria
+   *  o fallback pela porta do cliente que serializa "nenhuma escolha" como
+   *  `null`. Quem nao escolheu OMITE o campo. */
   function entrarMesa({ codigo, apelido = "Jogador", jogadorId = null, uidAutenticado = null, assento } = {}) {
     const sala = salas[codigo];
     if (!sala) return { erro: "mesa não encontrada" };
@@ -4791,36 +4910,121 @@ function criarGerenciador(opts = {}) {
       // autenticado é o PROPRIETÁRIO preservado de um assento, isto não é
       // entrada — é reconexão, e ela tem de passar. Qualquer outro UID
       // continua recebendo a recusa de sempre.
+      //
+      // [ASSENTO §3] E A RECONEXAO NAO OLHA O PEDIDO. Ela deriva o lugar da
+      // POSSE ja registrada, que e o unico fato que o servidor guardou sobre
+      // quem sentou ali. Numa partida em curso o pedido nao significa nada:
+      // titular volta para o assento DELE, e quem nao e titular nao senta —
+      // e o pedido nao muda nem uma coisa nem a outra.
       const rec = reconectar({ codigo, jogadorId });
       if (rec && rec.assento != null) return rec;
       return { erro: (rec && rec.erro) || "a partida já começou" };
     }
+
+    // [ASSENTO §3] QUEM JA TEM ASSENTO NESTA MESA NAO ESCOLHE OUTRO.
+    //
+    // No lobby a posse tambem ja esta registrada, e e ela que manda — o mesmo
+    // principio da partida iniciada, so que sem partida. A reentrada e o
+    // assento DELE, nunca o pedido, e isso fecha DOIS caminhos de uma vez:
+    //
+    //   - a entrada repetida, em que o mesmo uid passava a ocupar DOIS
+    //     assentos da mesma mesa sem que nada recusasse;
+    //   - a troca de cadeira por reentrada: pedir outro lugar e ser atendido
+    //     seria "sair e tentar outra cadeira" com outro nome, e essa operacao
+    //     nao existe neste servidor.
+    //
+    // E ELA CONTINUA PASSANDO PELO GATE. Nao ha ocupacao nova a admitir, mas
+    // ha uma TENTATIVA a classificar: o adaptador precisa ver a volta chegar
+    // marcada como reconexao, porque e assim — e so assim — que um backend de
+    // direitos sabe nao cobrar um segundo passe de quem ja estava sentado.
+    // Curto-circuitar aqui pouparia uma chamada e apagaria justamente o dado
+    // que a chamada existe para carregar.
+    const jaSentado = assentoDoTitular(sala, jogadorId);
+    const reentrada = jaSentado !== -1;
+
     // ORDEM PARCEIRO-PRIMEIRO: o criador está no assento 0 (dupla "nós" = 0 e 2).
     // O 2º humano senta no assento 2 — PARCEIRO do criador (mesmo time), que é o
     // caso comum (casal/dupla que quer jogar JUNTA). Só depois enche os adversários
     // (1 e 3). Assim a estreia de 2 pessoas já cai no mesmo time, sem precisar de UI.
-    // `assento` opcional: pedir um lugar específico livre (pro seletor de cadeira).
     const ORDEM = [2, 1, 3];
     let alvo = -1;
-    if (Number.isInteger(assento) && assento >= 0 && assento < 4 && sala.assentos[assento] === null) {
-      alvo = assento;
+    if (reentrada) {
+      alvo = jaSentado;
+    } else if (assento === undefined) {
+      for (const s of ORDEM) { if (assentoLivre(sala, s)) { alvo = s; break; } }
+      if (alvo === -1) return { erro: "mesa cheia" };
+    } else if (!ehAssentoPedido(assento)) {
+      return recusaDeAssento(RECUSA_ASSENTO_INVALIDO, ERRO_ASSENTO_INVALIDO);
+    } else if (!assentoLivre(sala, assento)) {
+      // Sem segunda tentativa, e a ausencia dela E o contrato: quem pediu um
+      // lugar recebe aquele lugar ou uma recusa, nunca um lugar diferente.
+      return recusaDeAssento(RECUSA_ASSENTO_OCUPADO, ERRO_ASSENTO_OCUPADO);
     } else {
-      for (const s of ORDEM) { if (sala.assentos[s] === null) { alvo = s; break; } }
+      alvo = assento;
     }
-    if (alvo === -1) return { erro: "mesa cheia" };
+
+    // [ASSENTO §3] A TRAVA ATOMICA, E POR QUE ELA TEM DE EXISTIR AQUI.
+    //
+    // A admissao pode ser ASSINCRONA (mesa VIP espera um backend). Entre
+    // decidir o alvo e escrever no assento existe, nesse regime, uma espera —
+    // e durante ela o assento continua vazio. Duas tentativas pelo mesmo lugar
+    // liam "livre" as duas, e a segunda a voltar do backend gravava por cima
+    // da primeira: o vencedor era quem respondesse por ultimo, e o outro ficava
+    // deslocado sem receber recusa nenhuma. A marca e gravada AGORA, no mesmo
+    // passo sincrono em que o alvo foi decidido, entao a segunda tentativa ja
+    // encontra o lugar tomado e recebe a recusa tipada.
+    //
+    // Reentrada nao reserva: o lugar ja e dela, e nao ha disputa a decidir.
+    const marca = reentrada ? null : novaMarcaDeReserva();
+    if (!reentrada) reservarAssento(sala, alvo, marca);
+
     // [GATE VIP] Ultima coisa antes da escrita no assento, e depois de o assento
     // alvo ja estar decidido - o gate precisa saber QUAL assento seria ocupado.
     // A categoria vem da SALA (congelada na criacao), nao do gerenciador: e a
     // mesa que se esta entrando que manda, e ela nao muda de natureza.
-    return concluirAdmissao(admitirNoAssento({
+    const saida = concluirAdmissao(admitirNoAssento({
       codigoDaSala: codigo, categoria: sala.categoriaCompetitiva,
       identidadeDaPartida: sala.partidaId, assento: alvo, jogadorId, uidAutenticado,
     }), function escreverAssento(veredito) {
+      // [ASSENTO §3] REENTRADA NAO OCUPA NADA.
+      //
+      // O assento ja esta gravado, com a prova de admissao que o sentou ali.
+      // Regravar o ocupante trocaria essa prova pela da tentativa de agora, e
+      // a volta de quem nunca saiu passaria a apagar o registro da entrada que
+      // de fato aconteceu. O que sai daqui e o lugar que ja era dele.
+      if (reentrada) return { codigo, assento: alvo, reconexao: true };
+
+      // [ASSENTO §3] A CONFERENCIA FINAL, no instante da escrita.
+      //
+      // A reserva decide a disputa entre duas ENTRADAS; esta leitura cobre o
+      // que aconteceu com a MESA durante a espera. A partida pode ter comecado
+      // (e ai o lugar virou bot ao encher a mesa), e a marca pode nao ser mais
+      // a desta tentativa. Escrever assim mesmo trocaria um ocupante legitimo
+      // por quem chegou atrasado — que e a forma mais silenciosa possivel de
+      // deslocar alguem.
+      if (sala.iniciada || sala.assentos[alvo] !== null || reservaDe(sala, alvo) !== marca) {
+        return recusaDeAssento(RECUSA_ASSENTO_OCUPADO, ERRO_ASSENTO_OCUPADO);
+      }
       const ocupante = { apelido, tipo: "humano", jogadorId };
       if (veredito.admissaoId) ocupante.admissaoId = veredito.admissaoId;
       sala.assentos[alvo] = ocupante;
       return { assento: alvo, codigo };
     });
+
+    // A reserva MORRE COM A TENTATIVA — sentou ou foi recusada, tanto faz. Uma
+    // reserva esquecida e um assento que ninguem mais consegue ocupar, num
+    // lugar que parece vazio para quem olha a mesa.
+    //
+    // `finally` E NAO DOIS RAMOS, e a razao e que o segundo ramo seria morto.
+    // Falha do adaptador — excecao sincrona, promessa rejeitada, timeout —
+    // NAO chega aqui como rejeicao: `avaliarAdmissaoAoAssento` ja a converte
+    // em RECUSA, de proposito, porque falha externa nao pode virar entrada
+    // liberada. Escrever um tratador de rejeicao aqui documentaria uma
+    // garantia que nenhum caminho exercita; `finally` cobre as saidas que
+    // existem com um callback so, e some junto se alguem o remover.
+    if (ehPromessa(saida)) return saida.finally(() => liberarReserva(sala, alvo, marca));
+    liberarReserva(sala, alvo, marca);
+    return saida;
   }
 
   /** [BACKEND] Desfaz uma admissao que foi aprovada e nao pode mais ser usada.
@@ -5538,6 +5742,12 @@ module.exports = {
   PREFIXO_TENTATIVA, ERRO_ADMISSAO,
   RECUSA_VIP_INDISPONIVEL, RECUSA_CATEGORIA_DESCONHECIDA,
   ADMISSAO_NOVA, ADMISSAO_RECONEXAO,
+  // [ASSENTO] Vocabulario e primitivas da escolha de assento, expostos para a
+  // suite medir a decisao na primitiva. A ORDEM automatica NAO e exposta de
+  // proposito: teste que le a constante nao detecta mudanca nela, so a repete.
+  ehAssentoPedido, assentoLivre, reservaDe,
+  RECUSA_ASSENTO_INVALIDO, RECUSA_ASSENTO_OCUPADO,
+  ERRO_ASSENTO_INVALIDO, ERRO_ASSENTO_OCUPADO,
   // [BACKEND] Expostos para a suite afirmar os dois regimes da admissao sem
   // ter que montar servidor e rede para cada caso.
   ehPromessa, concluirAdmissao,
@@ -7845,7 +8055,15 @@ function criarServidor(opts = {}) {
         // da promessa, rebaixaria a conexao velha por uma entrada que ainda pode
         // ser recusada. O §15.10 do controlador foi para dentro de
         // `aplicarEntrada`, que e o unico ponto por onde os DOIS regimes passam.
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });
+        // [ASSENTO §2] O assento PEDIDO atravessa, e atravessa cru. Ele nao e
+        // identidade nem privilegio: e a preferencia de quem esta entrando, e
+        // quem julga se ela pode ser atendida e `entrarMesa` — que e onde a
+        // posse mora. Validar aqui criaria uma segunda autoridade sobre
+        // assento, e as duas divergiriam no primeiro ajuste.
+        //
+        // Campo ausente chega `undefined`, que E a ausencia; `null` explicito
+        // chega `null`, que e um pedido malformado e recebe recusa tipada.
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, assento: msg.assento });
         return concluirPortaDeMesa(id, c, r, msg.codigo);
       }
       case "assistirMesa": {

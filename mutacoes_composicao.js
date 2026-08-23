@@ -44,9 +44,12 @@ const MUTACOES = [
   {
     n: 4,
     nome: "a reconexão passa a trocar a meta da partida",
-    de: `        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });`,
+    // [OS 41] A ancora ganhou `assento: msg.assento`: a escolha autoritativa de
+    // assento passou a atravessar o despachante. A mutacao e a mesma — o que
+    // mudou foi a linha em que ela e injetada.
+    de: `        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, assento: msg.assento });`,
     para: `        if (msg.metaPontos !== undefined) { const s = ger.salas[msg.codigo]; if (s && s.jogo) s.jogo.metaPontos = msg.metaPontos; }
-        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado });`,
+        const r = ger.entrarMesa({ codigo: msg.codigo, apelido: msg.apelido, jogadorId: c.jogadorId, uidAutenticado: c.uidAutenticado, assento: msg.assento });`,
   },
   {
     n: 5,

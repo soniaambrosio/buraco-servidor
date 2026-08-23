@@ -542,8 +542,17 @@ describe("VERSAO/ESTRUTURA", () => {
     // mutação real poderia deixar de versionar, então acrescentar um campo
     // precisa passar por uma mudança visível de teste, e não por um commit que
     // "só ajusta a impressão".
+    //
+    // [ASSENTO] `reservas` entrou aqui, e é um ato deliberado. Ela não é
+    // estado da partida: é a trava que decide, em voo, qual de duas entradas
+    // concorrentes fica com o assento — e ela é invisível em toda visão. Sem a
+    // exclusão, tomar e soltar uma reserva faria a versão andar sem que nada
+    // do que o cliente vê tivesse mudado, que é exatamente o que §5 proíbe:
+    // nada que não seja mutação da partida pode fingir ser versão nova. A
+    // ocupação que a reserva protege continua versionando normalmente, porque
+    // quem versiona é a escrita no assento.
     assert.deepEqual([...CAMPOS_FORA_DA_IMPRESSAO].sort(),
-      ["eventoId", "fimEmitido", "impressaoEstado", "versaoEstado"]);
+      ["eventoId", "fimEmitido", "impressaoEstado", "reservas", "versaoEstado"]);
 
     // A prova de que a exclusão é necessária: com o carimbo dentro da
     // impressão, carimbar duas vezes seguidas já mudaria a impressão.

@@ -372,6 +372,18 @@ describe("GATE-VIP/GATE — o ponto único de admissão ao assento", () => {
       assert.match(e, /=\s*null$/, "escrita por assento que NÃO é liberação: " + e);
     }
 
+    // [ASSENTO · OS 41] A COMPANHEIRA ESTRUTURAL DESTA PROVA MORA EM
+    // `test/assento_autoritativo.test.js`, no caso EST-02.
+    //
+    // A escolha autoritativa de assento acrescentou `sala.reservas`: uma TOMADA
+    // de lugar que acontece antes do gate e não escreve em `sala.assentos` —
+    // logo, invisível para a varredura acima. Ela não é uma segunda autoridade
+    // de admissão (não decide QUEM pode sentar, só quem chegou primeiro), e o
+    // gate continua sendo o único caminho de ocupação. Mas o caminho novo
+    // precisa da mesma disciplina: EST-02 enumera as três escritas em reserva e
+    // exige que a tomada venha ANTES da chamada do gate. Quem mexer numa das
+    // duas provas tem de olhar a outra.
+
     // E as duas — e só duas — chamadas do gate estão nos dois caminhos que
     // sentam um humano, cada uma antes da escrita correspondente. A declaração
     // não conta como chamada, e é por isso que ela é descontada explicitamente.
