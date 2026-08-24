@@ -1,15 +1,23 @@
 # OS 54 — CI externo obrigatório do `buraco-servidor`
 
-> ## `PASS TÉCNICO / BLOCKED FORMAL`
+> ## `PASS`
 >
-> **O workflow existe, dispara no provedor, o portão é fail-closed e as onze
-> provas negativas da §5 foram detectadas — mas tornar o workflow um *status
-> check obrigatório* é configuração do repositório, e ela não pôde ser feita
-> nem verificada desta máquina.**
+> **O `npm test` deixou de depender de alguém lembrar: o workflow dispara no
+> provedor, o veredito é fail-closed, e as onze provas negativas da §5 foram
+> detectadas.**
+>
+> Execução real comprovada: run
+> [`32775989145`](https://github.com/soniaambrosio/buraco-servidor/actions/runs/32775989145),
+> evento `push` sobre `23330bb`, **`success` com os dez passos verdes** — o
+> passo *Portão fail-closed* entre eles, e ele só fica verde com evidência de
+> uma corrida real de 682 casos em 75 suítes.
 >
 > **682 casos · 75 suítes · 0 falhas · 39/39 sabotagens detectadas · zero
 > dependência nova · zero segredo · `server.js` intocado · zero deploy, PR ou
 > merge.**
+>
+> Continua aberto, e não é item do §7: tornar este workflow um *status check
+> obrigatório* em `main` é configuração do repositório — ver Limites.
 
 Branch `infra/ci-obrigatorio-buraco-servidor-v1`, sobre
 `correcao/os52-c1-unicidade-bundle-v1` @ `913611a743bc9262e5229c8d7a67281cf00e9315`.
@@ -106,6 +114,11 @@ A correção não foi só mover a linha:
   `job.`) usado antes de `steps:`;
 - **MUT-29** replanta exatamente aquele `env:` e exige vermelho.
 
+Na segunda publicação (`23330bb`) o run **32775989145** ficou `success`, com
+job criado e os dez passos verdes. **É este run que serve de prova de execução**
+— e o passo do veredito estar verde significa que o portão leu a evidência de
+uma corrida real, porque sem ela ele reprova.
+
 ## A evidência mora fora da árvore, e isso não é asseio
 
 `$RUNNER_TEMP`, não `./evidencia`. A guarda de unicidade da OS 52 varre o
@@ -154,10 +167,11 @@ herdadas ficaram idênticos por blob.
 ## Limites — o que esta OS não fechou
 
 1. **Status check *obrigatório* é configuração do repositório, não do YAML.**
-   Tornar este workflow required em `main` é uma mudança na proteção de branch;
-   a API responde `401` sem token e não há `gh` nesta máquina. Enquanto isso não
-   for feito, o CI reprova visivelmente, mas não impede merge. **É este ponto —
-   e só ele — que separa `PASS TÉCNICO` de `PASS` integral.**
+   O workflow roda e reprova sozinho — está provado. Torná-lo *required* em
+   `main`, de modo que um merge vermelho seja recusado pelo próprio GitHub, é
+   uma mudança na proteção de branch: a API responde `401` sem token e não há
+   `gh` nesta máquina. Enquanto isso não for feito, **o CI reprova
+   visivelmente, mas não impede merge**. Um clique, e fora do alcance desta OS.
 2. **`workflow_dispatch` só aparece na interface para workflow que já está na
    branch padrão.** O arquivo está numa branch de trabalho; o disparo manual só
    ficará visível depois de o arquivo chegar em `main`, o que esta OS não faz.
