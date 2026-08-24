@@ -1,0 +1,19 @@
+{
+  "_leia_antes_de_mexer": [
+    "PISO, nunca contagem exata. Piso so se move para BAIXO por decisao explicita,",
+    "e mover para baixo e o que a revisao ve. Os numeros foram MEDIDOS na base, nunca",
+    "escritos de cabeca: `npm test` em 913611a743bc9262e5229c8d7a67281cf00e9315 deu",
+    "646 casos aprovados em 75 suites, exit 0, 18.7 s. A OS 54 acrescentou 35 casos",
+    "(a suite do CI obrigatorio), medidos em 681 aprovados nas mesmas 75 suites —",
+    "e o piso subiu junto: piso que nao acompanha a guarda nova deixa apagar os",
+    "casos dela sem reprovar.",
+    "Rebaixar qualquer um destes numeros e VERMELHO: `test/ci_obrigatorio.test.js`",
+    "guarda o piso do piso (CI-13), fora deste arquivo e fora do portao."
+  ],
+  "casos_minimos": 681,
+  "suites_minimas": 75,
+  "medido_em": "2026-08-24",
+  "medido_na_arvore_desta_os": { "casos": 681, "suites": 75 },
+  "medido_sobre": "913611a743bc9262e5229c8d7a67281cf00e9315",
+  "alvo_oficial": "npm test"
+}

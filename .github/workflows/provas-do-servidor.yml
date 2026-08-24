@@ -1,0 +1,118 @@
+# .github/workflows/provas-do-servidor.yml — O CI OBRIGATÓRIO DO SERVIDOR (OS 54).
+#
+# O portão deste repositório sempre foi `npm test`. O que faltava era
+# OBRIGAÇÃO: rodar dependia de alguém lembrar. Este arquivo transforma a
+# lembrança em execução automática, e o veredito em algo que ninguém pode
+# fabricar por descuido.
+#
+# TRÊS DESFECHOS, E SÓ UM É VERDE. No Actions um passo pode falhar, pode NÃO
+# executar (removido, comentado, desviado, trocado por um `echo`) e pode ser
+# cancelado. Só o primeiro tem cor natural. Por isso as provas escrevem
+# EVIDÊNCIA em disco — a saída literal do `npm test` e o código de saída dele —
+# e quem dá o veredito é `ci/portao_do_ci.js`, que trata ausência como
+# reprovação. Um job onde nada rodou termina VERMELHO, não verde.
+#
+# A EVIDÊNCIA MORA FORA DA ÁRVORE, em `$RUNNER_TEMP`, e isso não é asseio: a
+# guarda de unicidade da OS 52 varre o repositório INTEIRO à procura de um
+# segundo servidor, e um log de teste crescendo dentro da árvore entra nessa
+# varredura enquanto a suíte ainda roda. Evidência fora da árvore preserva
+# aquela proteção intacta, e de quebra mantém o checkout do job idêntico ao
+# commit medido.
+#
+# A OUTRA METADE DA CADEIA mora dentro da suíte: `test/ci_obrigatorio.test.js`
+# lê ESTE arquivo e reprova quem o desliga — passo apagado, alvo desviado,
+# gatilho removido, checkout removido, veredito rebaixado, piso encolhido. Um
+# workflow não consegue guardar a si mesmo, e uma suíte não consegue se obrigar
+# a rodar; as duas metades juntas fecham o círculo.
+#
+# NÃO USA SEGREDO NENHUM, e não pode passar a usar: o servidor não tem
+# dependência privada, e as suítes sobem tudo em portas locais.
+
+name: Provas do servidor
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# Leitura, e só. O job não publica, não implanta e não escreve no repositório.
+permissions:
+  contents: read
+
+# Sem `cancel-in-progress`: cancelamento é um dos desfechos que este portão
+# existe para distinguir, e não faz sentido fabricá-lo por conveniência.
+concurrency:
+  group: provas-do-servidor-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provas:
+    name: npm test (portão fail-closed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # DECLARAÇÃO ÚNICA do lugar da evidência, entregue a todos os passos —
+    # inclusive aos `if: always()`, que precisam dela justamente quando o passo
+    # anterior não chegou ao fim. Uma variável de shell não sobreviveria de um
+    # `run:` para o outro, e duas cópias do caminho seriam duas verdades.
+    env:
+      EVIDENCIA: ${{ runner.temp }}/evidencia
+
+    steps:
+      - name: Checkout íntegro
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Node em versão explícita
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Node e npm de fato usados
+        run: |
+          node --version
+          npm --version
+
+      - name: Dependências pelo mecanismo canônico do repositório
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      # O ALVO OFICIAL, e nada além dele. A saída inteira vai para a evidência,
+      # e o código de saída é gravado num marcador próprio — é ele que separa
+      # "falhou" de "nem chegou a terminar".
+      - name: Provas oficiais do servidor
+        run: |
+          mkdir -p "$EVIDENCIA"
+          set +e
+          npm test > "$EVIDENCIA/npm-test.txt" 2>&1
+          codigo=$?
+          set -e
+          printf '%s' "$codigo" > "$EVIDENCIA/exit.txt"
+          cat "$EVIDENCIA/npm-test.txt"
+
+      # O VEREDITO. Sem `if:`, sem tolerância a erro: se este passo não rodar,
+      # o job não fica verde por conta própria — e se rodar, é ele quem decide.
+      - name: Portão fail-closed
+        run: node ci/portao_do_ci.js "$EVIDENCIA/npm-test.txt" "$EVIDENCIA/exit.txt"
+
+      - name: Resumo (verde, vermelho, cancelado ou não executado)
+        if: always()
+        run: |
+          node ci/portao_do_ci.js --resumo "$EVIDENCIA/npm-test.txt" "$EVIDENCIA/exit.txt" \
+            --desfecho "${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Evidência arquivada
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-provas-do-servidor
+          path: ${{ runner.temp }}/evidencia/
+          if-no-files-found: warn
+          retention-days: 30

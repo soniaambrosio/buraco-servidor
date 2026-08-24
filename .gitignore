@@ -1,0 +1,6 @@
+node_modules/
+
+# Evidencia de execucao local do portao do CI (OS 54). No Actions ela e escrita
+# em $RUNNER_TEMP, fora da arvore; localmente pode cair aqui, e nao se versiona:
+# prova de execucao vale pela corrida, nunca por um arquivo commitado.
+evidencia/

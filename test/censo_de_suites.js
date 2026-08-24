@@ -54,6 +54,9 @@ const OBRIGATORIAS = Object.freeze({
   "chat_contrato.test.js": 10,
   "controlador_assento.test.js": 24,
   "gate_vip.test.js": 58,
+  // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
+  // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
+  "ci_obrigatorio.test.js": 55,   // OS 54 — CI externo obrigatorio
 });
 
 /** Conta casos, INCLUINDO subtestes.
