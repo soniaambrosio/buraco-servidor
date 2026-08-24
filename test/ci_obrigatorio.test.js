@@ -50,13 +50,13 @@ const CAMINHO_DO_WORKFLOW = path.join(RAIZ, ".github", "workflows", "provas-do-s
 const CAMINHO_DO_PORTAO = path.join(RAIZ, "ci", "portao_do_ci.js");
 const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
 
-/** O PISO DO PISO. Medido nesta árvore — 646 casos vieram da base `913611a` e 35
+/** O PISO DO PISO. Medido nesta árvore — 646 casos vieram da base `913611a` e 36
  *  são desta OS — e escrito aqui, FORA do arquivo de piso
  *  e FORA do portão, de propósito: se o único lugar que conhece os números
  *  fosse o próprio `ci/piso_do_portao.json`, baixar os números seria uma edição
  *  silenciosa de uma linha, e "o número caiu" é exatamente o defeito que o piso
  *  existe para pegar. Subir é livre; descer é vermelho. */
-const CASOS_MEDIDOS_NA_BASE = 681;
+const CASOS_MEDIDOS_NA_BASE = 682;
 const SUITES_MEDIDAS_NA_BASE = 75;
 
 /** Recorta comentários de YAML e trava contra o próprio recorte. */
@@ -159,12 +159,16 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     );
   });
 
-  await t.test("CI-05b: o lugar da evidência é declarado UMA vez, no job", () => {
-    // `env:` de PASSO tem precedência sobre o de job. Uma segunda declaração
-    // — no passo do veredito, por exemplo — apontaria o portão para um lugar
-    // diferente do que as provas escreveram, e é assim que se troca a
-    // evidência sem tocar em nenhum comando. Declaração única fecha isso.
-    const declaracoes = texto.split("\n").filter((l) => /^\s*EVIDENCIA:\s*\S/.test(l));
+  await t.test("CI-05b: o lugar da evidência é declarado UMA vez", () => {
+    // Uma segunda declaração — no passo do veredito, por exemplo — apontaria o
+    // portão para um lugar diferente do que as provas escreveram, e é assim
+    // que se troca a evidência sem tocar em comando nenhum.
+    //
+    // A declaração vive num passo, e não no `env:` do job, porque o contexto
+    // `runner` só existe a partir dos passos: no job, o workflow falha na
+    // VALIDAÇÃO e não chega a criar job. Medido no provedor, não deduzido —
+    // o run 32774431823 terminou `failure` com zero jobs por causa disso.
+    const declaracoes = texto.split("\n").filter((l) => /EVIDENCIA=\S/.test(l));
     assert.equal(
       declaracoes.length, 1,
       "o caminho da evidência tem de ser declarado exatamente uma vez (encontradas: " +
@@ -172,8 +176,13 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     );
     assert.match(
       declaracoes[0],
-      /runner\.temp/,
+      /\$RUNNER_TEMP/,
       "a evidência voltou para dentro da árvore — ela entraria na varredura de unicidade da OS 52 enquanto a suíte ainda roda"
+    );
+    assert.match(
+      texto,
+      /^\s*run:\s*echo\s+"EVIDENCIA=\$RUNNER_TEMP\/evidencia"\s*>>\s*"\$GITHUB_ENV"\s*$/m,
+      "o passo que declara o lugar da evidência sumiu — sem ele o portão procuraria a evidência na raiz do disco"
     );
   });
 
@@ -231,6 +240,27 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
       Number(m[1]) >= exigida,
       "o CI roda Node " + m[1] + ", abaixo do `engines.node` do repositório (>=" + exigida + ")"
     );
+  });
+
+  await t.test("CI-17: nenhum contexto de passo é usado fora dos passos", () => {
+    // ESTA LEITURA NASCEU DE UM VERMELHO REAL. A primeira versão declarava
+    // `EVIDENCIA: ${{ runner.temp }}/evidencia` no `env:` do job — e o
+    // contexto `runner` só existe a partir dos passos. O GitHub reprovou o
+    // workflow na VALIDAÇÃO: run 32774431823, `failure`, ZERO jobs, sem log,
+    // sem anotação legível pela API pública. Um portão que não chega a criar
+    // job não guarda coisa nenhuma, e nada no repositório teria dito isso.
+    const antesDosPassos = texto.split(/^\s{4}steps:\s*$/m)[0];
+    assert.ok(
+      antesDosPassos.length > 0 && /jobs:/.test(antesDosPassos),
+      "o recorte antes dos passos falhou — leitura inválida, não aprovação"
+    );
+    for (const contexto of ["runner", "steps", "job"]) {
+      assert.ok(
+        !new RegExp("\\$\\{\\{[^}]*\\b" + contexto + "\\.").test(antesDosPassos),
+        "o contexto `" + contexto + ".` aparece antes dos passos — o workflow falha na " +
+          "validação do provedor e o job nem chega a existir"
+      );
+    }
   });
 
   await t.test("CI-12: as dependências entram pelo mecanismo canônico", () => {

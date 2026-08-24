@@ -194,7 +194,7 @@ const MUTACOES = [
     tipo: "troca",
     arquivo: PISO,
     nome: "§5.11a o piso de CASOS é rebaixado",
-    de: '"casos_minimos": 681,',
+    de: '"casos_minimos": 682,',
     para: '"casos_minimos": 1,',
   },
   {
@@ -252,8 +252,8 @@ const MUTACOES = [
     nome: "§4 uma SEGUNDA declaração de evidência é plantada no passo do veredito",
     de: "      - name: Portão fail-closed\n        run: node ci/portao_do_ci.js",
     para:
-      "      - name: Portão fail-closed\n        env:\n          EVIDENCIA: /tmp/outro-lugar\n" +
-      "        run: node ci/portao_do_ci.js",
+      "      - name: Plantada\n        run: echo \"EVIDENCIA=/tmp/outro-lugar\" >> \"$GITHUB_ENV\"\n\n" +
+      "      - name: Portão fail-closed\n        run: node ci/portao_do_ci.js",
   },
   {
     n: 27,
@@ -261,6 +261,27 @@ const MUTACOES = [
     arquivo: PORTAO,
     destino: "ci/portao_do_ci.js.desligado",
     nome: "§4 o JUIZ some do repositório",
+  },
+  {
+    n: 28,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§5 o passo que declara o lugar da evidência é REMOVIDO",
+    de: '      - name: Lugar da evidência\n        run: echo "EVIDENCIA=$RUNNER_TEMP/evidencia" >> "$GITHUB_ENV"\n\n',
+    para: "",
+  },
+  {
+    // A sabotagem que o PROVEDOR ensinou: a primeira versão desta OS declarava
+    // a evidência no `env:` do job, com `runner.temp`, e o GitHub reprovou o
+    // workflow na validação — `failure` com zero jobs, sem log legível. Um
+    // portão que não chega a criar job não guarda nada, e nada no repositório
+    // teria apontado isso. Agora aponta.
+    n: 29,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§5 o contexto `runner` volta para o `env:` do job (workflow inválido)",
+    de: "    timeout-minutes: 20\n\n    steps:",
+    para: "    timeout-minutes: 20\n\n    env:\n      EVIDENCIA: ${{ runner.temp }}/evidencia\n\n    steps:",
   },
 ];
 

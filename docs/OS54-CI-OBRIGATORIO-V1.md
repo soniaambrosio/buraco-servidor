@@ -2,22 +2,22 @@
 
 > ## `PASS TÉCNICO / BLOCKED FORMAL`
 >
-> **O portão existe, é fail-closed, e as onze provas negativas da §5 foram
-> detectadas — mas tornar o workflow um *status check obrigatório* é
-> configuração do repositório, e ela não pôde ser feita nem verificada desta
-> máquina.**
+> **O workflow existe, dispara no provedor, o portão é fail-closed e as onze
+> provas negativas da §5 foram detectadas — mas tornar o workflow um *status
+> check obrigatório* é configuração do repositório, e ela não pôde ser feita
+> nem verificada desta máquina.**
 >
-> **681 casos · 75 suítes · 0 falhas · 37/37 sabotagens detectadas · zero
+> **682 casos · 75 suítes · 0 falhas · 39/39 sabotagens detectadas · zero
 > dependência nova · zero segredo · `server.js` intocado · zero deploy, PR ou
 > merge.**
 
-Branch `infra/ci-obrigatorio-buraco-servidor-v1`, um commit sobre
+Branch `infra/ci-obrigatorio-buraco-servidor-v1`, sobre
 `correcao/os52-c1-unicidade-bundle-v1` @ `913611a743bc9262e5229c8d7a67281cf00e9315`.
 
 ## O defeito, dito sem eufemismo
 
 O repositório tinha um portão bom e nenhuma obrigação de usá-lo. `npm test`
-rodava quando alguém lembrava. Não havia `.github/` — a API do GitHub confirma
+rodava quando alguém lembrava. Não havia `.github/` — a API do GitHub confirmava
 `"total_count": 0` em `/actions/workflows` —, nenhum mecanismo equivalente e
 nenhuma proteção externa. Um commit que quebrasse a suíte chegava ao
 repositório com a mesma cor de um que a mantivesse verde: nenhuma.
@@ -26,7 +26,7 @@ repositório com a mesma cor de um que a mantivesse verde: nenhuma.
 
 | # | o que | resultado |
 | --- | --- | --- |
-| 1 | branch e SHA no remoto | `913611a743bc9262e5229c8d7a67281cf00e9315` confirmado por `git ls-remote` |
+| 1 | branch e SHA no remoto | `913611a743bc9262e5229c8d7a67281cf00e9315`, confirmado por `git ls-remote` |
 | 2 | árvore limpa | sim |
 | 3 | comando oficial | `npm test` → `node --test "test/*.test.js"` |
 | 4 | portão na base | **646/646 em 75 suítes**, exit 0 |
@@ -49,7 +49,7 @@ construiu para o glob.
 | metade de fora | `.github/workflows/provas-do-servidor.yml` | dispara em todo push, roda o alvo oficial, guarda a saída |
 | o juiz | `ci/portao_do_ci.js` | lê a evidência e recusa tudo que não for prova positiva |
 | o piso | `ci/piso_do_portao.json` | fonte única do tamanho medido do portão |
-| metade de dentro | `test/ci_obrigatorio.test.js` | lê o YAML e reprova quem o desliga (35 casos) |
+| metade de dentro | `test/ci_obrigatorio.test.js` | lê o YAML e reprova quem o desliga (36 casos) |
 | a âncora | `test/censo_de_suites.js` | registra a suíte nova: apagá-la reprova pelas outras três |
 
 ## Por que o juiz não é o `npm test`
@@ -81,21 +81,44 @@ O piso vive em `ci/piso_do_portao.json`, e o **piso do piso** — os números
 medidos — vive em `test/ci_obrigatorio.test.js`, fora daquele arquivo e fora do
 portão. Subir é livre; descer é vermelho, em dois lugares.
 
+## O provedor reprovou a primeira versão, e isso virou guarda
+
+A primeira publicação (`5416274`) declarava o lugar da evidência assim:
+
+```yaml
+    env:
+      EVIDENCIA: ${{ runner.temp }}/evidencia
+```
+
+O run **32774431823** terminou `failure` com **zero jobs**, sem log e sem
+anotação legível pela API pública: o contexto `runner` só existe **a partir dos
+passos**, e no `env:` do job o workflow é reprovado na validação. Um portão que
+não chega a criar job não guarda nada — e nada no repositório teria dito isso.
+
+A correção não foi só mover a linha:
+
+- a declaração virou um passo, `echo "EVIDENCIA=$RUNNER_TEMP/evidencia" >>
+  "$GITHUB_ENV"`, que continua sendo **única** e continua alcançando os passos
+  `if: always()`;
+- o artefato passou a usar `${{ env.EVIDENCIA }}`, para não criar uma segunda
+  verdade sobre o caminho;
+- **CI-17** passou a reprovar qualquer contexto de passo (`runner.`, `steps.`,
+  `job.`) usado antes de `steps:`;
+- **MUT-29** replanta exatamente aquele `env:` e exige vermelho.
+
 ## A evidência mora fora da árvore, e isso não é asseio
 
 `$RUNNER_TEMP`, não `./evidencia`. A guarda de unicidade da OS 52 varre o
 repositório **inteiro** procurando um segundo servidor, e um log de teste
 crescendo dentro da árvore entraria nessa varredura **enquanto a suíte ainda
-roda**. Evidência fora da árvore preserva aquela proteção intacta — e o
-caminho é declarado **uma vez**, no `env:` do job, porque `env:` de passo tem
-precedência e uma segunda declaração trocaria a evidência sem tocar em comando
-nenhum (é o que CI-05b guarda).
+roda**.
 
-## As provas negativas — 37/37
+## As provas negativas — 39/39
 
-Duas baterias, porque são duas perguntas (`node mutacoes_ci.js`).
+Duas baterias, porque são duas perguntas (`node mutacoes_ci.js`; a segunda
+sozinha com `--so-evidencia`).
 
-**Árvore (27/27)** — sabota workflow, piso, portão ou `package.json`, e julga
+**Árvore (29/29)** — sabota workflow, piso, portão ou `package.json`, e julga
 pelo `npm test` inteiro:
 
 | § | sabotagem | pega por |
@@ -111,7 +134,8 @@ pelo `npm test` inteiro:
 | 5.9 | checkout removido | CI-10 |
 | 5.10a/b/c | marcador não gravado; portão sem rodapé; portão aceitando ausência | CI-05 / CI-14 |
 | 5.11a/b/c/d | pisos rebaixados; portão sem comparação; piso apagado | CI-13 / CI-14 |
-| §4 | segredo, permissão de escrita, timeout removido, segunda `EVIDENCIA:`, juiz apagado | CI-08 / CI-07 / CI-09 / CI-05b / CI-06 |
+| §4 | segredo, permissão de escrita, timeout removido, segunda `EVIDENCIA`, juiz apagado | CI-08 / CI-07 / CI-09 / CI-05b / CI-06 |
+| §5 | passo da evidência removido; `runner` de volta no `env:` do job | CI-05b / CI-17 |
 
 **Evidência (10/10)** — sabota a saída de uma execução real e julga pelo
 próprio `ci/portao_do_ci.js`, com **controle**: a evidência íntegra é aceita
@@ -121,20 +145,22 @@ encolhida em suítes e cancelada dão todas exit 1.
 
 ## O contador subiu, e isso está explicado
 
-**646 → 681 casos, 75 → 75 suítes.** Os 35 casos novos são a suíte
+**646 → 682 casos, 75 → 75 suítes.** Os 36 casos novos são a suíte
 `ci_obrigatorio.test.js`; nenhum caso da base foi perdido, e o piso subiu junto
 — piso que não acompanha a guarda nova deixa apagar os casos dela sem reprovar.
+`server.js`, `app.html`, `package.json`, os dois contratos e as quatro suítes
+herdadas ficaram idênticos por blob.
 
 ## Limites — o que esta OS não fechou
 
-1. **`workflow_dispatch` só aparece na interface para workflow que já está na
-   branch padrão.** O arquivo está numa branch de trabalho; o disparo manual só
-   ficará visível depois de o arquivo chegar em `main`, o que esta OS não faz.
-2. **Status check *obrigatório* é configuração do repositório, não do YAML.**
+1. **Status check *obrigatório* é configuração do repositório, não do YAML.**
    Tornar este workflow required em `main` é uma mudança na proteção de branch;
    a API responde `401` sem token e não há `gh` nesta máquina. Enquanto isso não
    for feito, o CI reprova visivelmente, mas não impede merge. **É este ponto —
    e só ele — que separa `PASS TÉCNICO` de `PASS` integral.**
+2. **`workflow_dispatch` só aparece na interface para workflow que já está na
+   branch padrão.** O arquivo está numa branch de trabalho; o disparo manual só
+   ficará visível depois de o arquivo chegar em `main`, o que esta OS não faz.
 3. **Nada de deploy.** `main` segue em `1828d42`, que é o que o Railway roda.
 
 ## Duas armadilhas de bancada desta rodada
@@ -143,5 +169,7 @@ encolhida em suítes e cancelada dão todas exit 1.
   Node contra injeção por argumento em BAT/CMD: precisa de `shell: true`. A
   primeira campanha abortou por isso — e abortar foi o comportamento certo,
   porque evidência que não veio de corrida real não prova nada.
-- **Evidência escrita dentro da árvore entra na varredura da OS 52** enquanto a
-  suíte roda. Foi o que levou a evidência para `$RUNNER_TEMP`.
+- **Erro de validação de workflow não produz job, log nem anotação pública.**
+  A única pista pela API é `conclusion: failure` com `jobs: 0`. Quem publicar
+  workflow novo aqui deve conferir esses dois números antes de acreditar em
+  qualquer coisa.

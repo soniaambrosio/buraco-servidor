@@ -52,19 +52,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # DECLARAÇÃO ÚNICA do lugar da evidência, entregue a todos os passos —
-    # inclusive aos `if: always()`, que precisam dela justamente quando o passo
-    # anterior não chegou ao fim. Uma variável de shell não sobreviveria de um
-    # `run:` para o outro, e duas cópias do caminho seriam duas verdades.
-    env:
-      EVIDENCIA: ${{ runner.temp }}/evidencia
-
     steps:
       - name: Checkout íntegro
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # DECLARAÇÃO ÚNICA do lugar da evidência, entregue a todos os passos
+      # seguintes — inclusive aos `if: always()`, que precisam dela justamente
+      # quando o passo anterior não chegou ao fim. Uma variável de shell não
+      # sobreviveria de um `run:` para o outro, e duas cópias do caminho seriam
+      # duas verdades.
+      #
+      # POR QUE AQUI, E NÃO NO `env:` DO JOB: o contexto `runner` só existe a
+      # partir dos passos. Declarado no job, o workflow nem chega a criar job —
+      # falha na validação, e um portão que não roda não guarda nada.
+      - name: Lugar da evidência
+        run: echo "EVIDENCIA=$RUNNER_TEMP/evidencia" >> "$GITHUB_ENV"
 
       - name: Node em versão explícita
         uses: actions/setup-node@v4
@@ -113,6 +118,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: evidencia-provas-do-servidor
-          path: ${{ runner.temp }}/evidencia/
+          path: ${{ env.EVIDENCIA }}/
           if-no-files-found: warn
           retention-days: 30
