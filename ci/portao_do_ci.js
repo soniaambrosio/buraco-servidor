@@ -63,6 +63,42 @@ function lerRodape(texto) {
   return dados;
 }
 
+/** [OS 52-C3] A AUTORIDADE DO PISO, vista de fora do `npm test`.
+ *
+ *  Quem impede o piso de descer é a comparação com o commit anterior, em
+ *  `test/piso_ancorado.js`. O juiz não a executa — não é papel dele —, mas
+ *  confere que ela EXISTE e que continua sendo CHAMADA de onde precisa ser.
+ *  Duas coisas diferentes, e as duas são apagáveis por edição de uma linha. */
+const AUTORIDADE_DO_PISO = Object.freeze({
+  "test/piso_ancorado.js": {
+    chama: false,
+    papel: "é a comparação do piso com o commit anterior, e sem ela o " +
+      "encolhimento coordenado volta a poder realinhar todos os números",
+  },
+  "test/censo_de_suites.js": {
+    chama: true,
+    papel: "é quem chama a comparação de dentro do censo",
+  },
+  "test/guarda_do_portao.js": {
+    chama: true,
+    papel: "é quem chama a comparação antes do glob, na etapa `pretest`",
+  },
+});
+
+/** Recorta comentários de JavaScript para que a leitura meça PROGRAMA.
+ *
+ *  Comentar uma linha é a sabotagem mais barata que existe. O recorte tem
+ *  trava anti-vácuo: se ele comer o arquivo, a leitura devolve o texto
+ *  original em vez de um vazio que aprovaria por silêncio. */
+function semComentarios(fonte) {
+  const limpo = String(fonte)
+    .split("\n")
+    .map((linha) => linha.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n")
+    .replace(/\/\*[\s\S]*?\*\//g, " ");
+  return limpo.trim().length < 40 ? String(fonte) : limpo;
+}
+
 function lerArquivo(caminho) {
   try {
     return fs.readFileSync(caminho, "utf8");
@@ -121,6 +157,33 @@ function conferir(opcoes) {
       "`test/*.test.js` (está `" + pkg.scripts.test + "`). Glob trocado por lista é " +
       "como uma suíte inteira sai do portão sem ninguém notar."
     );
+  }
+
+  // --- [OS 52-C3] a AUTORIDADE DO PISO ainda está no lugar -----------------
+  //
+  // O juiz não confere piso por opinião: confere que o mecanismo que impede o
+  // piso de DESCER continua existindo e continua sendo chamado. Isso é
+  // ESTRUTURA, não número — e mora aqui, num passo do workflow que roda
+  // separado do `npm test`, porque o encolhimento coordenado da OS 52-R2 apagou
+  // justamente a suíte que guardava o piso do piso.
+  //
+  // Ausência é reprovação: arquivo sumido, ou chamada removida com o corpo
+  // intacto, terminam vermelhos com nome próprio.
+  for (const [arquivo, exigencia] of Object.entries(AUTORIDADE_DO_PISO)) {
+    const fonte = lerArquivo(path.join(raiz, arquivo));
+    if (fonte === null) {
+      reprovacoes.push(
+        "AUTORIDADE DO PISO AUSENTE: `" + arquivo + "` sumiu — " + exigencia.papel + "."
+      );
+      continue;
+    }
+    if (exigencia.chama && !/piso_ancorado/.test(semComentarios(fonte))) {
+      reprovacoes.push(
+        "AUTORIDADE DO PISO DESLIGADA: `" + arquivo + "` deixou de chamar o piso " +
+        "ancorado. Remover a chamada e deixar o corpo intacto é a sabotagem que " +
+        "nenhuma conferência de existência de arquivo pega."
+      );
+    }
   }
 
   // --- a EXECUÇÃO deixou marca? --------------------------------------------
@@ -293,7 +356,7 @@ function principal(argv) {
 }
 
 module.exports = {
-  CHAVES_DO_RODAPE, ECO_DO_SCRIPT, ECO_DO_ALVO,
+  CHAVES_DO_RODAPE, ECO_DO_SCRIPT, ECO_DO_ALVO, AUTORIDADE_DO_PISO, semComentarios,
   lerRodape, lerPiso, conferir, resumo, principal,
 };
 

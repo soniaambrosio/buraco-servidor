@@ -19,8 +19,8 @@
 //
 // A DEFESA É EXIGIR RESULTADO NEGATIVO REAL. Esta guarda executa a guarda de
 // unicidade contra fixtures controladas e cobra o veredito declarado de cada
-// uma: 24 árvores que TÊM de reprovar e 7 que TÊM de passar. Implementação oca
-// falha nas 24; implementação que reprova tudo falha nas 7. Não existe corpo
+// uma: 45 árvores que TÊM de reprovar e 12 que TÊM de passar. Implementação oca
+// falha nas 45; implementação que reprova tudo falha nas 12. Não existe corpo
 // trivial que satisfaça as duas metades — e é por isso que a defesa não depende
 // de ler o texto de ninguém.
 //
@@ -33,7 +33,7 @@
 // ONDE ISTO É CHAMADO. Do `conferirCenso`, que as suítes obrigatórias chamam.
 // O anel fica fechado: apagar a suíte de unicidade derruba o censo (ela está
 // em OBRIGATORIAS); apagar o catálogo derruba esta guarda (ela cobra os ids);
-// esvaziar a regra derruba os 24 negativos; remover esta chamada derruba
+// esvaziar a regra derruba os 45 negativos; remover esta chamada derruba
 // CENSO-UNI, na suíte que a exercita.
 // ===========================================================================
 
@@ -73,18 +73,25 @@ function executarCatalogo(raizDoRepo) {
     for (const cenario of fixtures.catalogo(fonteDoPortador)) {
       const arvore = fixtures.arvore(fonteDoPortador);
       cenario.montar(arvore);
-      let obtido = "passa";
-      let motivo = null;
-      let estatistica = null;
-      try {
-        estatistica = unicidade.conferirUnicidadeDoPortador(arvore);
-      } catch (erro) {
-        obtido = "reprova";
-        motivo = String((erro && erro.message) || erro).split("\n")[0];
-      }
+      // O LAUDO, e não o `throw`. A cobertura de ramo (§C3-06) exige saber
+      // QUAIS ramos dispararam em cada cenário, e um veredito que só sabe
+      // estourar não conta isso. O veredito continua sendo derivado do mesmo
+      // laudo, pelas mesmas três condições que `conferirUnicidadeDoPortador`
+      // afirma — o que se observa aqui é a saída da regra, nunca um contador
+      // que ela mesma mantenha.
+      const laudo = unicidade.laudoDaArvore(arvore);
+      const reprovou =
+        laudo.problemas.length > 0 ||
+        !laudo.portadorReconhecido ||
+        !laudo.estatistica.portadorConferido;
+      const obtido = reprovou ? "reprova" : "passa";
+      const motivo = reprovou ? (laudo.problemas[0] || "portador irreconhecível") : null;
+      const estatistica = laudo.estatistica;
       resultados.push({
         id: cenario.id, o_que: cenario.o_que,
         esperado: cenario.esperado, obtido, motivo, estatistica,
+        ramos: Object.keys(estatistica.ramos),
+        escopos: estatistica.escopos,
         conforme: obtido === cenario.esperado,
       });
     }
@@ -141,12 +148,63 @@ function conferirProvaDaUnicidade(raizDoRepo) {
       r.id + " devia " + r.esperado + " e " + r.obtido + ": " + r.o_que);
   }
 
+  // --- 3b. COBERTURA DE RAMO, nos DOIS sentidos (§C3-06) -----------------
+  //
+  // Ramo decorativo é falha. E "decorativo" não se descobre lendo a tabela: só
+  // confrontando o que ela DECLARA com o que os cenários DE FATO fizeram
+  // disparar. A conferência é externa — a declaração mora no catálogo, a
+  // tabela mora na regra, e nenhuma das duas se autoavalia.
+  //
+  // A C2 pagou por não ter isto: o ramo do handshake por GUID nunca disparava,
+  // porque a fixture montava o GUID por concatenação e o texto contíguo jamais
+  // existia. Um ramo morto, verde por três semanas.
+  const observados = new Set(resultados.flatMap((r) => r.ramos));
+  const declarados = Object.keys(fixtures.RAMO_EXERCITADO_POR);
+  const porId = new Map(resultados.map((r) => [r.id, r]));
+
+  assert.deepEqual(
+    unicidade.IDS_DOS_RAMOS.filter((id) => !declarados.includes(id)), [],
+    "há ramo na tabela de capacidades sem cenário declarado em " +
+      "`RAMO_EXERCITADO_POR` — ramo que ninguém exercita é decoração"
+  );
+  assert.deepEqual(
+    declarados.filter((id) => !unicidade.IDS_DOS_RAMOS.includes(id)), [],
+    "`RAMO_EXERCITADO_POR` cobra ramo que a tabela não tem — ou o ramo foi " +
+      "removido, ou o nome mudou; nos dois casos a cobertura declarada é falsa"
+  );
+  assert.deepEqual(
+    unicidade.IDS_DOS_RAMOS.filter((id) => !observados.has(id)), [],
+    "há ramo que NENHUM cenário do catálogo fez disparar"
+  );
+  for (const [ramo, cenario] of Object.entries(fixtures.RAMO_EXERCITADO_POR)) {
+    const r = porId.get(cenario);
+    assert.ok(r, "o cenário `" + cenario + "`, exclusivo do ramo `" + ramo +
+      "`, sumiu do catálogo");
+    assert.ok(
+      r.ramos.includes(ramo),
+      "o cenário `" + cenario + "` deixou de acionar o ramo `" + ramo +
+        "` (acionou: " + (r.ramos.join(", ") || "nada") + ") — ou o ramo morreu, " +
+        "ou o cenário deixou de exercitá-lo"
+    );
+  }
+
+  // E os ESCOPOS: um escopo que nunca dispara é a camada composta desligada.
+  for (const [escopo, cenario] of Object.entries(fixtures.ESCOPO_EXERCITADO_POR)) {
+    const r = porId.get(cenario);
+    assert.ok(r, "o cenário `" + cenario + "`, exclusivo do escopo `" + escopo + "`, sumiu");
+    assert.ok(
+      (r.escopos && r.escopos[escopo]) > 0,
+      "nenhuma acusação saiu no escopo `" + escopo + "` no cenário `" + cenario +
+        "` — a decisão composta pode estar desligada nesse escopo"
+    );
+  }
+
   const negativos = resultados.filter((r) => r.esperado === "reprova");
   const positivos = resultados.filter((r) => r.esperado === "passa");
-  assert.ok(negativos.length >= 24,
+  assert.ok(negativos.length >= 40,
     "o catálogo tem só " + negativos.length + " cenários de reprovação; " +
     "regra oca precisa de muitos negativos para ser desmascarada");
-  assert.ok(positivos.length >= 6,
+  assert.ok(positivos.length >= 12,
     "o catálogo tem só " + positivos.length + " cenários de aprovação; " +
     "sem eles, uma regra que reprova TUDO passaria — e derrubaria a árvore íntegra");
 
@@ -202,13 +260,40 @@ function alcanceDoComando(comando, raiz) {
   return { alvos, alcancados };
 }
 
-/** As suítes que `npm test` TEM de alcançar, e o que cada uma carrega junto. */
+/** As suítes que `npm test` TEM de alcançar, o que cada uma carrega junto, e —
+ *  [OS 52-C3] — o módulo a que cada uma precisa continuar LIGADA.
+ *
+ *  A campanha da C3 encontrou uma sabotagem que só a contagem não pega:
+ *  substituir uma suíte obrigatória por uma ISCA de sessenta
+ *  `test("...", () => {})` vazios. O piso por arquivo fica satisfeito (sessenta
+ *  é mais que quarenta e oito), o `npm test` termina verde, e o que se perdeu
+ *  são os casos de verdade — o juiz externo pega pelo total, mas só depois.
+ *
+ *  `exige` é a trava local: a suíte tem de continuar CARREGANDO o módulo que
+ *  ela existe para exercitar. Não é contar `test(` — é cobrar o vínculo. Uma
+ *  isca de corpos triviais não tem `require` nenhum, e cai aqui, na etapa
+ *  `pretest`, antes de o glob rodar. */
 const ALCANCE_OBRIGATORIO = Object.freeze({
-  "test/assento_autoritativo.test.js": "chama o censo (e com ele a unicidade)",
-  "test/descoberta.test.js": "chama o censo (e com ele a unicidade)",
-  "test/costura_assento_descoberta.test.js": "chama o censo e prova a reciprocidade",
-  "test/unicidade_do_portador.test.js": "exercita o catálogo cenário a cenário",
-  "test/ci_obrigatorio.test.js": "guarda o CI externo e o piso do portão",
+  "test/assento_autoritativo.test.js": {
+    porque: "chama o censo (e com ele a unicidade)",
+    exige: "censo_de_suites",
+  },
+  "test/descoberta.test.js": {
+    porque: "chama o censo (e com ele a unicidade)",
+    exige: "censo_de_suites",
+  },
+  "test/costura_assento_descoberta.test.js": {
+    porque: "chama o censo e prova a reciprocidade",
+    exige: "censo_de_suites",
+  },
+  "test/unicidade_do_portador.test.js": {
+    porque: "exercita o catálogo cenário a cenário",
+    exige: "prova_da_unicidade",
+  },
+  "test/ci_obrigatorio.test.js": {
+    porque: "guarda o CI externo e o piso do portão",
+    exige: "portao_do_ci",
+  },
 });
 
 function conferirGlobOficial(raizDoRepo) {
@@ -261,14 +346,30 @@ function conferirGlobOficial(raizDoRepo) {
       " — glob estreitado deixa casos fora do portão com ele verde"
   );
 
-  for (const [suite, porque] of Object.entries(ALCANCE_OBRIGATORIO)) {
+  for (const [suite, exigencia] of Object.entries(ALCANCE_OBRIGATORIO)) {
     assert.ok(
       alcancados.has(suite),
-      "`npm test` deixou de alcançar `" + suite + "` — " + porque
+      "`npm test` deixou de alcançar `" + suite + "` — " + exigencia.porque
     );
+    const caminho = path.join(raiz, suite);
     assert.ok(
-      fs.existsSync(path.join(raiz, suite)),
-      "`" + suite + "` sumiu do disco — " + porque
+      fs.existsSync(caminho),
+      "`" + suite + "` sumiu do disco — " + exigencia.porque
+    );
+    // A SUÍTE CONTINUA LIGADA AO QUE ELA EXERCITA. Isca de corpos triviais
+    // satisfaz qualquer contador e não carrega módulo nenhum.
+    //
+    // A leitura é a MESMA que monta o grafo de ligação da unicidade: os
+    // especificadores relativos do texto bruto. Tem de ser bruto — o scanner
+    // léxico esvazia strings, e o nome do módulo mora dentro de uma —, e tem de
+    // ser a FORMA `require("...")`, para que citar o nome num comentário não
+    // valha como vínculo.
+    const ligacoes = unicidade.especificadoresDe(fs.readFileSync(caminho, "latin1"));
+    assert.ok(
+      ligacoes.some((e) => e.includes(exigencia.exige)),
+      "`" + suite + "` deixou de carregar `" + exigencia.exige + "` — ela " +
+        exigencia.porque + ", e uma suíte que não carrega o que exercita foi " +
+        "substituída por isca: os títulos continuam lá e as provas não"
     );
   }
 

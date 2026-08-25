@@ -50,15 +50,31 @@ const CAMINHO_DO_WORKFLOW = path.join(RAIZ, ".github", "workflows", "provas-do-s
 const CAMINHO_DO_PORTAO = path.join(RAIZ, "ci", "portao_do_ci.js");
 const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
 
-/** O PISO DO PISO. Medido nesta árvore — 682 casos vieram da base `750a012` e os
- *  demais da guarda de unicidade por capacidade da OS 52-C2 — e escrito aqui,
- *  FORA do arquivo de piso
- *  e FORA do portão, de propósito: se o único lugar que conhece os números
- *  fosse o próprio `ci/piso_do_portao.json`, baixar os números seria uma edição
- *  silenciosa de uma linha, e "o número caiu" é exatamente o defeito que o piso
- *  existe para pegar. Subir é livre; descer é vermelho. */
-const CASOS_MEDIDOS_NA_BASE = 734;
-const SUITES_MEDIDAS_NA_BASE = 80;
+/** O PISO DO PISO, MEDIDO — e a correção de um comentário que mentia.
+ *
+ *  A versão da OS 54 dizia "682 casos vieram da base `750a012`". Não era o que
+ *  os números diziam: `750a012` media 682, a OS 52-C2 subiu para 734, e o
+ *  comentário continuou falando de 682 como se fosse a origem dos 734. A
+ *  OS 52-R2 registrou isso como residual, e comentário errado num arquivo de
+ *  guarda é pior que comentário nenhum: ele é lido como medição.
+ *
+ *  O histórico REAL desta linhagem, medido com `npm test` em cada ponta:
+ *    `913611a` → 646 casos / 75 suítes
+ *    `750a012` → 682 casos / 75 suítes  (a OS 54 acrescentou a suíte do CI)
+ *    `4577048` → 734 casos / 80 suítes  (OS 52-C2, unicidade por capacidade)
+ *    OS 52-C3 → 786 casos / 83 suítes  (capacidade composta + piso ancorado)
+ *
+ *  Escrito aqui, FORA do arquivo de piso e FORA do portão, de propósito: se o
+ *  único lugar que conhecesse os números fosse `ci/piso_do_portao.json`, baixá-
+ *  los seria uma edição silenciosa de uma linha.
+ *
+ *  [OS 52-C3] E ISTO DEIXOU DE SER A ÚLTIMA DEFESA. A R2 apagou ESTA suíte no
+ *  encolhimento coordenado, e com ela foi-se o piso do piso — autoridade que
+ *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
+ *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
+ *  continuam aqui como a segunda leitura, e CI-19 os mantém em dia. */
+const CASOS_MEDIDOS_NA_BASE = 786;
+const SUITES_MEDIDAS_NA_BASE = 83;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
  *  que alguém tem de verificar. Subir é livre; descer é vermelho. */
@@ -485,6 +501,17 @@ function raizForjada(opcoes) {
     path.join(dir, "package.json"),
     JSON.stringify({ scripts: { test: o.alvo || 'node --test "test/*.test.js"' } })
   );
+  // [OS 52-C3] A árvore forjada carrega a AUTORIDADE DO PISO, porque o juiz
+  // passou a cobrá-la. Sem isto, todo caso deste arquivo reprovaria por um
+  // motivo que não é o dele — e vermelho pelo motivo errado esconde o que
+  // estava sendo medido. Quem quiser exercitar a AUSÊNCIA da autoridade passa
+  // `semAutoridadeDoPiso: true`, e CI-18 faz exatamente isso.
+  if (!o.semAutoridadeDoPiso) {
+    fs.mkdirSync(path.join(dir, "test"), { recursive: true });
+    for (const nome of Object.keys(PORTAO.AUTORIDADE_DO_PISO)) {
+      fs.copyFileSync(path.join(RAIZ, nome), path.join(dir, nome));
+    }
+  }
   const arquivoSaida = path.join(dir, "npm-test.txt");
   const arquivoExit = path.join(dir, "exit.txt");
   if (o.saida !== null) fs.writeFileSync(arquivoSaida, o.saida === undefined ? evidenciaIntegra() : o.saida);
@@ -624,5 +651,92 @@ test("CI/CADEIA — as duas metades continuam presas uma na outra", async (t) =>
     const estatistica = conferirUnicidadeDoPortador(RAIZ);
     assert.ok(estatistica.arquivos > 10, "a varredura não alcançou a árvore");
     assert.equal(estatistica.portadorConferido, true);
+  });
+});
+
+// ===========================================================================
+// [OS 52-C3] CI/PISO — A AUTORIDADE QUE O ENCOLHIMENTO COORDENADO NÃO ALCANÇA.
+//
+// A OS 52-R2 apagou uma suíte, tirou a entrada dela do censo e do alcance,
+// baixou um limiar e realinhou `ci/piso_do_portao.json` — e o pipeline ficou
+// verde. A suíte apagada era JUSTAMENTE esta, que guardava `CASOS_MEDIDOS_NA_BASE`.
+// Autoridade que mora dentro do alvo não é autoridade.
+//
+// A saída foi ancorar o piso no COMMIT ANTERIOR, que nenhuma edição na árvore
+// de trabalho alcança, e amarrar a chamada em três lugares — dois dentro do
+// `npm test` e um no juiz, que roda num passo separado do workflow.
+// ===========================================================================
+test("CI/PISO — a autoridade do piso está fora do conjunto editável", async (t) => {
+  await t.test("CI-17: o piso ancorado existe, é chamável e compara commits de verdade", () => {
+    const piso = require("./piso_ancorado.js");
+    assert.equal(typeof piso.conferirPisoAncorado, "function",
+      "a comparação com o commit anterior sumiu ou deixou de ser exportada");
+    const laudo = piso.conferirPisoAncorado(RAIZ);
+    assert.ok(laudo.ancoras.length >= 1,
+      "nenhuma âncora de histórico foi lida — a comparação passaria por vacuidade");
+    assert.ok(laudo.comparacoes > 0,
+      "a comparação não comparou nada");
+    assert.ok(
+      laudo.agora.piso.casos_minimos >= CASOS_MEDIDOS_NA_BASE,
+      "o piso corrente ficou abaixo do medido na base"
+    );
+  });
+
+  await t.test("CI-18: o juiz do CI cobra a autoridade do piso, e é exercitado nisso", () => {
+    // Descrever não basta: o juiz é RODADO contra uma árvore forjada à qual
+    // falta o arquivo da autoridade, e o que se exige é reprovação com nome.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(PORTAO.AUTORIDADE_DO_PISO, "test/piso_ancorado.js"),
+      "o juiz deixou de conhecer a autoridade do piso"
+    );
+    const raiz = fs.mkdtempSync(path.join(os.tmpdir(), "ciautoridade-"));
+    try {
+      fs.mkdirSync(path.join(raiz, "ci"), { recursive: true });
+      fs.mkdirSync(path.join(raiz, "test"), { recursive: true });
+      fs.copyFileSync(CAMINHO_DO_PISO, path.join(raiz, "ci", "piso_do_portao.json"));
+      fs.copyFileSync(path.join(RAIZ, "package.json"), path.join(raiz, "package.json"));
+      for (const nome of Object.keys(PORTAO.AUTORIDADE_DO_PISO)) {
+        fs.copyFileSync(path.join(RAIZ, nome), path.join(raiz, nome));
+      }
+      const alvo = {
+        raiz,
+        arquivoSaida: path.join(raiz, "sem-evidencia.txt"),
+        arquivoExit: path.join(raiz, "sem-exit.txt"),
+      };
+      const intacta = PORTAO.conferir(alvo).reprovacoes.filter((m) => /AUTORIDADE DO PISO/.test(m));
+      assert.deepEqual(intacta, [], "a árvore com a autoridade intacta foi acusada");
+
+      fs.rmSync(path.join(raiz, "test", "piso_ancorado.js"), { force: true });
+      const semAutoridade = PORTAO.conferir(alvo).reprovacoes.filter((m) => /AUTORIDADE DO PISO AUSENTE/.test(m));
+      assert.equal(semAutoridade.length, 1,
+        "apagar a autoridade do piso não deixou o juiz vermelho");
+    } finally {
+      fs.rmSync(raiz, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("CI-19: o piso do piso desta suíte acompanha o piso declarado", () => {
+    // `CASOS_MEDIDOS_NA_BASE` continua aqui, e continua servindo — só deixou de
+    // ser a ÚNICA defesa. O que este caso impede é a divergência silenciosa:
+    // subir o piso do arquivo e esquecer este número deixaria a metade de
+    // dentro protegendo um total que já não existe.
+    const piso = JSON.parse(fs.readFileSync(CAMINHO_DO_PISO, "utf8"));
+    assert.ok(
+      piso.casos_minimos >= CASOS_MEDIDOS_NA_BASE,
+      "o piso declarado (" + piso.casos_minimos + ") caiu abaixo do medido na base (" +
+        CASOS_MEDIDOS_NA_BASE + ")"
+    );
+    assert.ok(
+      piso.suites_minimas >= SUITES_MEDIDAS_NA_BASE,
+      "o piso de suítes declarado caiu abaixo do medido na base"
+    );
+    assert.equal(
+      piso.medido_na_arvore_desta_os.casos, piso.casos_minimos,
+      "o número medido e o piso declarado divergiram — um dos dois está desatualizado"
+    );
+    assert.equal(
+      piso.medido_na_arvore_desta_os.suites, piso.suites_minimas,
+      "o número de suítes medido e o piso declarado divergiram"
+    );
   });
 });

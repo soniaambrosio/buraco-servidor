@@ -45,19 +45,25 @@ const assert = require("node:assert/strict");
  *  Remedido em 2026-08-24 (OS 52-C1): costura 25, com os sete casos
  *  do §11. O piso subiu junto — piso que não acompanha a guarda nova deixa
  *  apagar os casos dela sem reprovar, que é o buraco que esta OS fecha.
- *  chat_contrato 11 · controlador 27 · gate_vip 64 · costura 12. */
+ *
+ *  [OS 52-C3] REMEDIDOS TODOS, E SEM FOLGA. A OS 52-R2 registrou como residual
+ *  que estes números eram rebaixáveis: a C2 baixou a costura de 23 para 16
+ *  quando o arquivo tinha 18 casos, e a diferença é espaço para apagar dois
+ *  casos sem que nada reprove. Agora cada piso é a contagem REAL do arquivo, e
+ *  `test/piso_ancorado.js` compara com o commit anterior — descer abaixo do que
+ *  o arquivo tem é vermelho, e descer com o arquivo é permitido só até ele. */
 const OBRIGATORIAS = Object.freeze({
-  "assento_autoritativo.test.js": 25,        // OS 41 — escolha autoritativa de assento
-  "descoberta.test.js": 90,                  // OS 38.1 — descoberta e presença
-  "costura_assento_descoberta.test.js": 16,  // OS 44 — a costura entre as duas
-  "chat_transporte.test.js": 28,             // Comunicação Controlada (ff3ddbe)
-  "chat_contrato.test.js": 10,
-  "controlador_assento.test.js": 24,
-  "gate_vip.test.js": 58,
-  "unicidade_do_portador.test.js": 16,   // OS 52-C2 — ver a nota sobre o piso desta suite
+  "assento_autoritativo.test.js": 30,        // OS 41 — escolha autoritativa de assento
+  "descoberta.test.js": 98,                  // OS 38.1 — descoberta e presença
+  "costura_assento_descoberta.test.js": 18,  // OS 44 — a costura entre as duas
+  "chat_transporte.test.js": 31,             // Comunicação Controlada (ff3ddbe)
+  "chat_contrato.test.js": 11,
+  "controlador_assento.test.js": 27,
+  "gate_vip.test.js": 64,
+  "unicidade_do_portador.test.js": 48,   // OS 52-C3 — capacidade composta da árvore
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
-  "ci_obrigatorio.test.js": 70,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1 (auditabilidade)
+  "ci_obrigatorio.test.js": 83,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3
 });
 
 /** Conta casos, INCLUINDO subtestes.
@@ -108,13 +114,42 @@ function conferirCenso(dir) {
   // versão da OS 52-C1 detectava por nome, trecho canônico e extensão, e a
   // R1 mostrou o preço disso: servidor novo com outros nomes, em `net` ou
   // `https`, guardado numa subpasta, e ZIP sem extensão passavam inteiros.
-  // A da OS 52-C2 detecta por CAPACIDADE EXECUTÁVEL e é exercitada contra
-  // 31 fixtures — 24 que têm de reprovar e 7 que têm de passar. Chamar a
-  // prova em vez da regra é o que impede corpo oco de aprovar em silêncio.
+  // A da OS 52-C3 detecta por CAPACIDADE COMPOSTA DA ÁRVORE e é exercitada
+  // contra 57 fixtures — 45 que têm de reprovar e 12 que têm de passar.
+  // Chamar a prova em vez da regra é o que impede corpo oco de aprovar em
+  // silêncio.
   const { conferirProvaDaUnicidade, conferirGlobOficial } =
     require("./prova_da_unicidade.js");
   conferirProvaDaUnicidade(path.join(raiz, ".."));
   conferirGlobOficial(path.join(raiz, ".."));
+
+  // [OS 52-C3] E NENHUM PISO ENCOLHEU EM RELAÇÃO AO QUE O REPOSITÓRIO JÁ
+  // REGISTROU.
+  //
+  // Os pisos por suíte acima, o de `ci/piso_do_portao.json` e a própria lista
+  // de suítes são todos editáveis pelo mesmo commit — foi assim que o
+  // encolhimento coordenado da OS 52-R2 ficou verde: seis edições plausíveis,
+  // e todos os números que decidiam moravam dentro do conjunto editado. A
+  // comparação com o COMMIT ANTERIOR é a única autoridade que uma edição na
+  // árvore de trabalho não alcança.
+  //
+  // SÓ NA ÁRVORE REAL, e a razão não é conveniência: o piso ancorado é uma
+  // afirmação sobre O HISTÓRICO DESTE REPOSITÓRIO, e uma cópia descartável em
+  // `%TEMP%` não tem histórico nenhum. Avaliá-lo ali devolveria "sem âncora"
+  // para toda árvore forjada, e as provas que montam árvores forjadas para
+  // testar OUTRA coisa passariam a reprovar pelo motivo errado — vermelho pelo
+  // motivo errado é tão cego quanto verde indevido.
+  //
+  // Isto não abre porta: as suítes chamam `conferirCenso()` sem argumento, e a
+  // etapa `pretest` chama a comparação DIRETAMENTE, sobre a raiz real, antes do
+  // glob. Quem quisesse escapar por aqui teria de mudar quem chama o censo, e
+  // aí esbarra na amarração que o juiz do CI confere de fora.
+  const { conferirPisoAncorado, conferirAmarracao } = require("./piso_ancorado.js");
+  const ehArvoreReal = !dir || path.resolve(dir) === path.resolve(__dirname);
+  if (ehArvoreReal) {
+    conferirPisoAncorado(path.join(raiz, ".."));
+    conferirAmarracao(path.join(raiz, ".."));
+  }
 }
 
 // ===========================================================================

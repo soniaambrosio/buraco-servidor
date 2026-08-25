@@ -30,13 +30,22 @@
 "use strict";
 
 const { conferirProvaDaUnicidade, conferirGlobOficial } = require("./prova_da_unicidade.js");
+const { conferirPisoAncorado, conferirAmarracao } = require("./piso_ancorado.js");
 
 try {
   const { estatistica } = conferirProvaDaUnicidade();
   const glob = conferirGlobOficial();
+  // [OS 52-C3] O PISO, CONTRA O COMMIT ANTERIOR. Roda aqui também — e não só
+  // dentro do censo — porque o encolhimento coordenado pode estreitar o glob no
+  // mesmo movimento, e aí nenhuma suíte obrigatória chega a chamar o censo.
+  const piso = conferirPisoAncorado();
+  const amarracoes = conferirAmarracao();
   process.stdout.write(
     "[guarda do portão] unicidade: " + estatistica.arquivos + " arquivos varridos · " +
-    "glob oficial: " + glob.suites + " suítes alcançadas\n"
+    "glob oficial: " + glob.suites + " suítes alcançadas · " +
+    "piso ancorado: " + piso.comparacoes + " comparações contra " +
+    piso.ancoras.map((s) => s.slice(0, 7)).join(", ") +
+    " · amarrações: " + amarracoes + "\n"
   );
 } catch (erro) {
   process.stderr.write("\n[guarda do portão] REPROVADO\n" + ((erro && erro.message) || erro) + "\n");
