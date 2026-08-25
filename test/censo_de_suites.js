@@ -51,7 +51,19 @@ const assert = require("node:assert/strict");
  *  quando o arquivo tinha 18 casos, e a diferença é espaço para apagar dois
  *  casos sem que nada reprove. Agora cada piso é a contagem REAL do arquivo, e
  *  `test/piso_ancorado.js` compara com o commit anterior — descer abaixo do que
- *  o arquivo tem é vermelho, e descer com o arquivo é permitido só até ele. */
+ *  o arquivo tem é vermelho, e descer com o arquivo é permitido só até ele.
+ *
+ *  [OS 54-C4] E ESTES NÚMEROS DEIXARAM DE SER A AUTORIDADE DE QUANTIDADE.
+ *  A OS 54-R2 derrubou a contagem textual com três sabotagens que nenhuma
+ *  expressão regular distingue de código: `regex.test(` conta como caso,
+ *  ocorrência dentro de COMENTÁRIO conta, e texto não tem origem. A autoridade
+ *  passou a ser `ci/inventario_de_execucao.js`, que lê o stream de eventos do
+ *  `node:test` e conta por `data.file`.
+ *
+ *  O piso textual FICOU, e não por inércia: ele já estava na base homologada,
+ *  roda barato no `pretest` e não decide sozinho nada — o mínimo externo de
+ *  `ci/pisos_autorizados.js` e a comparação com o commit anterior o cercam dos
+ *  dois lados. Trocar uma proteção por outra não é compor; é empatar. */
 const OBRIGATORIAS = Object.freeze({
   "assento_autoritativo.test.js": 30,        // OS 41 — escolha autoritativa de assento
   "descoberta.test.js": 98,                  // OS 38.1 — descoberta e presença
@@ -66,7 +78,13 @@ const OBRIGATORIAS = Object.freeze({
   "artefato_unico.test.js": 54,           // OS 52-C4 — artefato produtivo unico
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
-  "ci_obrigatorio.test.js": 83,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3
+  "ci_obrigatorio.test.js": 99,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3; +16 na OS 54-C4 (os subcasos da auditabilidade e a CI-20)
+  // [OS 54-C4] As duas suites proprias da CADEIA EXTERNA: a do guardiao do
+  // rastro e a do inventario por execucao. Sem registro aqui, apaga-las seria
+  // mudo — e sao elas que provam que as autoridades de fora nao foram
+  // esvaziadas. Registradas, a remocao de qualquer uma reprova pelas outras.
+  "auditabilidade_ci.test.js": 29,
+  "inventario_executado.test.js": 24,
 });
 
 /** Conta casos, INCLUINDO subtestes.

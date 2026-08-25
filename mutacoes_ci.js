@@ -194,7 +194,7 @@ const MUTACOES = [
     tipo: "troca",
     arquivo: PISO,
     nome: "§5.11a o piso de CASOS é rebaixado",
-    de: '"casos_minimos": 682,',
+    de: '"casos_minimos": 883,',
     para: '"casos_minimos": 1,',
   },
   {
@@ -202,7 +202,7 @@ const MUTACOES = [
     tipo: "troca",
     arquivo: PISO,
     nome: "§5.11b o piso de SUÍTES é rebaixado",
-    de: '"suites_minimas": 75,',
+    de: '"suites_minimas": 87,',
     para: '"suites_minimas": 1,',
   },
   {
@@ -301,7 +301,7 @@ const MUTACOES = [
         with:
           name: evidencia-provas-do-servidor
           path: \${{ env.EVIDENCIA }}/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 `,
     para: "",

@@ -301,6 +301,18 @@ const ALCANCE_OBRIGATORIO = Object.freeze({
     porque: "exercita a autoridade do artefato produtivo",
     exige: "artefato",
   },
+  // [OS 54-C4] As duas suítes da CADEIA EXTERNA. Elas exercitam autoridades
+  // que moram fora do glob, e por isso são o alvo natural da isca: títulos
+  // preservados, corpos vazios, nenhum `require` do que deveriam medir. O
+  // vínculo cobrado aqui é o módulo que cada uma existe para derrubar.
+  "test/auditabilidade_ci.test.js": {
+    porque: "exercita o guardião externo do rastro",
+    exige: "auditabilidade",
+  },
+  "test/inventario_executado.test.js": {
+    porque: "exercita a autoridade de quantidade por execução",
+    exige: "inventario_de_execucao",
+  },
 });
 
 function conferirGlobOficial(raizDoRepo) {

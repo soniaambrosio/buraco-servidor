@@ -356,7 +356,7 @@ const VETORES = [
     aplicar: () => {
       arq.apagar("test/ci_obrigatorio.test.js");
       arq.trocar("test/censo_de_suites.js",
-        '  "ci_obrigatorio.test.js": 83,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3\n', "");
+        '  "ci_obrigatorio.test.js": 99,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3; +16 na OS 54-C4 (os subcasos da auditabilidade e a CI-20)\n', "");
       arq.trocar("test/prova_da_unicidade.js",
         '  "test/ci_obrigatorio.test.js": {\n' +
         '    porque: "guarda o CI externo e o piso do portão",\n' +
@@ -364,8 +364,8 @@ const VETORES = [
         "  },\n", "");
       arq.trocar("test/prova_da_unicidade.js", "suitesAlcancadas.length >= 5", "suitesAlcancadas.length >= 4");
       arq.json("ci/piso_do_portao.json", (o) => {
-        o.casos_minimos = 742; o.suites_minimas = 83;
-        o.medido_na_arvore_desta_os = { casos: 742, suites: 83 };
+        o.casos_minimos = 820; o.suites_minimas = 87;
+        o.medido_na_arvore_desta_os = { casos: 820, suites: 87 };
       });
     } },
 
@@ -525,7 +525,7 @@ const VETORES = [
       '"gate_vip.test.js": 64,', '"gate_vip.test.js": 58,') },
   { id: "PIS-D", o_que: "rebaixamento do piso do piso (CI-13) na suite do CI",
     aplicar: () => arq.trocar("test/ci_obrigatorio.test.js",
-      "const CASOS_MEDIDOS_NA_BASE = 786;", "const CASOS_MEDIDOS_NA_BASE = 700;") },
+      "const CASOS_MEDIDOS_NA_BASE = 883;", "const CASOS_MEDIDOS_NA_BASE = 700;") },
   { id: "PIS-E", o_que: "entrada do censo APAGADA para uma suite obrigatoria",
     aplicar: () => arq.trocar("test/censo_de_suites.js",
       '  "gate_vip.test.js": 64,\n', "") },
@@ -539,9 +539,9 @@ const VETORES = [
         o.medido_na_arvore_desta_os = { casos: 600, suites: 70 };
       });
       arq.trocar("test/ci_obrigatorio.test.js",
-        "const CASOS_MEDIDOS_NA_BASE = 786;", "const CASOS_MEDIDOS_NA_BASE = 600;");
+        "const CASOS_MEDIDOS_NA_BASE = 883;", "const CASOS_MEDIDOS_NA_BASE = 600;");
       arq.trocar("test/ci_obrigatorio.test.js",
-        "const SUITES_MEDIDAS_NA_BASE = 83;", "const SUITES_MEDIDAS_NA_BASE = 70;");
+        "const SUITES_MEDIDAS_NA_BASE = 87;", "const SUITES_MEDIDAS_NA_BASE = 70;");
     } },
   { id: "AUT-A", o_que: "a AUTORIDADE do piso ancorado e apagada do disco",
     aplicar: () => arq.apagar("test/piso_ancorado.js") },

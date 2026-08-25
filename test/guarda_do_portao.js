@@ -33,6 +33,31 @@ const { conferirProvaDaUnicidade, conferirGlobOficial } = require("./prova_da_un
 const { conferirPisoAncorado, conferirAmarracao } = require("./piso_ancorado.js");
 const { exigirArtefatoUnico } = require("../ci/artefato.js");
 
+// [OS 54-C2, portado pela OS 54-C4] AS EXIGÊNCIAS QUE NÃO PODEM MORAR DENTRO DO
+// GLOB.
+//
+// A OS 54-R2 provou que guarda dentro da suíte protegida se apaga junto com
+// ela: CI-18, CI-19 e CI-19b podiam ser trivializadas ou removidas — inclusive
+// as três juntas — com o portão oficial verde. A correção não foi escrever uma
+// quarta guarda no mesmo lugar; foi mover a AUTORIDADE para fora.
+//
+// Aqui, no `pretest`, elas rodam antes do glob e não são alcançadas por nenhuma
+// edição em `test/*.test.js`:
+//
+//   * `ci/auditabilidade.js` — o rastro do run existe, é sempre publicado e é
+//     do que foi julgado; e o workflow continua invocando a cadeia externa
+//     INTEIRA, inclusive a autoridade do artefato produtivo da OS 52-C4;
+//   * `ci/pisos_autorizados.js` — o censo não declara menos do que o autorizado.
+//
+// A contagem por EXECUÇÃO (`ci/inventario_de_execucao.js`) não roda aqui de
+// propósito: ela executa suítes, e executar suítes dentro do `pretest` das
+// mesmas suítes dobra toda corrida. Ela é passo próprio do CI, e a ausência da
+// invocação dela no workflow é reprovada por `ci/auditabilidade.js`, que roda
+// aqui.
+const { conferirAuditabilidade } = require("../ci/auditabilidade.js");
+const { conferirPisosDeclarados } = require("../ci/pisos_autorizados.js");
+const { OBRIGATORIAS, conferirCenso } = require("./censo_de_suites.js");
+
 try {
   // [OS 52-C4] A AUTORIDADE VEM PRIMEIRO, E ANTES DO GLOB.
   //
@@ -50,6 +75,24 @@ try {
   // mesmo movimento, e aí nenhuma suíte obrigatória chega a chamar o censo.
   const piso = conferirPisoAncorado();
   const amarracoes = conferirAmarracao();
+
+  // [OS 54-C2] O CENSO passa a ser conferido AQUI também. Ele já era chamado
+  // de dentro das suítes obrigatórias, e a R2 mostrou que comentar a chamada
+  // numa delas não reprovava — as outras cobriam, mas por acaso, e acaso não é
+  // proteção. Com a conferência no `pretest`, a chamada de dentro vira defesa
+  // redundante DE VERDADE: a obrigatoriedade passou a ter dono externo.
+  conferirCenso();
+
+  const motivos = [
+    ...conferirAuditabilidade({}),
+    ...conferirPisosDeclarados(OBRIGATORIAS),
+  ];
+  if (motivos.length > 0) {
+    throw new Error(
+      "auditabilidade/pisos — " + motivos.length + " motivo(s):\n  * " + motivos.join("\n  * ")
+    );
+  }
+
   process.stdout.write(
     "[guarda do portão] artefato: [" + artefato.produtivos.join(", ") + "] · " +
     artefato.excluidos + " excluídos · " + artefato.ancoras + " âncora(s) · " +
@@ -57,7 +100,8 @@ try {
     "glob oficial: " + glob.suites + " suítes alcançadas · " +
     "piso ancorado: " + piso.comparacoes + " comparações contra " +
     piso.ancoras.map((s) => s.slice(0, 7)).join(", ") +
-    " · amarrações: " + amarracoes + "\n"
+    " · amarrações: " + amarracoes +
+    " · auditabilidade e pisos declarados: verdes\n"
   );
 } catch (erro) {
   process.stderr.write("\n[guarda do portão] REPROVADO\n" + ((erro && erro.message) || erro) + "\n");

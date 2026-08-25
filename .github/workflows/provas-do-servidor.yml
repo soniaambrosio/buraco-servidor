@@ -1,4 +1,5 @@
-# .github/workflows/provas-do-servidor.yml — O CI OBRIGATÓRIO DO SERVIDOR (OS 54).
+# .github/workflows/provas-do-servidor.yml — O CI OBRIGATÓRIO DO SERVIDOR
+# (OS 54, composto sobre a OS 52-C4 pela OS 54-C4).
 #
 # O portão deste repositório sempre foi `npm test`. O que faltava era
 # OBRIGAÇÃO: rodar dependia de alguém lembrar. Este arquivo transforma a
@@ -24,6 +25,25 @@
 # gatilho removido, checkout removido, veredito rebaixado, piso encolhido. Um
 # workflow não consegue guardar a si mesmo, e uma suíte não consegue se obrigar
 # a rodar; as duas metades juntas fecham o círculo.
+#
+# [OS 54-C4] E A METADE DE DENTRO DEIXOU DE SER A AUTORIDADE. A OS 54-R2 provou
+# que guarda escrita dentro do conjunto varrido some junto com ele: CI-18,
+# CI-19 e CI-19b podiam ser trivializadas ou apagadas — inclusive as três
+# juntas — com o portão oficial VERDE. As autoridades passaram a viver fora de
+# `test/*.test.js`, e este job as executa como PASSOS PRÓPRIOS, cada um sem
+# `if:` e sem `continue-on-error:`:
+#
+#   * `ci/auditabilidade.js`        — o rastro existe, é sempre publicado, e é
+#                                     do que foi julgado;
+#   * `ci/inventario_de_execucao.js` — quantos casos CADA arquivo executou e
+#                                     aprovou, e quais casos NOMINAIS rodaram;
+#   * `ci/portao_do_ci.js`          — o juiz fail-closed da evidência;
+#   * `ci/artefato.js`              — a autoridade do artefato produtivo único,
+#                                     herdada da OS 52-C4 e preservada aqui.
+#
+# As quatro se vigiam: o guardião cobra a PRESENÇA das outras três neste
+# arquivo, e ele mesmo roda também no `pretest`, então tirá-lo daqui reprova de
+# dentro do `npm test`. Nenhuma delas depende de a suíte ter rodado.
 #
 # NÃO USA SEGREDO NENHUM, e não pode passar a usar: o servidor não tem
 # dependência privada, e as suítes sobem tudo em portas locais.
@@ -102,6 +122,22 @@ jobs:
           printf '%s' "$codigo" > "$EVIDENCIA/exit.txt"
           cat "$EVIDENCIA/npm-test.txt"
 
+      # [OS 54-C4] O GUARDIÃO DO RASTRO. Roda aqui E no `pretest`, e é ele que
+      # responde se o run publica rastro legível — do que foi julgado, e não de
+      # outra coisa. Guarda que morava dentro da suíte protegida some junto com
+      # ela; esta não mora. É também quem percebe se a autoridade do artefato
+      # produtivo sair desta lista de passos.
+      - name: Guardião da auditabilidade
+        run: node ci/auditabilidade.js
+
+      # [OS 54-C4] A AUTORIDADE DE QUANTIDADE. Executa as suítes obrigatórias
+      # pelo stream de eventos do `node:test` e conta por ARQUIVO DE ORIGEM —
+      # caso apagado não emite evento, caso comentado não emite evento, e caso
+      # movido para um arquivo-isca aparece com outra origem. É ela que cobra os
+      # casos NOMINAIS, inclusive os da autoridade do artefato.
+      - name: Inventário por execução
+        run: node ci/inventario_de_execucao.js
+
       # O VEREDITO. Sem `if:`, sem tolerância a erro: se este passo não rodar,
       # o job não fica verde por conta própria — e se rodar, é ele quem decide.
       - name: Portão fail-closed
@@ -134,5 +170,5 @@ jobs:
         with:
           name: evidencia-provas-do-servidor
           path: ${{ env.EVIDENCIA }}/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30

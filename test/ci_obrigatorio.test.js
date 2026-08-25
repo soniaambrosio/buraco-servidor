@@ -44,6 +44,8 @@ const path = require("node:path");
 
 const { conferirCenso } = require("./censo_de_suites.js");
 const PORTAO = require("../ci/portao_do_ci.js");
+const GUARDIAO = require("../ci/auditabilidade.js");
+const { forjar, TRECHOS, trechoDoPasso } = require("./arvore_forjada.js");
 
 const RAIZ = path.join(__dirname, "..");
 const CAMINHO_DO_WORKFLOW = path.join(RAIZ, ".github", "workflows", "provas-do-servidor.yml");
@@ -63,7 +65,15 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *    `750a012` → 682 casos / 75 suítes  (a OS 54 acrescentou a suíte do CI)
  *    `4577048` → 734 casos / 80 suítes  (OS 52-C2, unicidade por capacidade)
  *    `99d2eb6` → 786 casos / 83 suítes  (OS 52-C3, capacidade composta)
- *    OS 52-C4 → 814 casos / 87 suítes  (autoridade do artefato produtivo)
+ *    `9795df7` → 814 casos / 87 suítes  (OS 52-C4, autoridade do artefato)
+ *    OS 54-C4 → 883 casos / 87 suítes  (a auditabilidade externa PORTADA
+ *                                       sobre a autoridade do artefato único)
+ *
+ *  [OS 54-C4] 883 NÃO É 848. A folha da OS 54-C3 mediu 848 casos sobre
+ *  `99d2eb6`, uma árvore que não tinha a suíte do artefato produtivo; esta
+ *  nasce de `9795df7` e a auditabilidade foi RECOMPOSTA, com casos que não
+ *  existiam em folha nenhuma (CI-20d, AUD-18..20, INV-15). Piso herdado de uma
+ *  das metades deixaria a outra encolher sem reprovar.
  *
  *  Escrito aqui, FORA do arquivo de piso e FORA do portão, de propósito: se o
  *  único lugar que conhecesse os números fosse `ci/piso_do_portao.json`, baixá-
@@ -73,8 +83,8 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  encolhimento coordenado, e com ela foi-se o piso do piso — autoridade que
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
- *  continuam aqui como a segunda leitura, e CI-19 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 814;
+ *  continuam aqui como a segunda leitura, e CI-23 os mantém em dia. */
+const CASOS_MEDIDOS_NA_BASE = 883;
 const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
@@ -305,128 +315,190 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
 });
 
 // ===========================================================================
-// [OS 54-C1] A AUDITABILIDADE DO VEREDITO.
+// [OS 54-C4] AS GUARDAS DO RASTRO PASSARAM A DELEGAR.
 //
-// O portão da OS 54 responde "passou ou não passou". Isso basta para barrar, e
-// não basta para AUDITAR: um vermelho sem rastro legível obriga quem revisa a
-// reproduzir a corrida para saber o que aconteceu — e reproduzir é exatamente
-// o que o CI existe para dispensar.
+// Na OS 54-C1 estes casos LIAM o workflow e afirmavam coisas sobre ele. A OS
+// 54-R2 mostrou o preço: cada um podia ser trivializado ou apagado sozinho, com
+// o portão oficial verde, e o bloco inteiro podia sumir desde que os nomes
+// ficassem num comentário — porque o piso por arquivo contava `test(` no fonte.
 //
-// Os dois passos que deixam rastro são o RESUMO (escreve no painel do run:
-// suítes, casos, falhas, cancelados, duração, desfecho) e o ARTEFATO (guarda a
-// saída literal e o marcador de saída). Os dois são `if: always()` de
-// propósito: eles importam MAIS quando o job falha, e um `if` comum os
-// desligaria justamente no caso em que alguém vai olhar.
+// A autoridade agora é `ci/auditabilidade.js`, que roda em dois lugares que
+// nenhuma edição em `test/*.test.js` alcança: o `pretest` de todo `npm test` e
+// um passo próprio do CI. O que sobrou aqui não é uma segunda leitura do YAML —
+// é a PROVA de que aquela autoridade reprova o que deve reprovar, exercitada
+// contra árvores forjadas, uma sabotagem por subcaso.
 //
-// A SABOTAGEM QUE ESTA GUARDA FECHA não é apagar o portão — a OS 54 já pega
-// isso. É apagar o RASTRO e manter o portão: o job continua vermelho quando
-// deve, ninguém consegue dizer por quê, e a próxima pessoa desliga o gate por
-// incômodo. Auditabilidade removida em silêncio é como um portão morre de morte
-// natural.
+// E os subcasos são a resposta à trivialização: esvaziar `CI-18` deixa de ser
+// uma edição neutra e passa a APAGAR seis casos executados, que é exatamente o
+// que `ci/inventario_de_execucao.js` mede por arquivo de origem e o que o piso
+// global do juiz vê. Guarda sem substância mensurável não tem como ser
+// defendida; esta tem.
 //
-// O ARTEFATO TEM DE APONTAR PARA A EVIDÊNCIA JULGADA, e isso é verificado por
-// COMPARAÇÃO, não por literal: o caminho do upload é normalizado e conferido
-// contra os dois arquivos que o passo do veredito lê. Artefato apontando para
-// outro lugar arquiva diretório vazio e parece cuidado.
+// CI-20 COBRE AS DUAS FAMÍLIAS. Esta árvore compõe a auditabilidade externa com
+// a AUTORIDADE DO ARTEFATO PRODUTIVO ÚNICO da OS 52-C4, e as duas são passos
+// próprios do MESMO workflow. Um caso que cobrisse só metade da cadeia deixaria
+// a outra metade sair do CI em silêncio — que é precisamente o risco que uma
+// composição cria e que nenhuma das campanhas de origem enxerga.
 // ===========================================================================
 
-/** `${{ env.X }}` e `$X` são a mesma variável escrita nas duas gramáticas que
- *  convivem no YAML do Actions. Para comparar caminhos é preciso falar uma só. */
-function normalizarCaminho(bruto) {
-  return String(bruto)
-    .trim()
-    .replace(/\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, "$$$1")
-    .replace(/^["']|["']$/g, "")
-    .replace(/\/+$/, "");
+/** Roda a autoridade contra uma árvore forjada com UMA sabotagem. */
+function guardiaoSobre(edicoes) {
+  return GUARDIAO.conferirAuditabilidade({ raiz: forjar(edicoes) });
 }
 
-test("CI/AUDITABILIDADE — o veredito deixa rastro, e o rastro não some em silêncio", async (t) => {
-  const texto = lerWorkflow();
-  const passos = passosDo(texto);
+function exigeReprovacao(reprovacoes, padrao, oQue) {
+  assert.ok(
+    reprovacoes.some((m) => padrao.test(m)),
+    oQue + " — a autoridade devolveu: " + JSON.stringify(reprovacoes)
+  );
+}
 
-  await t.test("CI-18: o ARTEFATO existe, é sempre enviado e aponta para a evidência julgada", () => {
-    const upload = passos.filter((p) => /uses:\s*actions\/upload-artifact@v[0-9]+/.test(p.corpo));
-    assert.equal(
-      upload.length, 1,
-      "o passo de upload do artefato tem de existir exatamente uma vez (encontrados: " + upload.length +
-        ") — sem ele, a saída da corrida morre com o runner"
-    );
-    const corpo = upload[0].corpo;
+const CAMINHO_YML = ".github/workflows/provas-do-servidor.yml";
 
-    assert.match(
-      corpo,
-      /^\s+if:\s*always\(\)\s*$/m,
-      "o artefato deixou de ser `if: always()` — condição comum o desliga justamente quando o job falha, " +
-        "que é quando o rastro importa"
-    );
-    assert.match(corpo, /^\s+name:\s*\S/m, "o artefato não tem nome — não dá para achar o que não se nomeia");
-
-    const mPath = /^\s+path:\s*(.+?)\s*$/m.exec(corpo);
-    assert.ok(mPath, "o artefato não declara `path:` — não arquiva coisa nenhuma");
-
-    // A COMPARAÇÃO, e não um literal: o caminho arquivado tem de CONTER os dois
-    // arquivos que o veredito de fato lê.
-    const arquivado = normalizarCaminho(mPath[1]);
-    const veredito = passos.find(
-      (p) => /node\s+ci\/portao_do_ci\.js/.test(p.corpo) && !/--resumo/.test(p.corpo)
-    );
-    assert.ok(veredito, "não há passo de veredito — CI-06 explica por que isso já é fatal");
-    const lidos = (veredito.corpo.match(/"\$EVIDENCIA\/[A-Za-z0-9._-]+"/g) || []).map(normalizarCaminho);
-    assert.equal(lidos.length, 2, "o veredito deixou de ler os dois arquivos de evidência: " + JSON.stringify(lidos));
-    for (const lido of lidos) {
-      assert.ok(
-        lido.startsWith(arquivado + "/"),
-        "o artefato arquiva `" + arquivado + "`, que não contém `" + lido + "` — o que é guardado não é o " +
-          "que foi julgado, e diretório inexistente arquiva vazio parecendo cuidado"
+test("CI/AUDITABILIDADE — o rastro é exigido por autoridade que não mora aqui", async (t) => {
+  await t.test("CI-18: o ARTEFATO existe, é sempre enviado, é nomeado e guarda o que foi julgado", async (t18) => {
+    await t18.test("CI-18a: a árvore íntegra passa (trava anti-vácuo)", () => {
+      assert.deepEqual(guardiaoSobre([]), []);
+    });
+    await t18.test("CI-18b: upload removido reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.uploadInteiro, ""]]),
+        /ARTEFATO: o passo de upload/,
+        "sem upload a saída da corrida morre com o runner"
       );
-    }
+    });
+    await t18.test("CI-18c: upload condicionado a sucesso reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.uploadCabecalho, "      - name: Evidência arquivada\n        if: success()"]]),
+        /ARTEFATO SEM/,
+        "condição comum desliga o upload no run que interessa"
+      );
+    });
+    await t18.test("CI-18d: upload sem nome reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.uploadNome, ""]]),
+        /ARTEFATO SEM NOME/,
+        "artefato anônimo não é achável"
+      );
+    });
+    await t18.test("CI-18e: artefato que pode subir VAZIO reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.uploadVazio, "          if-no-files-found: warn"]]),
+        /ARTEFATO PODE SUBIR VAZIO/,
+        "upload sem arquivo e verde publica ausência com cara de rastro"
+      );
+    });
+    await t18.test("CI-18f: artefato apontando para outro caminho reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.uploadCaminho, "          path: /tmp/outro-lugar/"]]),
+        /ARTEFATO FORA DO ALVO/,
+        "o que é guardado deixou de ser o que foi julgado"
+      );
+    });
   });
 
-  await t.test("CI-19: o RESUMO existe, é sempre escrito e vai para o painel do run", () => {
-    const resumo = passos.filter((p) => /--resumo/.test(p.corpo));
-    assert.equal(
-      resumo.length, 1,
-      "o passo de resumo tem de existir exatamente uma vez (encontrados: " + resumo.length + ")"
-    );
-    const corpo = resumo[0].corpo;
-
-    assert.match(
-      corpo,
-      /^\s+if:\s*always\(\)\s*$/m,
-      "o resumo deixou de ser `if: always()` — executado só em sucesso, ele descreve exatamente os runs " +
-        "que ninguém precisa ler"
-    );
-    assert.match(
-      corpo,
-      /node\s+ci\/portao_do_ci\.js\s+--resumo/,
-      "o resumo deixou de ser produzido pelo juiz — texto escrito à mão descreve o que alguém quis dizer, " +
-        "não o que a corrida fez"
-    );
-    assert.match(
-      corpo,
-      />>\s*"\$GITHUB_STEP_SUMMARY"/,
-      "o resumo não é ESCRITO no painel do run — calculado e jogado fora não é auditabilidade"
-    );
-    assert.ok(
-      !/[^>]>\s*"\$GITHUB_STEP_SUMMARY"/.test(corpo),
-      "o resumo TRUNCA o painel (`>`) em vez de anexar (`>>`) — apagaria o que outros passos escreveram"
-    );
-    assert.match(
-      corpo,
-      /"\$EVIDENCIA\/npm-test\.txt"\s+"\$EVIDENCIA\/exit\.txt"/,
-      "o resumo lê outra evidência que não a julgada — dois relatos da mesma corrida são um relato a mais do que existe"
-    );
+  await t.test("CI-19: o RESUMO existe, é sempre escrito, vem do juiz e vai para o painel", async (t19) => {
+    await t19.test("CI-19a: resumo removido reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, trechoDoPasso("--resumo"), ""]]),
+        /RESUMO: o passo tem de existir/,
+        "o painel deixaria de existir"
+      );
+    });
+    await t19.test("CI-19c: resumo condicionado a sucesso reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([
+          [CAMINHO_YML, TRECHOS.resumoCabecalho, "      - name: Resumo (verde, vermelho, cancelado ou não executado)\n        if: success()"],
+        ]),
+        /RESUMO SEM/,
+        "resumo só em sucesso descreve os runs que ninguém precisa ler"
+      );
+    });
+    await t19.test("CI-19d: resumo por eco estático reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.resumoChamada, 'echo "--resumo tudo certo"']]),
+        /RESUMO NÃO VEM DO JUIZ/,
+        "texto à mão descreve intenção, não a corrida"
+      );
+    });
+    await t19.test("CI-19e: resumo que não é escrito no painel reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.resumoRedirecionamento, ""]]),
+        /RESUMO NÃO É ESCRITO NO PAINEL/,
+        "calculado e jogado fora não é auditabilidade"
+      );
+    });
+    await t19.test("CI-19f: resumo que TRUNCA o painel reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.resumoRedirecionamento, '> "$GITHUB_STEP_SUMMARY"']]),
+        /RESUMO TRUNCA O PAINEL/,
+        "truncar apaga o que outros passos escreveram"
+      );
+    });
   });
 
-  await t.test("CI-19b: o resumo do juiz nomeia os números que o painel precisa mostrar", () => {
-    // Prova EXECUTÁVEL, no molde de CI-14: o texto é gerado de verdade e
-    // conferido. Sem isto, esvaziar `resumo()` deixaria CI-19 verde — o passo
-    // continuaria lá, escrevendo nada no painel.
-    const texto = PORTAO.resumo(PORTAO.conferir(raizForjada({})), "success");
-    for (const termo of ["suítes", "casos aprovados", "falhas", "cancelados", "duração", "desfecho"]) {
-      assert.ok(texto.includes(termo), "o resumo deixou de nomear `" + termo + "`");
-    }
-    assert.ok(texto.trim().length > 200, "o resumo encolheu para um corpo trivial: " + texto.length + " bytes");
+  await t.test("CI-19b: o gerador do resumo produz conteúdo, e isso é medido rodando", async (t19b) => {
+    await t19b.test("CI-19b1: o gerador real nomeia o que o painel precisa mostrar", () => {
+      const texto = PORTAO.resumo(PORTAO.conferir(raizForjada({})), "success");
+      for (const termo of GUARDIAO.TERMOS_DO_RESUMO) {
+        assert.ok(texto.includes(termo), "o resumo deixou de nomear " + termo);
+      }
+      assert.ok(
+        texto.trim().length >= GUARDIAO.TAMANHO_MINIMO_DO_RESUMO,
+        "o resumo encolheu para " + texto.trim().length + " bytes"
+      );
+    });
+    await t19b.test("CI-19b2: gerador esvaziado reprova com o passo intacto", () => {
+      // A sabotagem mais silenciosa da família: o YAML continua perfeito, o
+      // passo roda, e o painel sai em branco.
+      exigeReprovacao(
+        guardiaoSobre([
+          ["ci/portao_do_ci.js", "function resumo(veredito, desfecho) {", 'function resumo(veredito, desfecho) {\n  if (true) return "";'],
+        ]),
+        /GERADOR DE RESUMO ESVAZIADO|RESUMO NÃO NOMEIA/,
+        "o passo continuaria verde publicando nada"
+      );
+    });
+  });
+
+  await t.test("CI-20: a CADEIA EXTERNA é invocada pelo workflow, e sem condição", async (t20) => {
+    await t20.test("CI-20a: invocação do guardião removida reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.invocacaoGuardiao, ""]]),
+        /INVOCAÇÃO AUSENTE/,
+        "a autoridade sairia da cadeia oficial em silêncio"
+      );
+    });
+    await t20.test("CI-20b: invocação do inventário removida reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.invocacaoInventario, ""]]),
+        /INVOCAÇÃO AUSENTE/,
+        "a autoridade de quantidade sairia da cadeia oficial"
+      );
+    });
+    await t20.test("CI-20c: invocação condicionada reprova", () => {
+      exigeReprovacao(
+        guardiaoSobre([
+          [CAMINHO_YML, "      - name: Guardião da auditabilidade\n        run:", "      - name: Guardião da auditabilidade\n        if: false\n        run:"],
+        ]),
+        /INVOCAÇÃO CONDICIONADA/,
+        "condicionar é desligar sem apagar"
+      );
+    });
+    await t20.test("CI-20d: invocação da AUTORIDADE DO ARTEFATO removida reprova", () => {
+      // [OS 54-C4] A metade que a folha de origem não conhecia. O passo do
+      // artefato produtivo é da OS 52-C4, e nesta composição ele passou a estar
+      // sob a MESMA exigência dos outros três — presente, incondicional e
+      // intolerante a erro.
+      exigeReprovacao(
+        guardiaoSobre([[CAMINHO_YML, TRECHOS.invocacaoArtefato, ""]]),
+        /INVOCAÇÃO AUSENTE.*artefato produtivo/,
+        "a autoridade que decide o que pode ser implantado sairia do CI em silêncio"
+      );
+    });
+    await t20.test("CI-20e: e a autoridade aprova a árvore REAL", () => {
+      assert.deepEqual(GUARDIAO.conferirAuditabilidade({}), []);
+    });
   });
 });
 
@@ -506,7 +578,7 @@ function raizForjada(opcoes) {
   // passou a cobrá-la. Sem isto, todo caso deste arquivo reprovaria por um
   // motivo que não é o dele — e vermelho pelo motivo errado esconde o que
   // estava sendo medido. Quem quiser exercitar a AUSÊNCIA da autoridade passa
-  // `semAutoridadeDoPiso: true`, e CI-18 faz exatamente isso.
+  // `semAutoridadeDoPiso: true`, e CI-22 faz exatamente isso.
   if (!o.semAutoridadeDoPiso) {
     fs.mkdirSync(path.join(dir, "test"), { recursive: true });
     for (const nome of Object.keys(PORTAO.AUTORIDADE_DO_PISO)) {
@@ -667,7 +739,7 @@ test("CI/CADEIA — as duas metades continuam presas uma na outra", async (t) =>
 });
 
 // ===========================================================================
-// [OS 52-C3] CI/PISO — A AUTORIDADE QUE O ENCOLHIMENTO COORDENADO NÃO ALCANÇA.
+// [OS 52-C3] CI/AUTORIDADE DO PISO — O QUE O ENCOLHIMENTO COORDENADO NÃO ALCANÇA.
 //
 // A OS 52-R2 apagou uma suíte, tirou a entrada dela do censo e do alcance,
 // baixou um limiar e realinhou `ci/piso_do_portao.json` — e o pipeline ficou
@@ -677,9 +749,23 @@ test("CI/CADEIA — as duas metades continuam presas uma na outra", async (t) =>
 // A saída foi ancorar o piso no COMMIT ANTERIOR, que nenhuma edição na árvore
 // de trabalho alcança, e amarrar a chamada em três lugares — dois dentro do
 // `npm test` e um no juiz, que roda num passo separado do workflow.
+//
+// [OS 54-C4] OS TRÊS CASOS FORAM RENUMERADOS — CI-17/18/19 viraram
+// CI-21/22/23 —, e isso não é asseio: nesta árvore composta a auditabilidade
+// externa trouxe CI-18 (o artefato), CI-19 (o resumo) e CI-19b (o conteúdo do
+// resumo), e os três são COBRADOS PELO NOME por `ci/pisos_autorizados.js`.
+// Com os nomes duplicados no MESMO arquivo, apagar o CI-18 da auditabilidade
+// seria coberto pelo CI-18 do piso, e a exigência nominal aprovaria uma suíte
+// da qual a metade auditável tinha sumido. E o `CI-17` de cima — contexto de
+// passo usado fora dos passos — já existia desde a OS 54: a colisão era com
+// ele também.
+//
+// Os três renumerados entraram na lista de NOMES OBRIGATÓRIOS junto com os da
+// auditabilidade, então a renumeração não afrouxou nada: eles passaram a ser
+// exigidos por execução e por origem, o que antes não eram.
 // ===========================================================================
-test("CI/PISO — a autoridade do piso está fora do conjunto editável", async (t) => {
-  await t.test("CI-17: o piso ancorado existe, é chamável e compara commits de verdade", () => {
+test("CI/AUTORIDADE DO PISO — a autoridade do piso está fora do conjunto editável", async (t) => {
+  await t.test("CI-21: o piso ancorado existe, é chamável e compara commits de verdade", () => {
     const piso = require("./piso_ancorado.js");
     assert.equal(typeof piso.conferirPisoAncorado, "function",
       "a comparação com o commit anterior sumiu ou deixou de ser exportada");
@@ -694,7 +780,7 @@ test("CI/PISO — a autoridade do piso está fora do conjunto editável", async 
     );
   });
 
-  await t.test("CI-18: o juiz do CI cobra a autoridade do piso, e é exercitado nisso", () => {
+  await t.test("CI-22: o juiz do CI cobra a autoridade do piso, e é exercitado nisso", () => {
     // Descrever não basta: o juiz é RODADO contra uma árvore forjada à qual
     // falta o arquivo da autoridade, e o que se exige é reprovação com nome.
     assert.ok(
@@ -727,7 +813,7 @@ test("CI/PISO — a autoridade do piso está fora do conjunto editável", async 
     }
   });
 
-  await t.test("CI-19: o piso do piso desta suíte acompanha o piso declarado", () => {
+  await t.test("CI-23: o piso do piso desta suíte acompanha o piso declarado", () => {
     // `CASOS_MEDIDOS_NA_BASE` continua aqui, e continua servindo — só deixou de
     // ser a ÚNICA defesa. O que este caso impede é a divergência silenciosa:
     // subir o piso do arquivo e esquecer este número deixaria a metade de
