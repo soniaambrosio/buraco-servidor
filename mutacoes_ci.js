@@ -283,6 +283,107 @@ const MUTACOES = [
     de: "    timeout-minutes: 20\n\n    steps:",
     para: "    timeout-minutes: 20\n\n    env:\n      EVIDENCIA: ${{ runner.temp }}/evidencia\n\n    steps:",
   },
+  // =========================================================================
+  // [OS 54-C1] AS SEIS DA AUDITABILIDADE.
+  //
+  // Nenhuma delas apaga o portão — o portão continua barrando. Elas apagam o
+  // RASTRO: sem artefato e sem resumo, um vermelho vira "falhou, vá reproduzir",
+  // e é assim que um gate morre de morte natural.
+  // =========================================================================
+  {
+    n: 30,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o UPLOAD do artefato é removido",
+    de: `      - name: Evidência arquivada
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-provas-do-servidor
+          path: \${{ env.EVIDENCIA }}/
+          if-no-files-found: warn
+          retention-days: 30
+`,
+    para: "",
+  },
+  {
+    n: 31,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o artefato troca `always()` por condição comum",
+    de: "      - name: Evidência arquivada\n        if: always()",
+    para: "      - name: Evidência arquivada\n        if: success()",
+  },
+  {
+    n: 32,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o artefato aponta para caminho DIFERENTE da evidência julgada",
+    de: "          path: \${{ env.EVIDENCIA }}/",
+    para: "          path: /tmp/outro-lugar/",
+  },
+  {
+    n: 33,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o RESUMO é removido",
+    de: `      - name: Resumo (verde, vermelho, cancelado ou não executado)
+        if: always()
+        run: |
+          node ci/portao_do_ci.js --resumo "\$EVIDENCIA/npm-test.txt" "\$EVIDENCIA/exit.txt" \\
+            --desfecho "\${{ job.status }}" >> "\$GITHUB_STEP_SUMMARY"
+
+`,
+    para: "",
+  },
+  {
+    n: 34,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o resumo deixa de ESCREVER no painel",
+    de: '            --desfecho "\${{ job.status }}" >> "\$GITHUB_STEP_SUMMARY"',
+    para: '            --desfecho "\${{ job.status }}"',
+  },
+  {
+    n: 35,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o resumo passa a rodar SÓ EM SUCESSO",
+    de: "      - name: Resumo (verde, vermelho, cancelado ou não executado)\n        if: always()",
+    para: "      - name: Resumo (verde, vermelho, cancelado ou não executado)\n        if: success()",
+  },
+  {
+    n: 36,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§3 o resumo TRUNCA o painel em vez de anexar",
+    de: '>> "\$GITHUB_STEP_SUMMARY"',
+    para: '> "\$GITHUB_STEP_SUMMARY"',
+  },
+  {
+    n: 37,
+    tipo: "troca",
+    arquivo: PORTAO,
+    nome: "§3 o resumo do juiz é ESVAZIADO (o passo fica, o painel fica vazio)",
+    de: "  const linhas = [];\n  linhas.push(\"## Provas do servidor — portão fail-closed\");",
+    para: "  const linhas = [];\n  if (true) return \"\";\n  linhas.push(\"## Provas do servidor — portão fail-closed\");",
+  },
+  {
+    n: 38,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§4 o Node é rebaixado abaixo do homologado",
+    de: "          node-version: '24'",
+    para: "          node-version: '20'",
+  },
+  {
+    n: 39,
+    tipo: "troca",
+    arquivo: WORKFLOW,
+    nome: "§4 o limite de tempo do job é rebaixado",
+    de: "    timeout-minutes: 20",
+    para: "    timeout-minutes: 5",
+  },
 ];
 
 // --- BATERIA DA EVIDÊNCIA ---------------------------------------------------

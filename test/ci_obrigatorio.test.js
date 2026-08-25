@@ -59,6 +59,11 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
 const CASOS_MEDIDOS_NA_BASE = 682;
 const SUITES_MEDIDAS_NA_BASE = 75;
 
+/** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
+ *  que alguém tem de verificar. Subir é livre; descer é vermelho. */
+const NODE_HOMOLOGADO = 24;
+const TIMEOUT_DECLARADO = 20;
+
 /** Recorta comentários de YAML e trava contra o próprio recorte. */
 function yamlSemComentarios(bruto) {
   const texto = bruto
@@ -216,10 +221,14 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     );
   });
 
-  await t.test("CI-09: o job tem limite de tempo", () => {
+  await t.test("CI-09: o job tem limite de tempo, e ele não desce", () => {
     const m = /^\s+timeout-minutes:\s*([0-9]+)\s*$/m.exec(texto);
     assert.ok(m, "o job não declara `timeout-minutes` — execução pendurada não é vermelha nem verde");
-    assert.ok(Number(m[1]) > 0, "`timeout-minutes` inválido: " + m[1]);
+    assert.ok(
+      Number(m[1]) >= TIMEOUT_DECLARADO,
+      "`timeout-minutes` caiu para " + m[1] + ", abaixo dos " + TIMEOUT_DECLARADO +
+        " homologados — limite curto demais mata a corrida antes do rodapé, e o que sobra é evidência truncada"
+    );
   });
 
   await t.test("CI-10: o checkout é íntegro", () => {
@@ -239,6 +248,11 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     assert.ok(
       Number(m[1]) >= exigida,
       "o CI roda Node " + m[1] + ", abaixo do `engines.node` do repositório (>=" + exigida + ")"
+    );
+    assert.ok(
+      Number(m[1]) >= NODE_HOMOLOGADO,
+      "o CI caiu para Node " + m[1] + ", abaixo do " + NODE_HOMOLOGADO + " homologado — a major que rodou " +
+        "as 682 provas é a que vale, e descer troca o ambiente medido por outro sem medir"
     );
   });
 
@@ -269,6 +283,132 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     // instalar de um jeito diferente do de todo mundo.
     assert.match(texto, /^\s*npm ci\s*$/m, "o caminho com lockfile deixou de usar `npm ci`");
     assert.match(texto, /^\s*npm install\s/m, "o caminho sem lockfile deixou de instalar dependências");
+  });
+});
+
+// ===========================================================================
+// [OS 54-C1] A AUDITABILIDADE DO VEREDITO.
+//
+// O portão da OS 54 responde "passou ou não passou". Isso basta para barrar, e
+// não basta para AUDITAR: um vermelho sem rastro legível obriga quem revisa a
+// reproduzir a corrida para saber o que aconteceu — e reproduzir é exatamente
+// o que o CI existe para dispensar.
+//
+// Os dois passos que deixam rastro são o RESUMO (escreve no painel do run:
+// suítes, casos, falhas, cancelados, duração, desfecho) e o ARTEFATO (guarda a
+// saída literal e o marcador de saída). Os dois são `if: always()` de
+// propósito: eles importam MAIS quando o job falha, e um `if` comum os
+// desligaria justamente no caso em que alguém vai olhar.
+//
+// A SABOTAGEM QUE ESTA GUARDA FECHA não é apagar o portão — a OS 54 já pega
+// isso. É apagar o RASTRO e manter o portão: o job continua vermelho quando
+// deve, ninguém consegue dizer por quê, e a próxima pessoa desliga o gate por
+// incômodo. Auditabilidade removida em silêncio é como um portão morre de morte
+// natural.
+//
+// O ARTEFATO TEM DE APONTAR PARA A EVIDÊNCIA JULGADA, e isso é verificado por
+// COMPARAÇÃO, não por literal: o caminho do upload é normalizado e conferido
+// contra os dois arquivos que o passo do veredito lê. Artefato apontando para
+// outro lugar arquiva diretório vazio e parece cuidado.
+// ===========================================================================
+
+/** `${{ env.X }}` e `$X` são a mesma variável escrita nas duas gramáticas que
+ *  convivem no YAML do Actions. Para comparar caminhos é preciso falar uma só. */
+function normalizarCaminho(bruto) {
+  return String(bruto)
+    .trim()
+    .replace(/\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, "$$$1")
+    .replace(/^["']|["']$/g, "")
+    .replace(/\/+$/, "");
+}
+
+test("CI/AUDITABILIDADE — o veredito deixa rastro, e o rastro não some em silêncio", async (t) => {
+  const texto = lerWorkflow();
+  const passos = passosDo(texto);
+
+  await t.test("CI-18: o ARTEFATO existe, é sempre enviado e aponta para a evidência julgada", () => {
+    const upload = passos.filter((p) => /uses:\s*actions\/upload-artifact@v[0-9]+/.test(p.corpo));
+    assert.equal(
+      upload.length, 1,
+      "o passo de upload do artefato tem de existir exatamente uma vez (encontrados: " + upload.length +
+        ") — sem ele, a saída da corrida morre com o runner"
+    );
+    const corpo = upload[0].corpo;
+
+    assert.match(
+      corpo,
+      /^\s+if:\s*always\(\)\s*$/m,
+      "o artefato deixou de ser `if: always()` — condição comum o desliga justamente quando o job falha, " +
+        "que é quando o rastro importa"
+    );
+    assert.match(corpo, /^\s+name:\s*\S/m, "o artefato não tem nome — não dá para achar o que não se nomeia");
+
+    const mPath = /^\s+path:\s*(.+?)\s*$/m.exec(corpo);
+    assert.ok(mPath, "o artefato não declara `path:` — não arquiva coisa nenhuma");
+
+    // A COMPARAÇÃO, e não um literal: o caminho arquivado tem de CONTER os dois
+    // arquivos que o veredito de fato lê.
+    const arquivado = normalizarCaminho(mPath[1]);
+    const veredito = passos.find(
+      (p) => /node\s+ci\/portao_do_ci\.js/.test(p.corpo) && !/--resumo/.test(p.corpo)
+    );
+    assert.ok(veredito, "não há passo de veredito — CI-06 explica por que isso já é fatal");
+    const lidos = (veredito.corpo.match(/"\$EVIDENCIA\/[A-Za-z0-9._-]+"/g) || []).map(normalizarCaminho);
+    assert.equal(lidos.length, 2, "o veredito deixou de ler os dois arquivos de evidência: " + JSON.stringify(lidos));
+    for (const lido of lidos) {
+      assert.ok(
+        lido.startsWith(arquivado + "/"),
+        "o artefato arquiva `" + arquivado + "`, que não contém `" + lido + "` — o que é guardado não é o " +
+          "que foi julgado, e diretório inexistente arquiva vazio parecendo cuidado"
+      );
+    }
+  });
+
+  await t.test("CI-19: o RESUMO existe, é sempre escrito e vai para o painel do run", () => {
+    const resumo = passos.filter((p) => /--resumo/.test(p.corpo));
+    assert.equal(
+      resumo.length, 1,
+      "o passo de resumo tem de existir exatamente uma vez (encontrados: " + resumo.length + ")"
+    );
+    const corpo = resumo[0].corpo;
+
+    assert.match(
+      corpo,
+      /^\s+if:\s*always\(\)\s*$/m,
+      "o resumo deixou de ser `if: always()` — executado só em sucesso, ele descreve exatamente os runs " +
+        "que ninguém precisa ler"
+    );
+    assert.match(
+      corpo,
+      /node\s+ci\/portao_do_ci\.js\s+--resumo/,
+      "o resumo deixou de ser produzido pelo juiz — texto escrito à mão descreve o que alguém quis dizer, " +
+        "não o que a corrida fez"
+    );
+    assert.match(
+      corpo,
+      />>\s*"\$GITHUB_STEP_SUMMARY"/,
+      "o resumo não é ESCRITO no painel do run — calculado e jogado fora não é auditabilidade"
+    );
+    assert.ok(
+      !/[^>]>\s*"\$GITHUB_STEP_SUMMARY"/.test(corpo),
+      "o resumo TRUNCA o painel (`>`) em vez de anexar (`>>`) — apagaria o que outros passos escreveram"
+    );
+    assert.match(
+      corpo,
+      /"\$EVIDENCIA\/npm-test\.txt"\s+"\$EVIDENCIA\/exit\.txt"/,
+      "o resumo lê outra evidência que não a julgada — dois relatos da mesma corrida são um relato a mais do que existe"
+    );
+  });
+
+  await t.test("CI-19b: o resumo do juiz nomeia os números que o painel precisa mostrar", () => {
+    // Prova EXECUTÁVEL, no molde de CI-14: o texto é gerado de verdade e
+    // conferido. Sem isto, esvaziar `resumo()` deixaria CI-19 verde — o passo
+    // continuaria lá, escrevendo nada no painel.
+    const texto = PORTAO.resumo(PORTAO.conferir(raizForjada({})), "success");
+    for (const termo of ["suítes", "casos aprovados", "falhas", "cancelados", "duração", "desfecho"]) {
+      assert.ok(texto.includes(termo), "o resumo deixou de nomear `" + termo + "`");
+    }
+    assert.ok(texto.trim().length > 200, "o resumo encolheu para um corpo trivial: " + texto.length + " bytes");
   });
 });
 

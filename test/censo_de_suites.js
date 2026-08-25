@@ -56,7 +56,7 @@ const OBRIGATORIAS = Object.freeze({
   "gate_vip.test.js": 58,
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
-  "ci_obrigatorio.test.js": 55,   // OS 54 — CI externo obrigatorio
+  "ci_obrigatorio.test.js": 70,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1 (auditabilidade)
 });
 
 /** Conta casos, INCLUINDO subtestes.
