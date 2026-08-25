@@ -186,6 +186,29 @@ function conferir(opcoes) {
     }
   }
 
+  // --- [OS 52-C4] a AUTORIDADE DO ARTEFATO existe e é CHAMADA --------------
+  //
+  // A propriedade que decide o que pode ser implantado deixou de ser "isto se
+  // parece com um servidor" e passou a ser "isto pertence ao conjunto
+  // declarado". O juiz não confere o conjunto — quem confere é
+  // `ci/artefato.js` —, mas confere que a autoridade EXISTE e que continua
+  // sendo CHAMADA de onde precisa.
+  //
+  // A distinção entre chamada e menção é feita por scanner léxico: nome dentro
+  // de string, em comentário, ou um `require` sem invocação NÃO satisfazem a
+  // amarração. Sem isso, comentar a linha da chamada seria a sabotagem mais
+  // barata do conjunto.
+  try {
+    const artefato = require("./artefato.js");
+    for (const m of artefato.conferirAmarracaoDoArtefato(raiz, lerArquivo)) reprovacoes.push(m);
+  } catch (e) {
+    reprovacoes.push(
+      "AUTORIDADE DO ARTEFATO ILEGÍVEL: `ci/artefato.js` não pôde ser carregado (" +
+      String((e && e.message) || e).split("\n")[0] + "). Sem ela não há conjunto " +
+      "produtivo a comparar, e ausência é REPROVAÇÃO."
+    );
+  }
+
   // --- a EXECUÇÃO deixou marca? --------------------------------------------
   const saida = lerArquivo(opcoes.arquivoSaida);
   if (saida === null) {

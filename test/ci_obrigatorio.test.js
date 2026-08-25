@@ -62,7 +62,8 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *    `913611a` → 646 casos / 75 suítes
  *    `750a012` → 682 casos / 75 suítes  (a OS 54 acrescentou a suíte do CI)
  *    `4577048` → 734 casos / 80 suítes  (OS 52-C2, unicidade por capacidade)
- *    OS 52-C3 → 786 casos / 83 suítes  (capacidade composta + piso ancorado)
+ *    `99d2eb6` → 786 casos / 83 suítes  (OS 52-C3, capacidade composta)
+ *    OS 52-C4 → 813 casos / 87 suítes  (autoridade do artefato produtivo)
  *
  *  Escrito aqui, FORA do arquivo de piso e FORA do portão, de propósito: se o
  *  único lugar que conhecesse os números fosse `ci/piso_do_portao.json`, baixá-
@@ -73,8 +74,8 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
  *  continuam aqui como a segunda leitura, e CI-19 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 786;
-const SUITES_MEDIDAS_NA_BASE = 83;
+const CASOS_MEDIDOS_NA_BASE = 813;
+const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
  *  que alguém tem de verificar. Subir é livre; descer é vermelho. */
@@ -509,6 +510,17 @@ function raizForjada(opcoes) {
   if (!o.semAutoridadeDoPiso) {
     fs.mkdirSync(path.join(dir, "test"), { recursive: true });
     for (const nome of Object.keys(PORTAO.AUTORIDADE_DO_PISO)) {
+      fs.copyFileSync(path.join(RAIZ, nome), path.join(dir, nome));
+    }
+  }
+  // [OS 52-C4] E a AUTORIDADE DO ARTEFATO, pelo mesmo motivo e com a mesma
+  // saída: o juiz passou a cobrá-la, e uma árvore forjada sem ela faria todo
+  // caso deste arquivo reprovar por algo que não é o que ele mede. Quem quiser
+  // exercitar a AUSÊNCIA passa `semAutoridadeDoArtefato: true`.
+  if (!o.semAutoridadeDoArtefato) {
+    const { AMARRACAO_DO_ARTEFATO } = require("../ci/artefato.js");
+    for (const nome of Object.keys(AMARRACAO_DO_ARTEFATO)) {
+      fs.mkdirSync(path.dirname(path.join(dir, nome)), { recursive: true });
       fs.copyFileSync(path.join(RAIZ, nome), path.join(dir, nome));
     }
   }

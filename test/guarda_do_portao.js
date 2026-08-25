@@ -31,8 +31,18 @@
 
 const { conferirProvaDaUnicidade, conferirGlobOficial } = require("./prova_da_unicidade.js");
 const { conferirPisoAncorado, conferirAmarracao } = require("./piso_ancorado.js");
+const { exigirArtefatoUnico } = require("../ci/artefato.js");
 
 try {
+  // [OS 52-C4] A AUTORIDADE VEM PRIMEIRO, E ANTES DO GLOB.
+  //
+  // As guardas abaixo continuam valendo como HEURÍSTICA: elas perguntam "isto
+  // se PARECE com um servidor?", e essa pergunta tem teto — colchetes,
+  // concatenação, base64 e `new Function` passam por baixo de qualquer
+  // expressão regular. A pergunta que DECIDE é outra: "isto PERTENCE ao que é
+  // implantado?". Uma duplicata cai aqui sem que ninguém precise entendê-la.
+  const artefato = exigirArtefatoUnico();
+
   const { estatistica } = conferirProvaDaUnicidade();
   const glob = conferirGlobOficial();
   // [OS 52-C3] O PISO, CONTRA O COMMIT ANTERIOR. Roda aqui também — e não só
@@ -41,7 +51,9 @@ try {
   const piso = conferirPisoAncorado();
   const amarracoes = conferirAmarracao();
   process.stdout.write(
-    "[guarda do portão] unicidade: " + estatistica.arquivos + " arquivos varridos · " +
+    "[guarda do portão] artefato: [" + artefato.produtivos.join(", ") + "] · " +
+    artefato.excluidos + " excluídos · " + artefato.ancoras + " âncora(s) · " +
+    "unicidade: " + estatistica.arquivos + " arquivos varridos · " +
     "glob oficial: " + glob.suites + " suítes alcançadas · " +
     "piso ancorado: " + piso.comparacoes + " comparações contra " +
     piso.ancoras.map((s) => s.slice(0, 7)).join(", ") +

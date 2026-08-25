@@ -107,6 +107,21 @@ jobs:
       - name: Portão fail-closed
         run: node ci/portao_do_ci.js "$EVIDENCIA/npm-test.txt" "$EVIDENCIA/exit.txt"
 
+      # [OS 52-C4] A AUTORIDADE DO ARTEFATO PRODUTIVO, num passo próprio.
+      #
+      # Roda DEPOIS do juiz, sem `if:` e sem `continue-on-error:`: se este passo
+      # não rodar, o job não fica verde por conta própria; se rodar, é ele quem
+      # diz se o que seria implantado é exatamente `server.js` e `package.json`.
+      #
+      # Passo PRÓPRIO, e não uma linha dentro do `npm test`, pelo mesmo motivo
+      # que o juiz é um passo próprio: quem estreita o glob desliga tudo o que
+      # vive dentro dele. Aqui a conferência não depende do que a suíte fez.
+      #
+      # Precisa do histórico, e o tem: o checkout é `fetch-depth: 0`, e o
+      # conjunto produtivo é comparado contra `HEAD`, `HEAD^` e a base medida.
+      - name: Artefato produtivo único
+        run: node ci/artefato.js --conferir --raiz .
+
       - name: Resumo (verde, vermelho, cancelado ou não executado)
         if: always()
         run: |

@@ -5,7 +5,8 @@
     "  913611a -> 646 casos / 75 suites   (18.7 s, exit 0)",
     "  750a012 -> 682 casos / 75 suites   (OS 54, a suite do CI obrigatorio)",
     "  4577048 -> 734 casos / 80 suites   (OS 52-C2, unicidade por capacidade)",
-    "  OS 52-C3 -> 786 casos / 83 suites  (capacidade COMPOSTA + piso ancorado)",
+    "  99d2eb6 -> 786 casos / 83 suites   (OS 52-C3, capacidade composta + piso ancorado)",
+    "  OS 52-C4 -> 813 casos / 87 suites  (AUTORIDADE do artefato produtivo unico)",
     "O piso e sempre o total REAL, sem margem criada pela propria correcao —",
     "margem seria espaco para perder caso sem reprovar.",
     "OS 52-C3 (2026-08-25): rebaixar qualquer um destes numeros e VERMELHO por",
@@ -15,10 +16,10 @@
     "alcanca. A OS 52-R2 mostrou por que a primeira sozinha nao bastava: o",
     "encolhimento coordenado apagou justamente a suite que a carregava."
   ],
-  "casos_minimos": 786,
-  "suites_minimas": 83,
+  "casos_minimos": 813,
+  "suites_minimas": 87,
   "medido_em": "2026-08-25",
-  "medido_na_arvore_desta_os": { "casos": 786, "suites": 83 },
-  "medido_sobre": "4577048536fd3a674fbd97559080138b837704db",
+  "medido_na_arvore_desta_os": { "casos": 813, "suites": 87 },
+  "medido_sobre": "99d2eb6c93c9e29132124d2392276a85201155d4",
   "alvo_oficial": "npm test"
 }

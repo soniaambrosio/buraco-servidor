@@ -294,6 +294,13 @@ const ALCANCE_OBRIGATORIO = Object.freeze({
     porque: "guarda o CI externo e o piso do portão",
     exige: "portao_do_ci",
   },
+  // [OS 52-C4] A suíte da AUTORIDADE do artefato. Ela precisa continuar ligada
+  // a `ci/artefato.js`: uma isca de corpos triviais no lugar dela satisfaria o
+  // piso por arquivo e deixaria o conjunto implantável sem quem o exercite.
+  "test/artefato_unico.test.js": {
+    porque: "exercita a autoridade do artefato produtivo",
+    exige: "artefato",
+  },
 });
 
 function conferirGlobOficial(raizDoRepo) {

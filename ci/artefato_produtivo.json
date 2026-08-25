@@ -1,0 +1,53 @@
+{
+  "_leia_antes_de_mexer": [
+    "ESTE ARQUIVO E A DECLARACAO DO ARTEFATO PRODUTIVO. Ele nao descreve o que",
+    "parece um servidor — descreve o que E IMPLANTADO. A diferenca e a OS 52-A2:",
+    "a unicidade por capacidade (OS 52-C1..C3) continua existindo como heuristica",
+    "util, e deixou de ser autoridade.",
+    "",
+    "A conferencia e IGUALDADE DE CONJUNTO, nunca contencao. Todo caminho",
+    "versionado precisa cair em `produtivos` ou casar com uma regra de",
+    "`exclusoes`; caminho novo que nao caia em nenhum dos dois REPROVA.",
+    "",
+    "Promover um caminho para `produtivos` nao adianta: `ci/artefato.js` ancora o",
+    "conjunto no COMMIT ANTERIOR e na base medida, e um commit e imutavel.",
+    "",
+    "Quem confere: `ci/artefato.js`, chamado do `pretest` (antes do glob), do",
+    "censo, do juiz externo e de um passo proprio do workflow."
+  ],
+
+  "produtivos": [
+    "server.js",
+    "package.json"
+  ],
+
+  "exclusoes": [
+    { "regra": "prefixo", "valor": "test/",     "porque": "provas e guardas; nao sobem no deploy" },
+    { "regra": "prefixo", "valor": "ci/",       "porque": "juiz, piso e esta declaracao; infraestrutura de portao" },
+    { "regra": "prefixo", "valor": "docs/",     "porque": "documentacao das ordens de servico" },
+    { "regra": "prefixo", "valor": "contrato/", "porque": "contratos de fio, lidos por prova e nao pelo servidor" },
+    { "regra": "prefixo", "valor": ".github/",  "porque": "workflow do CI externo" },
+    { "regra": "caminho", "valor": "app.html",  "porque": "cliente, servido estaticamente e nao executado pelo Node" },
+    { "regra": "caminho", "valor": ".gitignore","porque": "configuracao do versionamento" },
+    { "regra": "glob",    "valor": "mutacoes_*.js", "porque": "campanhas negativas; rodam a mao, nunca no deploy" }
+  ],
+
+  "start_exato": "node server.js",
+
+  "base_medida": "99d2eb6c93c9e29132124d2392276a85201155d4",
+
+  "artefato_final": [
+    "server.js",
+    "package.json"
+  ],
+
+  "proibido_no_artefato": {
+    "compactados": "por MAGIC BYTES, nao por extensao: ZIP, TAR, GZIP, XZ, BZIP2, 7Z, RAR, ZSTD",
+    "extensoes_na_raiz": [".txt", ".html", ".htm", ".mjs", ".cjs"],
+    "sem_extensao_na_raiz": true,
+    "segundo_manifesto": "qualquer `package.json` fora da raiz",
+    "elo_simbolico": "modo 120000 na arvore do git",
+    "submodulo": "modo 160000 na arvore do git",
+    "subdiretorio_nao_declarado": true
+  }
+}

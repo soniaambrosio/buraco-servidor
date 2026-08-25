@@ -61,6 +61,9 @@ const OBRIGATORIAS = Object.freeze({
   "controlador_assento.test.js": 27,
   "gate_vip.test.js": 64,
   "unicidade_do_portador.test.js": 48,   // OS 52-C3 — capacidade composta da árvore
+  // [OS 52-C4] A AUTORIDADE. As de cima passaram a ser heuristica; esta cobra a
+  // propriedade que decide o que pode ser implantado.
+  "artefato_unico.test.js": 51,           // OS 52-C4 — artefato produtivo unico
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
   "ci_obrigatorio.test.js": 83,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3
@@ -149,6 +152,17 @@ function conferirCenso(dir) {
   if (ehArvoreReal) {
     conferirPisoAncorado(path.join(raiz, ".."));
     conferirAmarracao(path.join(raiz, ".."));
+
+    // [OS 52-C4] E O ARTEFATO PRODUTIVO CONTINUA SENDO EXATAMENTE DOIS
+    // CAMINHOS.
+    //
+    // Esta é a AUTORIDADE; tudo o que veio antes passou a ser heurística. A
+    // ordem no arquivo não é ordem de importância: quem decide o que pode ser
+    // implantado é o conjunto declarado, conferido por IGUALDADE contra a
+    // árvore do commit e ancorado no histórico. A mesma ressalva da árvore real
+    // vale aqui, e pelo mesmo motivo.
+    const { exigirArtefatoUnico } = require("../ci/artefato.js");
+    exigirArtefatoUnico(path.join(raiz, ".."));
   }
 }
 
