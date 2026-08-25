@@ -29,7 +29,9 @@
     { "regra": "prefixo", "valor": ".github/",  "porque": "workflow do CI externo" },
     { "regra": "caminho", "valor": "app.html",  "porque": "cliente, servido estaticamente e nao executado pelo Node" },
     { "regra": "caminho", "valor": ".gitignore","porque": "configuracao do versionamento" },
-    { "regra": "glob",    "valor": "mutacoes_*.js", "porque": "campanhas negativas; rodam a mao, nunca no deploy" }
+    { "regra": "glob",    "valor": "mutacoes_*.js", "porque": "campanhas negativas; rodam a mao, nunca no deploy" },
+    { "regra": "gerado",  "valor": "package-lock.json",
+      "porque": "escrito por `npm install` no passo canonico de dependencias do workflow; nasce NAO RASTREADO, nunca e commitado e nunca e implantado. A regra `gerado` so vale enquanto o caminho estiver FORA do commit: se um dia for versionado, o npm passa a le-lo no deploy, ele vira parte do que sobe, e tem de ser DECLARADO produtivo — nao isentado por uma regra escrita para o caso em que ele nao existe." }
   ],
 
   "start_exato": "node server.js",

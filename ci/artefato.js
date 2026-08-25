@@ -207,25 +207,45 @@ function casaGlob(padrao, caminho) {
   return re.test(caminho);
 }
 
-/** Devolve a regra que exclui o caminho, ou `null`. */
-function regraQueExclui(exclusoes, caminho) {
+/** Devolve a regra que exclui o caminho, ou `null`.
+ *
+ *  `noCommit` é o conjunto de caminhos que o commit carrega, e existe por causa
+ *  da regra `gerado` — a única que depende do estado, e a única que precisa.
+ *
+ *  O QUE A REGRA `gerado` RESOLVE. O passo canônico de dependências do workflow
+ *  roda `npm install`, e o `npm` escreve `package-lock.json` mesmo num projeto
+ *  sem dependência nenhuma. O arquivo nasce NÃO RASTREADO, nunca é commitado e
+ *  nunca é implantado — mas aparece na árvore de trabalho, e uma classificação
+ *  que não o conhecesse reprovaria o CI íntegro. Foi exatamente o que aconteceu:
+ *  o run `32885163307` morreu no `pretest` por causa dele.
+ *
+ *  E O QUE ELA NÃO FAZ: se o caminho ESTIVER no commit, a regra não se aplica.
+ *  Um `package-lock.json` versionado é lido pelo `npm` no deploy, faz parte do
+ *  que sobe, e tem de ser DECLARADO — não isentado por uma regra escrita para o
+ *  caso em que ele não existe. Isenção que vale nos dois estados é isenção que
+ *  esconde justamente o estado que importa. */
+function regraQueExclui(exclusoes, caminho, noCommit) {
   for (const r of exclusoes) {
     if (r.regra === "prefixo" && caminho.startsWith(r.valor)) return r;
     if (r.regra === "caminho" && caminho === r.valor) return r;
     if (r.regra === "glob" && casaGlob(r.valor, caminho)) return r;
+    if (r.regra === "gerado" && caminho === r.valor) {
+      if (noCommit && noCommit.has(caminho)) continue;
+      return r;
+    }
   }
   return null;
 }
 
 /** A classificação de TODA a árvore. Devolve os três montes. */
-function classificar(manifesto, caminhos) {
+function classificar(manifesto, caminhos, noCommit) {
   const produtivosDeclarados = new Set(manifesto.produtivos);
   const produtivos = [];
   const excluidos = [];
   const semClasse = [];
   for (const item of caminhos) {
     if (produtivosDeclarados.has(item.caminho)) { produtivos.push(item); continue; }
-    if (regraQueExclui(manifesto.exclusoes, item.caminho)) { excluidos.push(item); continue; }
+    if (regraQueExclui(manifesto.exclusoes, item.caminho, noCommit)) { excluidos.push(item); continue; }
     semClasse.push(item);
   }
   return { produtivos, excluidos, semClasse };
@@ -538,7 +558,8 @@ function conferir(raizDoRepo) {
   }
 
   // --- classificação: IGUALDADE de conjunto, nunca contenção ---------------
-  const classificados = classificar(manifesto, caminhos);
+  const noCommit = new Set(doCommit.map((c) => c.caminho));
+  const classificados = classificar(manifesto, caminhos, noCommit);
   dados.produtivos = classificados.produtivos.map((c) => c.caminho).sort();
   dados.excluidos = classificados.excluidos.length;
 

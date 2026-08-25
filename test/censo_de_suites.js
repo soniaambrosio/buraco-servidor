@@ -63,7 +63,7 @@ const OBRIGATORIAS = Object.freeze({
   "unicidade_do_portador.test.js": 48,   // OS 52-C3 — capacidade composta da árvore
   // [OS 52-C4] A AUTORIDADE. As de cima passaram a ser heuristica; esta cobra a
   // propriedade que decide o que pode ser implantado.
-  "artefato_unico.test.js": 51,           // OS 52-C4 — artefato produtivo unico
+  "artefato_unico.test.js": 54,           // OS 52-C4 — artefato produtivo unico
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
   "ci_obrigatorio.test.js": 83,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3

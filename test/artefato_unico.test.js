@@ -393,6 +393,44 @@ test.describe("ART/ARTEFATO — o que `git archive` produz é o que sobe", () =>
     assert.ok(nomes.some((n) => n.nome === "server.js"));
   });
 
+  test("ART-28: a regra `gerado` vale FORA do commit, e só fora dele", () => {
+    // O run `32885163307` morreu no `pretest` por causa disto: o passo canônico
+    // de dependências roda `npm install`, o npm escreve `package-lock.json`
+    // mesmo sem dependência nenhuma, e o arquivo aparece NÃO RASTREADO na
+    // árvore. A classificação não o conhecia e reprovava o CI íntegro.
+    //
+    // As duas metades, e a segunda é a que impede a regra de virar isenção
+    // permanente: gerado e fora do commit, passa; versionado, tem de ser
+    // DECLARADO, porque aí o npm o lê no deploy e ele faz parte do que sobe.
+    const geradoNaArvore = repoForjado({
+      manifesto: {
+        exclusoes: MANIFESTO_PADRAO.exclusoes.concat([
+          { regra: "gerado", valor: "package-lock.json", porque: "escrito pelo npm" },
+        ]),
+      },
+      mutarIndice: (raiz) => {
+        // Escrito DEPOIS do `add -A`: fica no disco e fora do commit, que é
+        // exatamente o estado do CI.
+        fs.writeFileSync(path.join(raiz, "package-lock.json"), '{"lockfileVersion":3}\n');
+      },
+    });
+    assert.deepEqual(artefato.conferir(geradoNaArvore).reprovacoes, [],
+      "arquivo gerado e não rastreado reprovou — o CI íntegro ficaria vermelho");
+
+    const versionado = repoForjado({
+      manifesto: {
+        exclusoes: MANIFESTO_PADRAO.exclusoes.concat([
+          { regra: "gerado", valor: "package-lock.json", porque: "escrito pelo npm" },
+        ]),
+      },
+      mutar: (raiz, e) => e(raiz, "package-lock.json", '{"lockfileVersion":3}\n'),
+    });
+    const r = artefato.conferir(versionado).reprovacoes;
+    assert.ok(r.some((m) => /CAMINHO NÃO CLASSIFICADO/.test(m) && /package-lock/.test(m)),
+      "o mesmo caminho, VERSIONADO, foi isentado por uma regra escrita para o " +
+      "caso em que ele não existe: " + juntar(r));
+  });
+
   test("ART-27: o manifesto ausente ou ilegível é REPROVAÇÃO", () => {
     const semManifesto = artefato.conferir(repoForjado({ manifesto: null })).reprovacoes;
     assert.equal(semManifesto.length, 1, juntar(semManifesto));

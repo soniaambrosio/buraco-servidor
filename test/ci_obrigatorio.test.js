@@ -63,7 +63,7 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *    `750a012` → 682 casos / 75 suítes  (a OS 54 acrescentou a suíte do CI)
  *    `4577048` → 734 casos / 80 suítes  (OS 52-C2, unicidade por capacidade)
  *    `99d2eb6` → 786 casos / 83 suítes  (OS 52-C3, capacidade composta)
- *    OS 52-C4 → 813 casos / 87 suítes  (autoridade do artefato produtivo)
+ *    OS 52-C4 → 814 casos / 87 suítes  (autoridade do artefato produtivo)
  *
  *  Escrito aqui, FORA do arquivo de piso e FORA do portão, de propósito: se o
  *  único lugar que conhecesse os números fosse `ci/piso_do_portao.json`, baixá-
@@ -74,7 +74,7 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
  *  continuam aqui como a segunda leitura, e CI-19 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 813;
+const CASOS_MEDIDOS_NA_BASE = 814;
 const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
