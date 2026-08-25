@@ -50,14 +50,15 @@ const CAMINHO_DO_WORKFLOW = path.join(RAIZ, ".github", "workflows", "provas-do-s
 const CAMINHO_DO_PORTAO = path.join(RAIZ, "ci", "portao_do_ci.js");
 const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
 
-/** O PISO DO PISO. Medido nesta árvore — 646 casos vieram da base `913611a` e 36
- *  são desta OS — e escrito aqui, FORA do arquivo de piso
+/** O PISO DO PISO. Medido nesta árvore — 682 casos vieram da base `750a012` e os
+ *  demais da guarda de unicidade por capacidade da OS 52-C2 — e escrito aqui,
+ *  FORA do arquivo de piso
  *  e FORA do portão, de propósito: se o único lugar que conhece os números
  *  fosse o próprio `ci/piso_do_portao.json`, baixar os números seria uma edição
  *  silenciosa de uma linha, e "o número caiu" é exatamente o defeito que o piso
  *  existe para pegar. Subir é livre; descer é vermelho. */
-const CASOS_MEDIDOS_NA_BASE = 682;
-const SUITES_MEDIDAS_NA_BASE = 75;
+const CASOS_MEDIDOS_NA_BASE = 734;
+const SUITES_MEDIDAS_NA_BASE = 80;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
  *  que alguém tem de verificar. Subir é livre; descer é vermelho. */
@@ -252,7 +253,7 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     assert.ok(
       Number(m[1]) >= NODE_HOMOLOGADO,
       "o CI caiu para Node " + m[1] + ", abaixo do " + NODE_HOMOLOGADO + " homologado — a major que rodou " +
-        "as 682 provas é a que vale, e descer troca o ambiente medido por outro sem medir"
+        "as 734 provas é a que vale, e descer troca o ambiente medido por outro sem medir"
     );
   });
 
@@ -610,10 +611,18 @@ test("CI/CADEIA — as duas metades continuam presas uma na outra", async (t) =>
   await t.test("CI-16: o caminho obrigatório continua alcançando a unicidade da OS 52", () => {
     // O CI não substitui nem duplica a guarda de unicidade: ele obriga a rodar
     // o `npm test`, e é de dentro do `npm test` que `conferirCenso` alcança
-    // `conferirUnicidadeDoBundle`. Esta leitura confirma que o que a OS 54
+    // a prova da unicidade. Esta leitura confirma que o que a OS 54
     // acrescentou à árvore (workflow, portão, piso, esta suíte) não introduziu
-    // um segundo portador nem um pacote opaco na raiz.
-    const { conferirUnicidadeDoBundle } = require("./censo_de_suites.js");
-    conferirUnicidadeDoBundle(RAIZ);
+    // um segundo portador, nem um pacote opaco, em lugar nenhum.
+    //
+    // [OS 52-C2] O símbolo mudou: a guarda deixou de detectar por nome e trecho
+    // e passou a detectar por CAPACIDADE EXECUTÁVEL, varrendo a árvore inteira.
+    // Ela vive em `test/unicidade_do_portador.js`, e quem afirma que ela
+    // funciona é `test/prova_da_unicidade.js`. A leitura daqui continua sendo
+    // a mesma pergunta: o que a OS 54 trouxe é auditável?
+    const { conferirUnicidadeDoPortador } = require("./unicidade_do_portador.js");
+    const estatistica = conferirUnicidadeDoPortador(RAIZ);
+    assert.ok(estatistica.arquivos > 10, "a varredura não alcançou a árvore");
+    assert.equal(estatistica.portadorConferido, true);
   });
 });
