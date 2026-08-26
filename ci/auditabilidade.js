@@ -1,4 +1,4 @@
-// ci/auditabilidade.js — O GUARDIÃO EXTERNO DO RASTRO (OS 54-C4, §5).
+// ci/auditabilidade.js — O GUARDIÃO EXTERNO DO RASTRO (OS 54-C5, §1 e §2).
 //
 // ===========================================================================
 // O QUE A OS 54-R2 PROVOU, E POR QUE ESTE ARQUIVO EXISTE
@@ -25,57 +25,121 @@
 //     o `pretest` também.
 //
 // ===========================================================================
-// [OS 54-C4] O QUE MUDOU AO PORTAR PARA A ÁRVORE DO ARTEFATO ÚNICO
+// [OS 54-C4] O PORTE PARA A ÁRVORE DO ARTEFATO ÚNICO
 // ===========================================================================
 //
-// A base desta correção é a OS 52-C4, que trocou a autoridade da unicidade:
-// deixou de ser "isto se PARECE com um servidor" e passou a ser "isto PERTENCE
-// ao conjunto implantável declarado" — `ci/artefato.js`, chamado do `pretest`,
-// do censo, do juiz e de um PASSO PRÓPRIO do workflow.
+// A base é a OS 52-C4, que trocou a autoridade da unicidade: deixou de ser
+// "isto se PARECE com um servidor" e passou a ser "isto PERTENCE ao conjunto
+// implantável declarado" — `ci/artefato.js`, chamado do `pretest`, do censo, do
+// juiz e de um PASSO PRÓPRIO do workflow.
 //
-// As duas famílias passaram a dividir os mesmos quatro endereços: o workflow, o
-// `pretest`, o censo e o piso. Uma composição que só olhasse metade deixaria a
-// outra metade sair da cadeia oficial com uma linha comentada, e a campanha de
-// origem não veria — porque cada uma olha só o próprio lado. Por isso este
-// guardião passou a cobrar, no MESMO lugar e com a MESMA severidade:
+// As duas famílias dividem os mesmos endereços: o workflow, o `pretest`, o
+// censo e o piso. Por isso este guardião cobra, no MESMO lugar e com a MESMA
+// severidade, a invocação da autoridade do artefato e a chamada dela no
+// `pretest`. Autoridade que não é executada é decoração.
 //
-//   * a invocação da autoridade do artefato como passo do workflow, sem `if:`
-//     e sem `continue-on-error:` (`INVOCACOES_OBRIGATORIAS`);
-//   * a chamada de `exigirArtefatoUnico(...)` no programa do `pretest`
-//     (`CHAMADAS_DO_PRETEST`).
+// ===========================================================================
+// [OS 54-C5] O ESCAPE DA R4: ESTAR ESCRITO NÃO É SER EXECUTADO
+// ===========================================================================
 //
-// Não é duplicação de `ci/artefato.js`: ele decide O QUE é implantável, e este
-// arquivo decide se ele CONTINUA SENDO CHAMADO. Autoridade que não é executada
-// é decoração, e a única peça capaz de perceber a ausência de outra é uma que
-// rode por um caminho que a ausência não desliga.
+// Até a OS 54-C4 este arquivo respondia "o workflow chama o juiz?" com uma
+// expressão regular sobre o CORPO INTEIRO do passo. Presença de texto não é
+// execução, e a R4 mostrou o preço: bastava prefixar `echo`.
+//
+//     run: echo node ci/portao_do_ci.js "$EVIDENCIA/npm-test.txt" …
+//
+// O texto continuava lá, o comando não rodava, e o guardião aprovava. Medido
+// nesta árvore antes da correção: as QUATRO invocações obrigatórias caíam pelo
+// mesmo caminho. As campanhas não viram porque sabotavam por REMOÇÃO — e
+// remoção quebra a âncora, o que é detecção por acidente, não por autoridade.
+//
+// A pergunta passou a ser feita por `ci/invocacao_executavel.js`, que lê o
+// `run:` do PASSO CANÔNICO como o runner leria — bloco escalar, continuação de
+// linha, heredoc, comentário de shell, aspas, separadores e alcançabilidade — e
+// só aprova quando existe um comando ALCANÇÁVEL cuja CABEÇA é `node` e que
+// recebe o alvo como PALAVRA PRÓPRIA. Tudo o que ele não consegue classificar
+// como invocação executável é RECUSADO: a direção do erro é o vermelho.
 //
 // O QUE ELE NÃO É. Não substitui `ci/portao_do_ci.js`, que continua sendo o
 // juiz fail-closed da EVIDÊNCIA; aqui não se lê saída de teste nenhuma. Não é
 // manifesto paralelo: não lista suítes, não conta casos e não conhece pisos —
 // isso é do inventário. Não confere conjunto produtivo nenhum — isso é do
 // artefato. Ele responde uma pergunta só: **o run publica rastro legível, o
-// rastro é do que foi julgado, e as autoridades continuam sendo invocadas?**
+// rastro é do que foi julgado, e as autoridades continuam sendo EXECUTADAS?**
 
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 
+const EXECUTAVEL = require("./invocacao_executavel.js");
+
 const CAMINHO_RELATIVO_DO_WORKFLOW = path.join(".github", "workflows", "provas-do-servidor.yml");
 
-/** Os verificadores que o workflow tem de invocar por conta própria.
+/** Os verificadores que o workflow tem de EXECUTAR por conta própria.
+ *
  *  Estão aqui, e não no YAML, porque uma lista que vive só no arquivo vigiado
- *  se apaga junto com ele. */
+ *  se apaga junto com ele.
+ *
+ *  [OS 54-C5] Cada entrada declara o PASSO CANÔNICO onde a invocação tem de
+ *  viver. Ancorar no `name:` não é asseio: a ordem dos passos decide QUANDO um
+ *  comando roda, e mover a chamada do juiz para depois do upload — ou para
+ *  dentro de um passo `if: always()` — muda o significado sem mudar uma letra
+ *  do comando. A §2 manda recusar "ocorrência em passo diferente do passo
+ *  canônico", e é a âncora do nome que faz isso ser verificável.
+ *
+ *  `exige` são palavras que o comando TEM de receber; `proibe` são as que o
+ *  descaracterizam. O juiz proíbe `--resumo` porque quem imprime o painel é
+ *  outro passo, e um passo que só imprimisse não julgaria nada. */
 const INVOCACOES_OBRIGATORIAS = Object.freeze([
-  ["o juiz fail-closed da evidência", /node\s+ci\/portao_do_ci\.js\s+"\$EVIDENCIA/],
-  ["este guardião da auditabilidade", /node\s+ci\/auditabilidade\.js/],
-  ["o inventário por execução", /node\s+ci\/inventario_de_execucao\.js/],
-  // [OS 54-C4] A autoridade do ARTEFATO PRODUTIVO ÚNICO, da OS 52-C4. Ela é um
-  // passo próprio do workflow pelo mesmo motivo que o juiz é: quem estreita o
-  // glob desliga tudo o que vive dentro dele. Cobrada aqui, sumir do workflow
-  // deixa de ser uma edição silenciosa de uma linha.
-  ["a autoridade do artefato produtivo único", /node\s+ci\/artefato\.js\s+--conferir/],
+  Object.freeze({
+    oQue: "o juiz fail-closed da evidência",
+    passo: "Portão fail-closed",
+    binario: "node",
+    alvo: "ci/portao_do_ci.js",
+    exige: Object.freeze(["$EVIDENCIA/npm-test.txt", "$EVIDENCIA/exit.txt"]),
+    proibe: Object.freeze(["--resumo"]),
+  }),
+  Object.freeze({
+    oQue: "este guardião da auditabilidade",
+    passo: "Guardião da auditabilidade",
+    binario: "node",
+    alvo: "ci/auditabilidade.js",
+    exige: Object.freeze([]),
+    proibe: Object.freeze([]),
+  }),
+  Object.freeze({
+    oQue: "o inventário por execução",
+    passo: "Inventário por execução",
+    binario: "node",
+    alvo: "ci/inventario_de_execucao.js",
+    exige: Object.freeze([]),
+    proibe: Object.freeze([]),
+  }),
+  Object.freeze({
+    oQue: "a autoridade do artefato produtivo único",
+    passo: "Artefato produtivo único",
+    binario: "node",
+    alvo: "ci/artefato.js",
+    exige: Object.freeze(["--conferir"]),
+    proibe: Object.freeze([]),
+  }),
 ]);
+
+/** O passo do RESUMO segue a mesma regra dos quatro acima — ele também pode ser
+ *  neutralizado com `echo` —, e ainda carrega duas exigências próprias: rodar
+ *  com `always()` e ANEXAR ao painel. */
+const INVOCACAO_DO_RESUMO = Object.freeze({
+  oQue: "o gerador do resumo do painel",
+  passo: "Resumo (verde, vermelho, cancelado ou não executado)",
+  binario: "node",
+  alvo: "ci/portao_do_ci.js",
+  exige: Object.freeze(["--resumo", "$EVIDENCIA/npm-test.txt", "$EVIDENCIA/exit.txt"]),
+  proibe: Object.freeze([]),
+});
+
+const PASSO_DO_UPLOAD = "Evidência arquivada";
+const PAINEL = "$GITHUB_STEP_SUMMARY";
 
 /** Termos que o resumo TEM de nomear. Um painel que não diz quantos casos
  *  passaram não serve para auditar coisa nenhuma. */
@@ -87,7 +151,14 @@ const TAMANHO_MINIMO_DO_RESUMO = 200;
 
 /** Recorta comentários de YAML — comentar uma linha é a sabotagem mais barata
  *  que existe, e prova textual que não separa código de prosa mede a prosa.
- *  Com trava contra o próprio recorte. */
+ *  Com trava contra o próprio recorte.
+ *
+ *  [OS 54-C5] DEIXOU DE SER O CAMINHO PRINCIPAL. A leitura autoritativa é feita
+ *  sobre o YAML BRUTO por `ci/invocacao_executavel.js`, que distingue comentário
+ *  de YAML de comentário de SHELL — recortar os dois com a mesma régua comia o
+ *  `#` de dentro de um bloco `run:`. Isto fica exportado porque a suíte o
+ *  exercita e porque a trava contra o próprio recorte é uma lição que não se
+ *  joga fora. */
 function semComentarios(bruto) {
   const texto = bruto
     .split("\r\n").join("\n")
@@ -100,7 +171,8 @@ function semComentarios(bruto) {
   return texto;
 }
 
-/** Separa os passos do job. Um `if:` só importa no passo a que pertence. */
+/** Separa os passos do job pelo texto. Mantido para quem só precisa do corpo
+ *  bruto; quem precisa saber o que EXECUTA usa `passosDoWorkflow`. */
 function passosDo(texto) {
   const passos = [];
   let atual = null;
@@ -141,83 +213,85 @@ function conferirAuditabilidade(opcoes) {
     return reprovacoes;
   }
 
-  let texto;
+  let bruto;
   try {
-    texto = semComentarios(fs.readFileSync(caminho, "utf8"));
+    bruto = fs.readFileSync(caminho, "utf8");
+    semComentarios(bruto); // trava: um workflow que o recorte destrói é ilegível
   } catch (erro) {
     reprovacoes.push("WORKFLOW ILEGÍVEL: " + ((erro && erro.message) || erro));
     return reprovacoes;
   }
 
-  const passos = passosDo(texto);
+  const passos = EXECUTAVEL.passosDoWorkflow(bruto);
 
-  // --- as invocações que o CI deve fazer por conta própria -----------------
+  // --- as invocações que o CI deve EXECUTAR por conta própria --------------
   //
   // Inclui a DESTE arquivo: um guardião que não é chamado é decoração, e a
   // única peça capaz de perceber a própria ausência do YAML é ele mesmo, rodando
   // pelo outro caminho (o `pretest`).
-  for (const [oQue, padrao] of INVOCACOES_OBRIGATORIAS) {
-    const alcancados = passos.filter((p) => padrao.test(p.corpo) && !/--resumo/.test(p.corpo));
-    if (alcancados.length === 0) {
+  for (const exigencia of INVOCACOES_OBRIGATORIAS) {
+    for (const motivo of conferirInvocacao(passos, exigencia)) reprovacoes.push(motivo);
+  }
+
+  // --- nenhum passo do job tolera o próprio erro ---------------------------
+  //
+  // Um `continue-on-error` em QUALQUER passo — inclusive no das provas — deixa
+  // o job verde com a etapa vermelha. A §4 proíbe introduzi-lo; aqui a proibição
+  // vira leitura.
+  for (const passo of passos) {
+    if (passo.atributos["continue-on-error"] !== undefined) {
       reprovacoes.push(
-        "INVOCAÇÃO AUSENTE: o workflow não chama " + oQue + " em passo nenhum — " +
-        "verificador que não é executado não verifica."
+        "PASSO TOLERANTE: `" + passo.nome + "` tem `continue-on-error` — um passo que perdoa o " +
+        "próprio erro tira do job a única cor que ele produz sozinho."
       );
-      continue;
-    }
-    for (const passo of alcancados) {
-      if (/^\s+if:/m.test(passo.corpo)) {
-        reprovacoes.push(
-          "INVOCAÇÃO CONDICIONADA: o passo `" + passo.nome + "`, que chama " + oQue +
-          ", ganhou um `if:` — condicionar é desligar sem apagar."
-        );
-      }
-      if (/continue-on-error/.test(passo.corpo)) {
-        reprovacoes.push(
-          "INVOCAÇÃO TOLERADA: o passo `" + passo.nome + "` tem `continue-on-error` — " +
-          "o job deixaria de depender do resultado."
-        );
-      }
     }
   }
 
   // --- o ARTEFATO ----------------------------------------------------------
-  const upload = passos.filter((p) => /uses:\s*actions\/upload-artifact@v[0-9]+/.test(p.corpo));
+  const upload = passos.filter((p) => /^actions\/upload-artifact@v[0-9]+$/.test(p.atributos["uses"] || ""));
   if (upload.length !== 1) {
     reprovacoes.push(
       "ARTEFATO: o passo de upload tem de existir exatamente uma vez (encontrados: " + upload.length +
       ") — sem ele a saída da corrida morre com o runner."
     );
   } else {
-    const corpo = upload[0].corpo;
-    if (!/^\s+if:\s*always\(\)\s*$/m.test(corpo)) {
+    const passoUpload = upload[0];
+    if (passoUpload.nome !== PASSO_DO_UPLOAD) {
+      reprovacoes.push(
+        "ARTEFATO EM PASSO DESCONHECIDO: o upload mora em `" + passoUpload.nome + "` e o contrato diz `" +
+        PASSO_DO_UPLOAD + "` — passo renomeado é passo que nenhuma outra guarda encontra."
+      );
+    }
+    if (passoUpload.atributos["if"] !== "always()") {
       reprovacoes.push(
         "ARTEFATO SEM `always()`: condição comum desliga o upload justamente quando o job falha, " +
         "que é quando o rastro importa."
       );
     }
-    if (!/^\s+name:\s*\S/m.test(corpo)) {
+    if (!passoUpload.atributos["name"]) {
       reprovacoes.push("ARTEFATO SEM NOME: não dá para achar o que não se nomeia.");
     }
-    if (!/^\s+if-no-files-found:\s*error\s*$/m.test(corpo)) {
+    if (passoUpload.atributos["if-no-files-found"] !== "error") {
       reprovacoes.push(
         "ARTEFATO PODE SUBIR VAZIO: `if-no-files-found` não está em `error` — um upload que não " +
         "encontra arquivo nenhum e termina verde publica ausência com cara de rastro."
       );
     }
 
-    const mPath = /^\s+path:\s*(.+?)\s*$/m.exec(corpo);
-    if (!mPath) {
+    if (!passoUpload.atributos["path"]) {
       reprovacoes.push("ARTEFATO SEM `path:`: não arquiva coisa nenhuma.");
     } else {
-      const arquivado = normalizarCaminho(mPath[1]);
-      const veredito = passos.find(
-        (p) => /node\s+ci\/portao_do_ci\.js/.test(p.corpo) && !/--resumo/.test(p.corpo)
-      );
-      if (!veredito) {
-        reprovacoes.push("ARTEFATO SEM REFERÊNCIA: não há passo de veredito para comparar o caminho.");
+      const arquivado = normalizarCaminho(passoUpload.atributos["path"]);
+      const veredito = EXECUTAVEL.passoChamado(passos, INVOCACOES_OBRIGATORIAS[0].passo);
+      const comando = veredito && veredito.run.presente
+        ? EXECUTAVEL.invocacaoAutoritativa(veredito.run.script, INVOCACOES_OBRIGATORIAS[0]).comando
+        : null;
+      if (!comando) {
+        reprovacoes.push(
+          "ARTEFATO SEM REFERÊNCIA: não há invocação executável do veredito para comparar o caminho."
+        );
       } else {
-        const lidos = (veredito.corpo.match(/"\$EVIDENCIA\/[A-Za-z0-9._-]+"/g) || []).map(normalizarCaminho);
+        const lidos = comando.argumentos.filter((a) => a.startsWith("$EVIDENCIA/")).map(normalizarCaminho);
         if (lidos.length !== 2) {
           reprovacoes.push(
             "VEREDITO NÃO LÊ DOIS ARQUIVOS DE EVIDÊNCIA: " + JSON.stringify(lidos) +
@@ -238,37 +312,39 @@ function conferirAuditabilidade(opcoes) {
   }
 
   // --- o RESUMO ------------------------------------------------------------
-  const resumo = passos.filter((p) => /--resumo/.test(p.corpo));
-  if (resumo.length !== 1) {
+  const passoResumo = EXECUTAVEL.passoChamado(passos, INVOCACAO_DO_RESUMO.passo);
+  if (!passoResumo) {
     reprovacoes.push(
-      "RESUMO: o passo tem de existir exatamente uma vez (encontrados: " + resumo.length + ")."
+      "RESUMO: o passo tem de existir exatamente uma vez, com o nome `" + INVOCACAO_DO_RESUMO.passo +
+      "` — e não existe."
     );
   } else {
-    const corpo = resumo[0].corpo;
-    if (!/^\s+if:\s*always\(\)\s*$/m.test(corpo)) {
+    if (passoResumo.atributos["if"] !== "always()") {
       reprovacoes.push(
         "RESUMO SEM `always()`: executado só em sucesso, ele descreve exatamente os runs que " +
         "ninguém precisa ler."
       );
     }
-    if (!/node\s+ci\/portao_do_ci\.js\s+--resumo/.test(corpo)) {
-      reprovacoes.push(
-        "RESUMO NÃO VEM DO JUIZ: texto escrito à mão descreve o que alguém quis dizer, não o que a " +
-        "corrida fez."
-      );
-    }
-    if (!/>>\s*"\$GITHUB_STEP_SUMMARY"/.test(corpo)) {
-      reprovacoes.push(
-        "RESUMO NÃO É ESCRITO NO PAINEL: calculado e jogado fora não é auditabilidade."
-      );
-    }
-    if (/[^>]>\s*"\$GITHUB_STEP_SUMMARY"/.test(corpo)) {
-      reprovacoes.push("RESUMO TRUNCA O PAINEL (`>`) em vez de anexar (`>>`).");
-    }
-    if (!/"\$EVIDENCIA\/npm-test\.txt"\s+"\$EVIDENCIA\/exit\.txt"/.test(corpo)) {
-      reprovacoes.push(
-        "RESUMO LÊ OUTRA EVIDÊNCIA: dois relatos da mesma corrida são um relato a mais do que existe."
-      );
+    if (!passoResumo.run.presente) {
+      reprovacoes.push("RESUMO NÃO VEM DO JUIZ: o passo do resumo não tem `run:` nenhum.");
+    } else {
+      const veredito = EXECUTAVEL.invocacaoAutoritativa(passoResumo.run.script, INVOCACAO_DO_RESUMO);
+      if (!veredito.ok) {
+        reprovacoes.push(
+          "RESUMO NÃO VEM DO JUIZ: o passo deveria EXECUTAR `node ci/portao_do_ci.js --resumo`, e " +
+          veredito.motivo + " — texto escrito à mão, impresso ou guardado numa variável descreve o " +
+          "que alguém quis dizer, não o que a corrida fez."
+        );
+      } else {
+        const operador = EXECUTAVEL.redirecionamentoPara(veredito.comando, PAINEL);
+        if (operador === null) {
+          reprovacoes.push(
+            "RESUMO NÃO É ESCRITO NO PAINEL: calculado e jogado fora não é auditabilidade."
+          );
+        } else if (operador === ">") {
+          reprovacoes.push("RESUMO TRUNCA O PAINEL (`>`) em vez de anexar (`>>`).");
+        }
+      }
     }
   }
 
@@ -306,6 +382,56 @@ function conferirAuditabilidade(opcoes) {
     reprovacoes.push("GERADOR DE RESUMO INDISPONÍVEL: " + ((erro && erro.message) || erro));
   }
 
+  return reprovacoes;
+}
+
+/** Uma exigência de invocação, respondida pela autoridade executável.
+ *
+ *  A mensagem começa sempre por `INVOCAÇÃO AUSENTE` e nomeia O QUE deixou de
+ *  rodar antes de dizer POR QUÊ. É de propósito: quem lê o log do CI precisa
+ *  saber em dois segundos qual autoridade caiu, e o motivo exato logo em
+ *  seguida. Passo inexistente e passo que não executa são a mesma perda — em
+ *  nenhum dos dois casos o comando roda. */
+function conferirInvocacao(passos, exigencia) {
+  const reprovacoes = [];
+  const passo = EXECUTAVEL.passoChamado(passos, exigencia.passo);
+
+  if (!passo) {
+    reprovacoes.push(
+      "INVOCAÇÃO AUSENTE: o workflow deveria executar " + exigencia.oQue + " no passo `" +
+      exigencia.passo + "`, e não existe passo com esse nome — verificador que não é executado " +
+      "não verifica."
+    );
+    return reprovacoes;
+  }
+
+  if (!passo.run.presente) {
+    reprovacoes.push(
+      "INVOCAÇÃO AUSENTE: o workflow deveria executar " + exigencia.oQue + " no passo `" +
+      exigencia.passo + "`, e o passo não tem `run:` nenhum."
+    );
+  } else {
+    const veredito = EXECUTAVEL.invocacaoAutoritativa(passo.run.script, exigencia);
+    if (!veredito.ok) {
+      reprovacoes.push(
+        "INVOCAÇÃO AUSENTE: o workflow deveria executar " + exigencia.oQue + " no passo `" +
+        exigencia.passo + "`, e " + veredito.motivo + ". Estar escrito não é ser executado."
+      );
+    }
+  }
+
+  if (passo.atributos["if"] !== undefined) {
+    reprovacoes.push(
+      "INVOCAÇÃO CONDICIONADA: o passo `" + passo.nome + "`, que executa " + exigencia.oQue +
+      ", ganhou um `if:` — condicionar é desligar sem apagar."
+    );
+  }
+  if (passo.atributos["continue-on-error"] !== undefined) {
+    reprovacoes.push(
+      "INVOCAÇÃO TOLERADA: o passo `" + passo.nome + "` tem `continue-on-error` — " +
+      "o job deixaria de depender do resultado."
+    );
+  }
   return reprovacoes;
 }
 
@@ -400,8 +526,8 @@ function exemploDeVeredito(juiz) {
       exit: 0,
       piso: { casos_minimos: 1, suites_minimas: 1 },
       rodape: {
-        tests: 814, suites: 87, pass: 814, fail: 0,
-        cancelled: 0, skipped: 0, todo: 0, duration_ms: 109123.79,
+        tests: 883, suites: 87, pass: 883, fail: 0,
+        cancelled: 0, skipped: 0, todo: 0, duration_ms: 106207.99,
       },
       saida: "",
     },
@@ -414,7 +540,7 @@ function principal() {
     process.stdout.write(
       "AUDITABILIDADE VERDE — artefato e resumo presentes, sempre executados, apontando para a " +
       "evidência julgada, o gerador do painel produz conteúdo, e as autoridades externas (juiz, " +
-      "guardião, inventário e artefato produtivo) continuam invocadas.\n"
+      "guardião, inventário e artefato produtivo) são INVOCADAS DE VERDADE nos passos canônicos.\n"
     );
     return 0;
   }
@@ -424,9 +550,10 @@ function principal() {
 }
 
 module.exports = {
-  CAMINHO_RELATIVO_DO_WORKFLOW, INVOCACOES_OBRIGATORIAS, TERMOS_DO_RESUMO, TAMANHO_MINIMO_DO_RESUMO,
+  CAMINHO_RELATIVO_DO_WORKFLOW, INVOCACOES_OBRIGATORIAS, INVOCACAO_DO_RESUMO,
+  PASSO_DO_UPLOAD, PAINEL, TERMOS_DO_RESUMO, TAMANHO_MINIMO_DO_RESUMO,
   semComentarios, semComentariosDeLinha, passosDo, normalizarCaminho,
-  CHAMADAS_DO_PRETEST, conferirCadeiaDoPretest, conferirAuditabilidade, principal,
+  CHAMADAS_DO_PRETEST, conferirInvocacao, conferirCadeiaDoPretest, conferirAuditabilidade, principal,
 };
 
 if (require.main === module) process.exit(principal());

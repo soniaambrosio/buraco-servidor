@@ -38,7 +38,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { conferirCenso } = require("./censo_de_suites.js");
-const { forjar, TRECHOS, trechoDoPasso, forjarComPretest } = require("./arvore_forjada.js");
+const {
+  forjar, TRECHOS, trechoDoPasso, forjarComPretest,
+  comComandoTrocado, comPrefixoNoComando, outraFormaDoRun,
+} = require("./arvore_forjada.js");
 const GUARDIAO = require("../ci/auditabilidade.js");
 
 /** Roda o guardião contra uma árvore forjada com UMA sabotagem. */
@@ -215,7 +218,7 @@ test("AUD/CADEIA — o guardião confere o próprio endereço", async (t) => {
     // contador de casos da C1.
     exigeMotivo(
       reprovacoesCom([
-        [WORKFLOW, "        run: node ci/auditabilidade.js", "        run: echo ok # node ci/auditabilidade.js"],
+        [WORKFLOW, TRECHOS.runDoGuardiao, comComandoTrocado(TRECHOS.runDoGuardiao, "echo ok # node ci/auditabilidade.js")],
       ]),
       /INVOCAÇÃO AUSENTE.*guardião/,
       "nome em comentário não executa"
@@ -301,7 +304,7 @@ test("AUD/COMPOSIÇÃO — a autoridade do artefato continua na cadeia", async (
     // Sem esta afirmação, alguém poderia remover a entrada do artefato de
     // `INVOCACOES_OBRIGATORIAS` e AUD-18 passaria a medir nada — a sabotagem
     // sairia do alcance do caso que a persegue, em vez de ser detectada por ele.
-    const oQues = GUARDIAO.INVOCACOES_OBRIGATORIAS.map(([oQue]) => oQue).join(" | ");
+    const oQues = GUARDIAO.INVOCACOES_OBRIGATORIAS.map((e) => e.oQue).join(" | ");
     for (const exigido of ["juiz", "guardião", "inventário", "artefato produtivo"]) {
       assert.ok(
         oQues.includes(exigido),
@@ -312,6 +315,189 @@ test("AUD/COMPOSIÇÃO — a autoridade do artefato continua na cadeia", async (
     assert.ok(
       chamadas.includes("artefato produtivo"),
       "`CHAMADAS_DO_PRETEST` deixou de cobrar a autoridade do artefato: " + chamadas
+    );
+
+    // [OS 54-C5] E CADA EXIGÊNCIA ANCORA UM PASSO CANÔNICO. Sem o `passo`, a
+    // busca voltaria a ser "em algum lugar do workflow", e mover a chamada do
+    // juiz para dentro de um passo `if: always()` deixaria de significar nada.
+    for (const e of GUARDIAO.INVOCACOES_OBRIGATORIAS) {
+      assert.equal(typeof e.passo, "string", "exigência sem passo canônico: " + e.oQue);
+      assert.ok(e.passo.length > 0, "passo canônico vazio: " + e.oQue);
+      assert.equal(e.binario, "node", "exigência com binário inesperado: " + e.oQue);
+    }
+  });
+});
+
+// ===========================================================================
+// [OS 54-C5] ESTAR ESCRITO NÃO É SER EXECUTADO.
+//
+// A OS 54-R4 encontrou o escape que todas as campanhas anteriores tinham
+// deixado passar: `INVOCACOES_OBRIGATORIAS` procurava o comando com uma
+// expressão regular sobre o CORPO do passo, e prefixar `echo` mantinha o texto
+// e desligava a autoridade. As quatro invocações caíam pelo mesmo caminho.
+//
+// As campanhas não viram porque sabotavam por REMOÇÃO — e remover o passo
+// quebra a âncora, o que é detecção por acidente. Os casos abaixo são o
+// contrário: cada um PRESERVA o texto e só tira dele a qualidade de comando.
+//
+// Cada forma da §2 é exercitada contra uma autoridade DIFERENTE, de propósito:
+// se as dez rodassem todas sobre o guardião, a suíte provaria dez vezes a mesma
+// coisa e nada sobre as outras três.
+// ===========================================================================
+
+/** As três autoridades cuja invocação a §1 manda tornar incontornável, mais a
+ *  do artefato, que divide o mesmo endereço desde a OS 54-C4. */
+const CANONICOS = Object.freeze([
+  ["o juiz", TRECHOS.runDoJuiz, /INVOCAÇÃO AUSENTE.*juiz fail-closed/],
+  ["o guardião", TRECHOS.runDoGuardiao, /INVOCAÇÃO AUSENTE.*guardião/],
+  ["o inventário", TRECHOS.runDoInventario, /INVOCAÇÃO AUSENTE.*inventário/],
+  ["o artefato", TRECHOS.runDoArtefato, /INVOCAÇÃO AUSENTE.*artefato produtivo/],
+]);
+
+/** Troca a linha `run:` de um passo canônico por outra, preservando o passo. */
+function comRunTrocado(run, novo) {
+  return reprovacoesCom([[WORKFLOW, run, novo]]);
+}
+
+test("AUD/EXECUÇÃO — presença textual não satisfaz nenhuma autoridade", async (t) => {
+  await t.test("AUD-21: `echo` derruba as QUATRO invocações, uma a uma", () => {
+    // O escape literal da R4. Ele tem de morrer para cada autoridade
+    // separadamente — uma correção que só cobrisse o juiz deixaria as outras
+    // três exatamente como estavam.
+    for (const [quem, run, padrao] of CANONICOS) {
+      const neutro = comPrefixoNoComando(run, "echo ");
+      exigeMotivo(comRunTrocado(run, neutro), padrao, "`echo` desligou " + quem + " e o guardião aprovou");
+    }
+  });
+
+  await t.test("AUD-22: `printf` do comando não é o comando", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoJuiz, "        run: printf '%s\\n' 'node ci/portao_do_ci.js'"),
+      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      "imprimir o nome do juiz passou por executá-lo"
+    );
+  });
+
+  await t.test("AUD-23: comando comentado no bloco não roda", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoGuardiao, "        run: |\n          # node ci/auditabilidade.js\n          true"),
+      /INVOCAÇÃO AUSENTE.*guardião/,
+      "comentário de shell contou como chamada"
+    );
+  });
+
+  await t.test("AUD-24: o comando dentro de uma STRING é dado, não chamada", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoInventario, "        run: grep -q \"node ci/inventario_de_execucao.js\" README.md"),
+      /INVOCAÇÃO AUSENTE.*inventário/,
+      "o alvo dentro de uma string satisfez a exigência"
+    );
+  });
+
+  await t.test("AUD-25: o comando dentro de um HEREDOC é entrada, não execução", () => {
+    for (const abertura of ["<<EOF", "<<'EOF'", "<<-EOF"]) {
+      exigeMotivo(
+        comRunTrocado(
+          TRECHOS.runDoArtefato,
+          "        run: |\n          cat " + abertura + "\n          node ci/artefato.js --conferir --raiz .\n          EOF"
+        ),
+        /INVOCAÇÃO AUSENTE.*artefato produtivo/,
+        "corpo de heredoc (" + abertura + ") contou como comando"
+      );
+    }
+  });
+
+  await t.test("AUD-26: atribuição de variável não é comando", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoGuardiao, "        run: |\n          CMD=\"node ci/auditabilidade.js\"\n          true"),
+      /INVOCAÇÃO AUSENTE.*guardião/,
+      "guardar a chamada numa variável passou por chamá-la"
+    );
+  });
+
+  await t.test("AUD-27: `true` e `:` no lugar da chamada reprovam", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoJuiz, "        run: 'true # node ci/portao_do_ci.js'"),
+      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      "`true` substituiu o juiz"
+    );
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoInventario, "        run: ': node ci/inventario_de_execucao.js'"),
+      /INVOCAÇÃO AUSENTE.*inventário/,
+      "`:` substituiu o inventário"
+    );
+  });
+
+  await t.test("AUD-28: chamada depois de saída antecipada é inalcançável", () => {
+    exigeMotivo(
+      comRunTrocado(TRECHOS.runDoGuardiao, "        run: |\n          exit 0\n          node ci/auditabilidade.js"),
+      /INVOCAÇÃO AUSENTE.*guardião/,
+      "a chamada estava escrita depois de `exit 0` e contou"
+    );
+    // E o contraste que impede a regra de virar veto geral: um `exit`
+    // CONDICIONAL não torna o resto inalcançável.
+    assert.deepEqual(
+      comRunTrocado(
+        TRECHOS.runDoGuardiao,
+        "        run: |\n          [ -n \"$PULAR\" ] && exit 0\n          node ci/auditabilidade.js"
+      ),
+      []
+    );
+  });
+
+  await t.test("AUD-29: a chamada em OUTRO passo não satisfaz o passo canônico", () => {
+    exigeMotivo(
+      reprovacoesCom([[WORKFLOW, TRECHOS.cabecalhoDoInventario, "      - name: Passo com outro nome"]]),
+      /INVOCAÇÃO AUSENTE.*inventário/,
+      "renomear o passo bastou para a exigência mudar de endereço"
+    );
+  });
+
+  await t.test("AUD-30: ocorrência textual em comando composto não conta", () => {
+    exigeMotivo(
+      comRunTrocado(
+        TRECHOS.runDoJuiz,
+        "        run: test -f \"node ci/portao_do_ci.js\" && echo \"node ci/portao_do_ci.js $EVIDENCIA/npm-test.txt $EVIDENCIA/exit.txt\""
+      ),
+      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      "o alvo apareceu duas vezes num comando composto e nenhuma delas era execução"
+    );
+  });
+
+  await t.test("AUD-31: as duas formas canônicas continuam aceitas", () => {
+    // A trava contra o excesso de zelo. Uma autoridade que recusasse o bloco
+    // escalar reprovaria o workflow íntegro no dia em que alguém quebrasse uma
+    // linha comprida — e vermelho pelo motivo errado é tão cego quanto verde
+    // indevido.
+    assert.deepEqual(reprovacoesCom([]), []);
+    // A OUTRA forma, seja qual for a atual. Escrever a alternativa à mão
+    // amarraria o caso à forma de hoje — e foi exatamente esse laço que fez o
+    // controle `E27` da campanha reprovar sem defeito nenhum na autoridade.
+    for (const [quem, alvo] of [
+      ["o guardião", TRECHOS.runDoGuardiao],
+      ["o inventário", TRECHOS.runDoInventario],
+      ["o artefato", TRECHOS.runDoArtefato],
+    ]) {
+      assert.deepEqual(
+        comRunTrocado(alvo, outraFormaDoRun(alvo)), [],
+        "a outra forma canônica de " + quem + " foi recusada"
+      );
+    }
+    assert.deepEqual(
+      comRunTrocado(TRECHOS.runDoArtefato, "        run: |\n          node ci/artefato.js \\\n            --conferir --raiz ."),
+      []
+    );
+  });
+
+  await t.test("AUD-32: nenhum passo do job pode tolerar o próprio erro", () => {
+    // `continue-on-error` num passo QUALQUER — inclusive no das provas, que não
+    // está na lista de invocações — deixa o job verde com a etapa vermelha.
+    exigeMotivo(
+      reprovacoesCom([
+        [WORKFLOW, "      - name: Provas oficiais do servidor\n        run: |", "      - name: Provas oficiais do servidor\n        continue-on-error: true\n        run: |"],
+      ]),
+      /PASSO TOLERANTE/,
+      "um passo que perdoa o próprio erro passou despercebido"
     );
   });
 });

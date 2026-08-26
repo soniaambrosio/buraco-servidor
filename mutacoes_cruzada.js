@@ -261,17 +261,17 @@ const SABOTAGENS = [
   {
     id: "X11", nome: "pisos das DUAS familias rebaixados de uma vez",
     aplicar: (d, i) => {
-      trocar(d, PISO_GLOBAL, '"casos_minimos": 883,', '"casos_minimos": 700,', i);
+      trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 700,', i);
       trocar(d, CENSO, '"unicidade_do_portador.test.js": 48,', '"unicidade_do_portador.test.js": 16,', i);
     },
   },
   {
     id: "X12", nome: "recarimbo de TODOS os numeros editaveis, de uma vez",
     aplicar: (d, i) => {
-      trocar(d, PISO_GLOBAL, '"casos_minimos": 883,', '"casos_minimos": 600,', i);
+      trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 600,', i);
       trocar(d, PISO_GLOBAL, '"suites_minimas": 87,', '"suites_minimas": 70,', i);
-      trocar(d, PISO_GLOBAL, '"casos": 883, "suites": 87', '"casos": 600, "suites": 70', i);
-      trocar(d, SUITE_CI, "const CASOS_MEDIDOS_NA_BASE = 883;", "const CASOS_MEDIDOS_NA_BASE = 600;", i);
+      trocar(d, PISO_GLOBAL, '"casos": 927, "suites": 87', '"casos": 600, "suites": 70', i);
+      trocar(d, SUITE_CI, "const CASOS_MEDIDOS_NA_BASE = 927;", "const CASOS_MEDIDOS_NA_BASE = 600;", i);
       trocar(d, SUITE_CI, "const SUITES_MEDIDAS_NA_BASE = 87;", "const SUITES_MEDIDAS_NA_BASE = 70;", i);
       trocar(d, CENSO, '"unicidade_do_portador.test.js": 48,', '"unicidade_do_portador.test.js": 16,', i);
       trocar(d, PISOS, '  "unicidade_do_portador.test.js": 48,', '  "unicidade_do_portador.test.js": 16,', i);

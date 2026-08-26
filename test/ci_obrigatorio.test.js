@@ -66,7 +66,15 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *    `4577048` → 734 casos / 80 suítes  (OS 52-C2, unicidade por capacidade)
  *    `99d2eb6` → 786 casos / 83 suítes  (OS 52-C3, capacidade composta)
  *    `9795df7` → 814 casos / 87 suítes  (OS 52-C4, autoridade do artefato)
- *    OS 54-C4 → 883 casos / 87 suítes  (a auditabilidade externa PORTADA
+ *    `0f65655` → 883 casos / 87 suítes  (OS 54-C4, auditabilidade externa)
+ *    OS 54-C5 → 927 casos / 87 suítes  (invocação EXECUTÁVEL, não textual)
+ *
+ *  [OS 54-C5] 927 é 883 + 44. A OS 54-R4 mostrou que `echo node …` desligava
+ *  as quatro autoridades com o portão VERDE — presença de texto contava como
+ *  execução. Os doze casos novos do guardião e a suíte da autoridade das
+ *  invocações são o que fecha isso, e é por isso que o número sobe.
+ *
+ *    (a auditabilidade externa PORTADA
  *                                       sobre a autoridade do artefato único)
  *
  *  [OS 54-C4] 883 NÃO É 848. A folha da OS 54-C3 mediu 848 casos sobre
@@ -84,7 +92,7 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
  *  continuam aqui como a segunda leitura, e CI-23 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 883;
+const CASOS_MEDIDOS_NA_BASE = 927;
 const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação

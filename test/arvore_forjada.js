@@ -27,6 +27,11 @@ const ESSENCIAIS = Object.freeze([
   ".github/workflows/provas-do-servidor.yml",
   "ci/portao_do_ci.js",
   "ci/auditabilidade.js",
+  // [OS 54-C5] A autoridade que separa texto de execução. Ela é carregada por
+  // `ci/auditabilidade.js` com caminho RELATIVO, então uma árvore forjada sem
+  // ela não reprova pela sabotagem — quebra no `require`, e vermelho pelo
+  // motivo errado esconde o que estava sendo medido.
+  "ci/invocacao_executavel.js",
   "ci/pisos_autorizados.js",
   "ci/piso_do_portao.json",
   "ci/artefato.js",
@@ -65,19 +70,107 @@ function forjar(edicoes) {
   return dir;
 }
 
+// ---------------------------------------------------------------------------
+// [OS 54-C5] AS ÂNCORAS PASSARAM A SER DERIVADAS DO ARQUIVO
+// ---------------------------------------------------------------------------
+//
+// A campanha `mutacoes_c5.js` tem um controle que quase ninguém pensaria em
+// escrever: trocar a forma canônica do `run:` do guardião de escalar de fluxo
+// para BLOCO ESCALAR, e exigir que a cadeia continue VERDE. Ele reprovou — e a
+// autoridade não tinha nada a ver com isso. `ci/auditabilidade.js` aceitava as
+// duas formas; quem caía eram doze casos cujas âncoras de sabotagem eram TEXTO
+// LITERAL preso à forma de fluxo, e `forjar` abortava por âncora ausente.
+//
+// Isso é um alarme falso de verdade: reformatar o YAML — quebrar uma linha
+// comprida, por exemplo — derrubaria o portão sem defeito nenhum, e vermelho
+// pelo motivo errado é tão cego quanto verde indevido. A §2 exige que as duas
+// formas canônicas continuem aceitas, e "aceitas" tem de valer para a cadeia
+// inteira, não só para a autoridade.
+//
+// A saída é a mesma que `trechoDoPasso` já usava: EXTRAIR do arquivo real em
+// vez de copiar para dentro de um literal. Uma cópia do YAML dentro do arnês
+// envelhece calada; a extração acompanha o arquivo e falha alto quando o passo
+// deixa de existir.
+//
+// E são GETTERS, e não valores calculados no `require`: numa cópia onde a
+// sabotagem APAGOU o passo, calcular tudo na carga faria o módulo estourar
+// antes do primeiro caso, e todas as suítes que o importam morreriam pelo
+// motivo errado. Assim só quebra quem de fato pede a âncora que sumiu.
+
+const CAMINHO_DO_WORKFLOW = path.join(RAIZ_REAL, ".github", "workflows", "provas-do-servidor.yml");
+
+const linhasDoWorkflow = () =>
+  fs.readFileSync(CAMINHO_DO_WORKFLOW, "utf8").split("\r\n").join("\n").split("\n");
+
+const ehCabecalhoDePasso = (linha) => /^\s{4,}-\s+name:/.test(linha);
+
+/** Onde um passo começa e termina, achado pelo NOME. */
+function limitesDoPasso(nome) {
+  const linhas = linhasDoWorkflow();
+  let inicio = -1;
+  for (let i = 0; i < linhas.length; i++) {
+    const m = /^\s{4,}-\s+name:\s*(.*)$/.exec(linhas[i]);
+    if (m && m[1].trim().replace(/^["']|["']$/g, "") === nome) { inicio = i; break; }
+  }
+  if (inicio < 0) throw new Error("passo não encontrado no workflow real: " + nome);
+  let fim = linhas.length;
+  for (let j = inicio + 1; j < linhas.length; j++) {
+    if (ehCabecalhoDePasso(linhas[j])) { fim = j; break; }
+  }
+  return { linhas, inicio, fim };
+}
+
+/** O texto EXATO de um passo, pelo nome, INCLUINDO a linha em branco que o
+ *  separa do próximo — sem ela, remover o passo deixa dois brancos seguidos e a
+ *  sabotagem vira uma mudança de formatação a mais do que devia. */
+function passoInteiro(nome) {
+  const { linhas, inicio, fim } = limitesDoPasso(nome);
+  const corpo = linhas.slice(inicio, fim);
+  // O bloco de COMENTÁRIO que antecede o próximo passo mora entre os dois, e o
+  // corte por cabeçalho o traz junto. Levá-lo embora numa sabotagem apagaria a
+  // prosa do passo SEGUINTE — o que muda o arquivo mais do que a sabotagem diz
+  // que muda, e sabotagem que faz mais do que declara mede outra coisa.
+  while (corpo.length > 0) {
+    const ultima = corpo[corpo.length - 1];
+    if (ultima.trim() === "" || /^\s*#/.test(ultima)) corpo.pop();
+    else break;
+  }
+  return corpo.join("\n") + "\n";
+}
+
+/** O texto EXATO do escalar de `run:` de um passo, pelo nome.
+ *
+ *  Em fluxo é uma linha; em bloco são a linha do `run:` mais todas as que
+ *  pertencem ao bloco. Devolver a região inteira é o que permite trocar UMA
+ *  forma canônica pela OUTRA numa sabotagem, em vez de colar um bloco novo ao
+ *  lado de uma linha que ficou órfã. */
+function runDoPasso(nome) {
+  const { linhas, inicio, fim } = limitesDoPasso(nome);
+  let iRun = -1;
+  for (let i = inicio; i < fim; i++) {
+    if (/^\s+run:/.test(linhas[i])) { iRun = i; break; }
+  }
+  if (iRun < 0) throw new Error("o passo `" + nome + "` não tem `run:` no workflow real");
+
+  const recuoRun = (/^[ ]*/.exec(linhas[iRun]) || [""])[0].length;
+  const resto = linhas[iRun].replace(/^\s+run:\s*/, "").replace(/\s+$/, "");
+  if (!/^[|>][-+]?[0-9]*$/.test(resto)) return linhas[iRun];
+
+  let ultima = iRun;
+  for (let i = iRun + 1; i < fim; i++) {
+    const vazia = linhas[i].trim() === "";
+    const recuo = (/^[ ]*/.exec(linhas[i]) || [""])[0].length;
+    if (!vazia && recuo <= recuoRun) break;
+    if (!vazia) ultima = i;
+  }
+  return linhas.slice(iRun, ultima + 1).join("\n");
+}
+
 /** Trechos do workflow reaproveitados pelas sabotagens, extraídos do arquivo
- *  REAL — assim uma mudança de formatação quebra a âncora em vez de fazer a
- *  sabotagem passar despercebida. */
+ *  REAL — assim uma mudança de formatação acompanha a âncora em vez de fazer a
+ *  sabotagem virar um no-op silencioso. */
 const TRECHOS = Object.freeze({
-  uploadInteiro:
-    "      - name: Evidência arquivada\n" +
-    "        if: always()\n" +
-    "        uses: actions/upload-artifact@v4\n" +
-    "        with:\n" +
-    "          name: evidencia-provas-do-servidor\n" +
-    "          path: ${{ env.EVIDENCIA }}/\n" +
-    "          if-no-files-found: error\n" +
-    "          retention-days: 30\n",
+  get uploadInteiro() { return passoInteiro("Evidência arquivada"); },
   uploadCabecalho: "      - name: Evidência arquivada\n        if: always()",
   uploadNome: "          name: evidencia-provas-do-servidor\n",
   uploadCaminho: "          path: ${{ env.EVIDENCIA }}/",
@@ -85,13 +178,89 @@ const TRECHOS = Object.freeze({
   resumoCabecalho: "      - name: Resumo (verde, vermelho, cancelado ou não executado)\n        if: always()",
   resumoRedirecionamento: '>> "$GITHUB_STEP_SUMMARY"',
   resumoChamada: "node ci/portao_do_ci.js --resumo",
-  invocacaoGuardiao: "      - name: Guardião da auditabilidade\n        run: node ci/auditabilidade.js\n\n",
-  invocacaoInventario: "      - name: Inventário por execução\n        run: node ci/inventario_de_execucao.js\n\n",
+  get invocacaoGuardiao() { return passoInteiro("Guardião da auditabilidade") + "\n"; },
+  get invocacaoInventario() { return passoInteiro("Inventário por execução") + "\n"; },
   // [OS 54-C4] A invocação da autoridade do artefato produtivo. Ela é o passo
   // que a OS 52-C4 entregou, e a composição a pôs sob a MESMA exigência das
   // outras: presente, sem `if:` e sem `continue-on-error:`.
-  invocacaoArtefato: "      - name: Artefato produtivo único\n        run: node ci/artefato.js --conferir --raiz .\n\n",
+  get invocacaoArtefato() { return passoInteiro("Artefato produtivo único") + "\n"; },
+  // [OS 54-C5] Os escalares de `run:` dos passos canônicos. Eles são a âncora
+  // das neutralizações NOMINAIS — `echo`, `printf`, heredoc, atribuição,
+  // `true` —, que preservam o texto e desligam o comando. As campanhas antigas
+  // só sabiam REMOVER, e remoção quebra a âncora: a detecção vinha do acidente,
+  // e não da autoridade.
+  get runDoJuiz() { return runDoPasso("Portão fail-closed"); },
+  get runDoGuardiao() { return runDoPasso("Guardião da auditabilidade"); },
+  get runDoInventario() { return runDoPasso("Inventário por execução"); },
+  get runDoArtefato() { return runDoPasso("Artefato produtivo único"); },
+  cabecalhoDoInventario: "      - name: Inventário por execução",
 });
+
+// ---------------------------------------------------------------------------
+// [OS 54-C5] SABOTAGENS AGNÓSTICAS À FORMA DO `run:`
+// ---------------------------------------------------------------------------
+//
+// Derivar as ÂNCORAS do arquivo resolveu metade do problema; a outra metade
+// estava nas SUBSTITUIÇÕES. Um caso que escreve
+//
+//     run.replace("run: node", "run: echo node")
+//
+// só funciona enquanto o passo estiver em escalar de fluxo: no bloco escalar a
+// troca não casa, a edição não muda byte nenhum, e o caso morre por âncora em
+// vez de medir o que dizia medir.
+//
+// Estas três funções operam sobre o COMANDO dentro do escalar, seja qual for a
+// forma. É o que permite ao controle `E27` — trocar uma forma canônica pela
+// outra e exigir VERDE — significar alguma coisa.
+
+/** O comando de um escalar de `run:`, e como recolocá-lo lá dentro. */
+function partesDoRun(run) {
+  const linhas = String(run).split("\n");
+  const cabecalho = /^(\s+)run:\s*(.*)$/.exec(linhas[0]);
+  if (!cabecalho) throw new Error("isto não é um escalar de `run:`: " + run.slice(0, 60));
+  const recuoRun = cabecalho[1];
+  const resto = cabecalho[2].replace(/\s+$/, "");
+
+  if (!/^[|>][-+]?[0-9]*$/.test(resto)) {
+    return { forma: "fluxo", recuoRun, comando: resto, corpo: null, recuoCorpo: null };
+  }
+  const corpo = linhas.slice(1);
+  const primeira = corpo.findIndex((l) => l.trim() !== "");
+  if (primeira < 0) throw new Error("bloco escalar vazio em `run:`");
+  const recuoCorpo = (/^[ ]*/.exec(corpo[primeira]) || [""])[0];
+  return { forma: "bloco", recuoRun, comando: corpo[primeira].trim(), corpo, recuoCorpo, primeira };
+}
+
+/** Troca o COMANDO preservando a forma do escalar. */
+function comComandoTrocado(run, novoComando) {
+  const p = partesDoRun(run);
+  if (p.forma === "fluxo") return p.recuoRun + "run: " + novoComando;
+  const corpo = p.corpo.slice();
+  corpo[p.primeira] = p.recuoCorpo + novoComando;
+  return p.recuoRun + "run: |\n" + corpo.join("\n");
+}
+
+/** Põe um prefixo ANTES do comando — `echo`, `printf`, `:` — sem tocar na forma.
+ *  É a neutralização nominal: o texto do comando fica, a execução some. */
+function comPrefixoNoComando(run, prefixo) {
+  const p = partesDoRun(run);
+  return comComandoTrocado(run, prefixo + p.comando);
+}
+
+/** A OUTRA forma canônica do mesmo comando: fluxo vira bloco e bloco vira
+ *  fluxo. Um escalar de bloco com mais de um comando não tem forma de fluxo
+ *  equivalente, e a conversão falha alto em vez de inventar uma. */
+function outraFormaDoRun(run) {
+  const p = partesDoRun(run);
+  if (p.forma === "fluxo") {
+    return p.recuoRun + "run: |\n" + p.recuoRun + "  " + p.comando;
+  }
+  const uteis = p.corpo.filter((l) => l.trim() !== "");
+  if (uteis.length !== 1) {
+    throw new Error("bloco com " + uteis.length + " linhas não tem forma de fluxo equivalente");
+  }
+  return p.recuoRun + "run: " + p.comando;
+}
 
 /** Devolve o TEXTO EXATO de um passo do workflow real, achado pelo que ele faz.
  *
@@ -138,4 +307,8 @@ function forjarComPretest(de, para, removerEtapa) {
   return forjar([["test/guarda_do_portao.js", de, para]]);
 }
 
-module.exports = { ESSENCIAIS, RAIZ_REAL, TRECHOS, forjar, trechoDoPasso, forjarComPretest };
+module.exports = {
+  ESSENCIAIS, RAIZ_REAL, TRECHOS, forjar, trechoDoPasso, forjarComPretest,
+  limitesDoPasso, passoInteiro, runDoPasso,
+  partesDoRun, comComandoTrocado, comPrefixoNoComando, outraFormaDoRun,
+};

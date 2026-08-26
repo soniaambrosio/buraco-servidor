@@ -313,6 +313,13 @@ const ALCANCE_OBRIGATORIO = Object.freeze({
     porque: "exercita a autoridade de quantidade por execução",
     exige: "inventario_de_execucao",
   },
+  // [OS 54-C5] A suíte da autoridade que separa texto de execução. Ela é o
+  // alvo natural da isca: títulos preservados, corpos vazios, e nenhum
+  // `require` do lexer que ela existe para exercitar.
+  "test/invocacao_executavel.test.js": {
+    porque: "exercita a autoridade das invocações executáveis",
+    exige: "invocacao_executavel",
+  },
 });
 
 function conferirGlobOficial(raizDoRepo) {

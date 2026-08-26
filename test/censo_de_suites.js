@@ -83,8 +83,12 @@ const OBRIGATORIAS = Object.freeze({
   // rastro e a do inventario por execucao. Sem registro aqui, apaga-las seria
   // mudo — e sao elas que provam que as autoridades de fora nao foram
   // esvaziadas. Registradas, a remocao de qualquer uma reprova pelas outras.
-  "auditabilidade_ci.test.js": 29,
+  "auditabilidade_ci.test.js": 42,
   "inventario_executado.test.js": 24,
+  // [OS 54-C5] A suite da autoridade que separa TEXTO de EXECUCAO. Ela nasce
+  // do escape da OS 54-R4: `echo node ci/portao_do_ci.js` mantinha o texto e
+  // desligava o juiz, e nenhuma guarda percebia.
+  "invocacao_executavel.test.js": 32,
 });
 
 /** Conta casos, INCLUINDO subtestes.

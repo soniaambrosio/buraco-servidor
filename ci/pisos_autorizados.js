@@ -62,8 +62,10 @@ const MINIMO_DECLARADO_NO_CENSO = Object.freeze({
   "ci_obrigatorio.test.js": 99,
   // [OS 54-C2, portadas pela OS 54-C4] As duas suítes próprias da cadeia
   // externa: a do guardião do rastro e a do inventário por execução.
-  "auditabilidade_ci.test.js": 29,
+  "auditabilidade_ci.test.js": 42,
   "inventario_executado.test.js": 24,
+  // [OS 54-C5] A suíte da autoridade das invocações executáveis.
+  "invocacao_executavel.test.js": 32,
 });
 
 /** Piso EXECUTADO: casos aprovados, por arquivo de origem.
@@ -72,7 +74,12 @@ const MINIMO_DECLARADO_NO_CENSO = Object.freeze({
  *  `node ci/inventario_de_execucao.js --json`. Herdar os números da OS 54-C3
  *  seria pior do que não ter piso: aquela árvore não tinha
  *  `artefato_unico.test.js`, e a suíte do CI ganhou casos nesta composição.
- *  Piso desatualizado é folga com outro nome. */
+ *  Piso desatualizado é folga com outro nome.
+ *
+ *  [OS 54-C5] REMEDIDOS DE NOVO. A suíte do guardião subiu de 28 para 41
+ *  casos executados com os doze casos da §2, e a suíte da autoridade das
+ *  invocações nasceu com 31. Herdar os números da C4 deixaria vinte e quatro
+ *  casos apagáveis sem que o inventário reclamasse. */
 const MINIMO_EXECUTADO = Object.freeze({
   "assento_autoritativo.test.js": 34,
   "descoberta.test.js": 98,
@@ -84,8 +91,9 @@ const MINIMO_EXECUTADO = Object.freeze({
   "unicidade_do_portador.test.js": 112,
   "artefato_unico.test.js": 32,
   "ci_obrigatorio.test.js": 63,
-  "auditabilidade_ci.test.js": 28,
+  "auditabilidade_ci.test.js": 41,
   "inventario_executado.test.js": 22,
+  "invocacao_executavel.test.js": 31,
 });
 
 /** CASOS NOMINAIS que têm de EXECUTAR E APROVAR, no arquivo indicado.
@@ -139,7 +147,17 @@ const NOMES_OBRIGATORIOS = Object.freeze({
     "ART-01", "ART-03", "ART-04", "ART-05", "ART-15",
     "ART-19", "ART-22", "ART-23", "ART-24",
   ]),
-  "auditabilidade_ci.test.js": Object.freeze(["AUD-00", "AUD-01", "AUD-06", "AUD-11", "AUD-18"]),
+  // [OS 54-C5] `AUD-21` é o caso que mata o escape da R4 nas QUATRO
+  // autoridades de uma vez; `AUD-29` é o que ancora a exigência no passo
+  // canônico; `AUD-31` é a trava anti-vácuo, que impede a autoridade nova de
+  // virar um veto geral.
+  "auditabilidade_ci.test.js": Object.freeze([
+    "AUD-00", "AUD-01", "AUD-06", "AUD-11", "AUD-18",
+    "AUD-21", "AUD-25", "AUD-28", "AUD-29", "AUD-31",
+  ]),
+  "invocacao_executavel.test.js": Object.freeze([
+    "EXE-00", "EXE-01", "EXE-02", "EXE-06", "EXE-09", "EXE-09b", "EXE-19",
+  ]),
   "inventario_executado.test.js": Object.freeze(["INV-00", "INV-01", "INV-05", "INV-09"]),
 });
 

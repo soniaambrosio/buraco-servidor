@@ -316,10 +316,10 @@ const SABOTAGENS = [
   { id: "N17", nome: "suíte-isca no lugar do glob", aplicar: (d, i) => trocar(d, PACOTE, '"test": "node --test \\"test/*.test.js\\""', '"test": "node --test \\"test/chat_*.test.js\\""', i) },
   { id: "N18", nome: "caso removido (um subcaso de CI-18)", aplicar: (d, i) => trocar(d, SUITE_CI, '    await t18.test("CI-18d: upload sem nome reprova", () => {', '    await t18.testDESLIGADO("CI-18d: upload sem nome reprova", () => {', i) },
   { id: "N19", nome: "suíte removida do glob", tipo: "renomear", de: "test/auditabilidade_ci.test.js", para: "test/auditabilidade_ci.test.js.desligado" },
-  { id: "N20", nome: "piso global rebaixado", aplicar: (d, i) => trocar(d, PISO_GLOBAL, '"casos_minimos": 883,', '"casos_minimos": 1,', i) },
+  { id: "N20", nome: "piso global rebaixado", aplicar: (d, i) => trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 1,', i) },
   { id: "N21", nome: "piso específico rebaixado no censo", aplicar: (d, i) => trocar(d, CENSO, '"descoberta.test.js": 98,', '"descoberta.test.js": 1,', i) },
   { id: "N22", nome: "atribuição de caso ao arquivo errado (nome exigido movido)", aplicar: (d, i) => trocar(d, PISOS, '"ci_obrigatorio.test.js": Object.freeze([', '"chat_contrato.test.js": Object.freeze(["CI-18"]),\n  "ci_obrigatorio.test.js": Object.freeze([', i) },
-  { id: "N23", nome: "arquivo-isca emprestando casos ao piso executado", aplicar: (d, i) => trocar(d, PISOS, '  "ci_obrigatorio.test.js": 63,\n  "auditabilidade_ci.test.js": 28,', '  "ci_obrigatorio.test.js": 63,\n  "isca.test.js": 1,\n  "auditabilidade_ci.test.js": 28,', i) },
+  { id: "N23", nome: "arquivo-isca emprestando casos ao piso executado", aplicar: (d, i) => trocar(d, PISOS, '  "ci_obrigatorio.test.js": 63,\n  "auditabilidade_ci.test.js": 41,', '  "ci_obrigatorio.test.js": 63,\n  "isca.test.js": 1,\n  "auditabilidade_ci.test.js": 41,', i) },
   { id: "N24", nome: "origem do caso FORJADA (o inventário atribui tudo ao mesmo arquivo)", aplicar: (d, i) => trocar(d, INVENTARIO, "      const registro = anotar(porArquivo, path.basename(d.file));", '      const registro = anotar(porArquivo, "ci_obrigatorio.test.js");', i) },
   {
     // EQUIVALENTE, e registrado como tal em vez de virar número. A guarda de
