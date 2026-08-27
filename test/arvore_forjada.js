@@ -32,6 +32,12 @@ const ESSENCIAIS = Object.freeze([
   // ela não reprova pela sabotagem — quebra no `require`, e vermelho pelo
   // motivo errado esconde o que estava sendo medido.
   "ci/invocacao_executavel.js",
+  // [OS 54-C6] A autoridade do código de saída e a AÇÃO LOCAL que ela guarda.
+  // Sem as três, uma árvore forjada quebra no `require` ou reprova por "ação
+  // ausente" — vermelho pelo motivo errado esconde o que estava sendo medido.
+  "ci/codigo_de_saida.js",
+  ".github/actions/portao/action.yml",
+  ".github/actions/portao/index.js",
   "ci/pisos_autorizados.js",
   "ci/piso_do_portao.json",
   "ci/artefato.js",
@@ -138,19 +144,37 @@ function passoInteiro(nome) {
   return corpo.join("\n") + "\n";
 }
 
-/** O texto EXATO do escalar de `run:` de um passo, pelo nome.
+/** O texto EXATO da INVOCAÇÃO de um passo, pelo nome.
  *
- *  Em fluxo é uma linha; em bloco são a linha do `run:` mais todas as que
- *  pertencem ao bloco. Devolver a região inteira é o que permite trocar UMA
- *  forma canônica pela OUTRA numa sabotagem, em vez de colar um bloco novo ao
- *  lado de uma linha que ficou órfã. */
+ *  Em `run:` de fluxo é uma linha; em `run:` de bloco são a linha do `run:`
+ *  mais todas as que pertencem ao bloco. Devolver a região inteira é o que
+ *  permite trocar UMA forma canônica pela OUTRA numa sabotagem, em vez de colar
+ *  um bloco novo ao lado de uma linha que ficou órfã.
+ *
+ *  [OS 54-C6] E EM `uses:` é a linha do `uses:`.
+ *
+ *  O passo do veredito deixou de ter `run:`: ele virou `uses:` de uma ação
+ *  JavaScript local, justamente para não ter mais campo de shell onde compor.
+ *  Se esta função continuasse exigindo `run:`, as sabotagens NOMINAIS da
+ *  campanha da OS 54-C5 que miram o juiz morreriam por âncora — e caso que
+ *  morre por âncora não mede coisa nenhuma, ele só some do placar.
+ *
+ *  Com a generalização elas continuam significando exatamente o que diziam
+ *  significar: "o texto fica no lugar certo e a invocação deixa de ser
+ *  invocação". Trocar a linha do `uses:` por um `run: echo …` é a mesma
+ *  sabotagem daquela campanha, escrita na forma que o passo tem hoje. */
 function runDoPasso(nome) {
   const { linhas, inicio, fim } = limitesDoPasso(nome);
   let iRun = -1;
   for (let i = inicio; i < fim; i++) {
     if (/^\s+run:/.test(linhas[i])) { iRun = i; break; }
   }
-  if (iRun < 0) throw new Error("o passo `" + nome + "` não tem `run:` no workflow real");
+  if (iRun < 0) {
+    for (let i = inicio; i < fim; i++) {
+      if (/^\s+uses:/.test(linhas[i])) return linhas[i];
+    }
+    throw new Error("o passo `" + nome + "` não tem `run:` nem `uses:` no workflow real");
+  }
 
   const recuoRun = (/^[ ]*/.exec(linhas[iRun]) || [""])[0].length;
   const resto = linhas[iRun].replace(/^\s+run:\s*/, "").replace(/\s+$/, "");
@@ -180,6 +204,9 @@ const TRECHOS = Object.freeze({
   resumoChamada: "node ci/portao_do_ci.js --resumo",
   get invocacaoGuardiao() { return passoInteiro("Guardião da auditabilidade") + "\n"; },
   get invocacaoInventario() { return passoInteiro("Inventário por execução") + "\n"; },
+  // [OS 54-C6] O passo próprio da autoridade do código de saída. Ele roda
+  // ANTES do veredito e é a metade do §3 que não mora em `test/*.test.js`.
+  get invocacaoDaPreservacao() { return passoInteiro("Preservação do código de saída") + "\n"; },
   // [OS 54-C4] A invocação da autoridade do artefato produtivo. Ela é o passo
   // que a OS 52-C4 entregou, e a composição a pôs sob a MESMA exigência das
   // outras: presente, sem `if:` e sem `continue-on-error:`.
@@ -193,6 +220,12 @@ const TRECHOS = Object.freeze({
   get runDoGuardiao() { return runDoPasso("Guardião da auditabilidade"); },
   get runDoInventario() { return runDoPasso("Inventário por execução"); },
   get runDoArtefato() { return runDoPasso("Artefato produtivo único"); },
+  // [OS 54-C6] O `run:` do passo da autoridade do código de saída. Ele é a
+  // âncora do caso que prova que a autoridade guarda o próprio passo — e vem
+  // do arquivo, e não de um literal, porque o controle `D28` da campanha troca
+  // uma forma canônica pela outra e exige VERDE. Um literal ali faria o caso
+  // morrer por âncora nesse controle, que é morrer sem medir nada.
+  get runDaPreservacao() { return runDoPasso("Preservação do código de saída"); },
   cabecalhoDoInventario: "      - name: Inventário por execução",
 });
 
@@ -213,11 +246,23 @@ const TRECHOS = Object.freeze({
 // forma. É o que permite ao controle `E27` — trocar uma forma canônica pela
 // outra e exigir VERDE — significar alguma coisa.
 
-/** O comando de um escalar de `run:`, e como recolocá-lo lá dentro. */
+/** O comando de uma invocação de passo, e como recolocá-lo lá dentro.
+ *
+ *  [OS 54-C6] Três formas: `run:` de fluxo, `run:` de bloco e `uses:`. Na
+ *  terceira o "comando" é a ação referenciada — e prefixá-la com `echo`, que é
+ *  o gesto das sabotagens nominais, produz um `uses:` que não resolve para ação
+ *  nenhuma. É a tradução exata do gesto para a forma nova. */
 function partesDoRun(run) {
   const linhas = String(run).split("\n");
+  const comUses = /^(\s+)uses:\s*(.*)$/.exec(linhas[0]);
+  if (comUses && !/^(\s+)run:/.test(linhas[0])) {
+    return {
+      forma: "uses", recuoRun: comUses[1], comando: comUses[2].replace(/\s+$/, ""),
+      corpo: null, recuoCorpo: null,
+    };
+  }
   const cabecalho = /^(\s+)run:\s*(.*)$/.exec(linhas[0]);
-  if (!cabecalho) throw new Error("isto não é um escalar de `run:`: " + run.slice(0, 60));
+  if (!cabecalho) throw new Error("isto não é uma invocação de passo: " + run.slice(0, 60));
   const recuoRun = cabecalho[1];
   const resto = cabecalho[2].replace(/\s+$/, "");
 
@@ -234,6 +279,7 @@ function partesDoRun(run) {
 /** Troca o COMANDO preservando a forma do escalar. */
 function comComandoTrocado(run, novoComando) {
   const p = partesDoRun(run);
+  if (p.forma === "uses") return p.recuoRun + "uses: " + novoComando;
   if (p.forma === "fluxo") return p.recuoRun + "run: " + novoComando;
   const corpo = p.corpo.slice();
   corpo[p.primeira] = p.recuoCorpo + novoComando;
@@ -252,6 +298,9 @@ function comPrefixoNoComando(run, prefixo) {
  *  equivalente, e a conversão falha alto em vez de inventar uma. */
 function outraFormaDoRun(run) {
   const p = partesDoRun(run);
+  if (p.forma === "uses") {
+    throw new Error("`uses:` não tem forma canônica alternativa — é essa a razão de o juiz morar nele");
+  }
   if (p.forma === "fluxo") {
     return p.recuoRun + "run: |\n" + p.recuoRun + "  " + p.comando;
   }

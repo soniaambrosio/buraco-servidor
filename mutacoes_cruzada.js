@@ -259,19 +259,37 @@ const SABOTAGENS = [
     ),
   },
   {
+    // [OS 54-C6] A ÂNCORA DO PISO GLOBAL SAI DO ARQUIVO, e não de um literal.
+    //
+    // Ela era `"casos_minimos": 927,` escrito à mão. O piso subiu para 956 nesta
+    // ponta e o caso ABORTOU por âncora ausente — cópia de número dentro do
+    // arnês envelhece calada. A sabotagem não mudou: continua rebaixando as
+    // DUAS famílias de uma vez, e o rebaixamento continua sendo para 700.
     id: "X11", nome: "pisos das DUAS familias rebaixados de uma vez",
     aplicar: (d, i) => {
-      trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 700,', i);
+      const atual = JSON.parse(fs.readFileSync(path.join(d, PISO_GLOBAL), "utf8")).casos_minimos;
+      if (!Number.isInteger(atual)) throw new Error(i + ": `casos_minimos` ilegivel no piso global");
+      trocar(d, PISO_GLOBAL, '"casos_minimos": ' + atual + ",", '"casos_minimos": 700,', i);
       trocar(d, CENSO, '"unicidade_do_portador.test.js": 48,', '"unicidade_do_portador.test.js": 16,', i);
     },
   },
   {
+    // [OS 54-C6] OS TRÊS NÚMEROS SAEM DOS ARQUIVOS, e não de literais. Eram
+    // `927` escrito à mão em três lugares; o piso subiu para 956 nesta ponta e o
+    // caso ABORTOU por âncora ausente. A sabotagem não mudou: continua
+    // recarimbando TODOS os números editáveis de uma vez, para os mesmos alvos.
     id: "X12", nome: "recarimbo de TODOS os numeros editaveis, de uma vez",
     aplicar: (d, i) => {
-      trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 600,', i);
-      trocar(d, PISO_GLOBAL, '"suites_minimas": 87,', '"suites_minimas": 70,', i);
-      trocar(d, PISO_GLOBAL, '"casos": 927, "suites": 87', '"casos": 600, "suites": 70', i);
-      trocar(d, SUITE_CI, "const CASOS_MEDIDOS_NA_BASE = 927;", "const CASOS_MEDIDOS_NA_BASE = 600;", i);
+      const piso = JSON.parse(fs.readFileSync(path.join(d, PISO_GLOBAL), "utf8"));
+      const casos = piso.casos_minimos;
+      const suites = piso.suites_minimas;
+      if (!Number.isInteger(casos) || !Number.isInteger(suites)) {
+        throw new Error(i + ": piso global ilegivel");
+      }
+      trocar(d, PISO_GLOBAL, '"casos_minimos": ' + casos + ",", '"casos_minimos": 600,', i);
+      trocar(d, PISO_GLOBAL, '"suites_minimas": ' + suites + ",", '"suites_minimas": 70,', i);
+      trocar(d, PISO_GLOBAL, '"casos": ' + casos + ', "suites": ' + suites, '"casos": 600, "suites": 70', i);
+      trocar(d, SUITE_CI, "const CASOS_MEDIDOS_NA_BASE = " + casos + ";", "const CASOS_MEDIDOS_NA_BASE = 600;", i);
       trocar(d, SUITE_CI, "const SUITES_MEDIDAS_NA_BASE = 87;", "const SUITES_MEDIDAS_NA_BASE = 70;", i);
       trocar(d, CENSO, '"unicidade_do_portador.test.js": 48,', '"unicidade_do_portador.test.js": 16,', i);
       trocar(d, PISOS, '  "unicidade_do_portador.test.js": 48,', '  "unicidade_do_portador.test.js": 16,', i);

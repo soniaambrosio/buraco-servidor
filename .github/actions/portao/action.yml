@@ -1,0 +1,54 @@
+# .github/actions/portao/action.yml — O JUIZ SAI DO CAMPO DE SHELL LIVRE
+# (OS 54-C6, §2).
+#
+# ===========================================================================
+# POR QUE ESTA AÇÃO EXISTE
+# ===========================================================================
+#
+# Até a OS 54-C5 o veredito morava num `run:`. A OS 54-C5 provou que o comando
+# EXECUTA — parser de shell de verdade, `echo`/`printf`/heredoc/variável todos
+# recusados. A OS 54-R5 provou que executar não basta:
+#
+#     run: node ci/portao_do_ci.js "$EVIDENCIA/npm-test.txt" "$EVIDENCIA/exit.txt" || echo "seguimos"
+#
+# O juiz roda, imprime `PORTÃO VERMELHO`, sai com 1 — e o PASSO termina com 0,
+# porque quem decide o código de saída de um `run:` é o script inteiro, não o
+# comando que interessa. Uma suíte vermelha embarcaria como sucesso.
+#
+# `run:` é um campo de SHELL LIVRE, e todo campo de shell livre tem essa porta:
+# `||`, `|`, `&`, `set +e`, um comando depois. Fechar a porta por leitura é
+# possível — e a OS 54-C6 também a fecha, para os passos que continuam em
+# `run:` —, mas para o passo DECISIVO a correção certa é outra: tirar o juiz do
+# campo de shell.
+#
+# Uma ação JavaScript local não tem shell no meio. O runner executa
+# `runs.main` com Node e usa o CÓDIGO DE SAÍDA DO PROCESSO como resultado do
+# passo. Não há onde escrever `|| echo`: `run:` e `uses:` são mutuamente
+# exclusivos no mesmo passo, então o passo do juiz deixou de ter campo de shell
+# para compor.
+#
+# ===========================================================================
+# O QUE ELA NÃO FAZ
+# ===========================================================================
+#
+# Não julga nada. `ci/portao_do_ci.js` continua sendo o único juiz da
+# evidência, e continua sendo chamável à mão do jeito de sempre. Esta ação é um
+# fio: recebe os dois caminhos, executa o juiz e devolve o código dele.
+#
+# NÃO USA DEPENDÊNCIA NENHUMA — nada de `@actions/core`, nada de `node_modules`.
+# Uma ação que precisasse de instalação teria de ser empacotada, e um bundle
+# commitado é exatamente o tipo de arquivo que ninguém revisa.
+name: 'Portão fail-closed'
+description: 'Executa o juiz da evidência do CI e entrega o código de saída dele diretamente ao runner, sem shell no meio.'
+
+inputs:
+  saida:
+    description: 'Arquivo com a saída literal do `npm test`.'
+    required: true
+  marcador:
+    description: 'Arquivo com o código de saída do `npm test`.'
+    required: true
+
+runs:
+  using: 'node24'
+  main: 'index.js'

@@ -305,7 +305,13 @@ test("AUD/COMPOSIÇÃO — a autoridade do artefato continua na cadeia", async (
     // `INVOCACOES_OBRIGATORIAS` e AUD-18 passaria a medir nada — a sabotagem
     // sairia do alcance do caso que a persegue, em vez de ser detectada por ele.
     const oQues = GUARDIAO.INVOCACOES_OBRIGATORIAS.map((e) => e.oQue).join(" | ");
-    for (const exigido of ["juiz", "guardião", "inventário", "artefato produtivo"]) {
+    // [OS 54-C6] O JUIZ SAIU DESTA LISTA e entrou noutra, e a troca é o
+    // conteúdo desta OS: um `uses:` não tem `run:` para "executar de verdade",
+    // e a pergunta certa sobre ele é outra — a forma do passo, a forma da ação
+    // e o código de saída. Quem a faz é `ci/codigo_de_saida.js`, e a invocação
+    // DELE tomou o lugar do juiz nesta lista. Sem isso, a lista cobraria uma
+    // pergunta que não se aplica e deixaria de cobrar a que se aplica.
+    for (const exigido of ["preservação do código de saída", "guardião", "inventário", "artefato produtivo"]) {
       assert.ok(
         oQues.includes(exigido),
         "`INVOCACOES_OBRIGATORIAS` deixou de cobrar " + exigido + ": " + oQues
@@ -315,6 +321,19 @@ test("AUD/COMPOSIÇÃO — a autoridade do artefato continua na cadeia", async (
     assert.ok(
       chamadas.includes("artefato produtivo"),
       "`CHAMADAS_DO_PRETEST` deixou de cobrar a autoridade do artefato: " + chamadas
+    );
+    // [OS 54-C6] E A PROVA COMPORTAMENTAL do código de saída, que é a única
+    // chamada da cadeia que EXECUTA o entrypoint da ação. Tirá-la do `pretest`
+    // deixaria a leitura estrutural sozinha — e leitura estrutural sozinha foi
+    // exatamente o que a R4 derrubou.
+    assert.ok(
+      chamadas.includes("código de saída"),
+      "`CHAMADAS_DO_PRETEST` deixou de cobrar a preservação do código de saída: " + chamadas
+    );
+    assert.equal(
+      GUARDIAO.INVOCACOES_OBRIGATORIAS.filter((e) => e.alvo === "ci/portao_do_ci.js").length, 0,
+      "o juiz voltou a ser cobrado como invocação de `run:` — ele não tem `run:`, e cobrar a " +
+      "pergunta errada é aprovar a que importa por omissão"
     );
 
     // [OS 54-C5] E CADA EXIGÊNCIA ANCORA UM PASSO CANÔNICO. Sem o `passo`, a
@@ -348,7 +367,12 @@ test("AUD/COMPOSIÇÃO — a autoridade do artefato continua na cadeia", async (
 /** As três autoridades cuja invocação a §1 manda tornar incontornável, mais a
  *  do artefato, que divide o mesmo endereço desde a OS 54-C4. */
 const CANONICOS = Object.freeze([
-  ["o juiz", TRECHOS.runDoJuiz, /INVOCAÇÃO AUSENTE.*juiz fail-closed/],
+  // [OS 54-C6] O JUIZ MORA NUM `uses:`, e `TRECHOS.runDoJuiz` devolve a linha
+  // do `uses:`. Prefixá-la com `echo` — o gesto desta família inteira —
+  // produz uma referência de ação que não resolve para ação nenhuma, e a
+  // reprovação vem com outro nome porque a pergunta é outra. O gesto continua
+  // sendo medido; o que mudou é que ele já morre antes de virar comando.
+  ["o juiz", TRECHOS.runDoJuiz, /VEREDITO EM OUTRA AÇÃO/],
   ["o guardião", TRECHOS.runDoGuardiao, /INVOCAÇÃO AUSENTE.*guardião/],
   ["o inventário", TRECHOS.runDoInventario, /INVOCAÇÃO AUSENTE.*inventário/],
   ["o artefato", TRECHOS.runDoArtefato, /INVOCAÇÃO AUSENTE.*artefato produtivo/],
@@ -373,7 +397,7 @@ test("AUD/EXECUÇÃO — presença textual não satisfaz nenhuma autoridade", as
   await t.test("AUD-22: `printf` do comando não é o comando", () => {
     exigeMotivo(
       comRunTrocado(TRECHOS.runDoJuiz, "        run: printf '%s\\n' 'node ci/portao_do_ci.js'"),
-      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      /VEREDITO COM ATRIBUTO ESTRANHO.*`run`/,
       "imprimir o nome do juiz passou por executá-lo"
     );
   });
@@ -418,7 +442,7 @@ test("AUD/EXECUÇÃO — presença textual não satisfaz nenhuma autoridade", as
   await t.test("AUD-27: `true` e `:` no lugar da chamada reprovam", () => {
     exigeMotivo(
       comRunTrocado(TRECHOS.runDoJuiz, "        run: 'true # node ci/portao_do_ci.js'"),
-      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      /VEREDITO COM ATRIBUTO ESTRANHO.*`run`/,
       "`true` substituiu o juiz"
     );
     exigeMotivo(
@@ -436,12 +460,25 @@ test("AUD/EXECUÇÃO — presença textual não satisfaz nenhuma autoridade", as
     );
     // E o contraste que impede a regra de virar veto geral: um `exit`
     // CONDICIONAL não torna o resto inalcançável.
-    assert.deepEqual(
-      comRunTrocado(
-        TRECHOS.runDoGuardiao,
-        "        run: |\n          [ -n \"$PULAR\" ] && exit 0\n          node ci/auditabilidade.js"
-      ),
-      []
+    //
+    // [OS 54-C6] O CONTRASTE MUDOU DE ENDEREÇO, e não de sentido. Esta forma
+    // continua sendo uma INVOCAÇÃO EXECUTÁVEL para a autoridade da C5 — é isso
+    // que o caso sempre quis dizer —, e passou a ser recusada pela autoridade
+    // do CÓDIGO DE SAÍDA, porque um passo com duas linhas e um `&&` entrega ao
+    // job o resultado da ÚLTIMA, não o do guardião. Afirmar as duas coisas
+    // separadamente é o que impede uma de encobrir a outra.
+    const condicional = comRunTrocado(
+      TRECHOS.runDoGuardiao,
+      "        run: |\n          [ -n \"$PULAR\" ] && exit 0\n          node ci/auditabilidade.js"
+    );
+    assert.equal(
+      condicional.filter((m) => /INVOCAÇÃO AUSENTE/.test(m)).length, 0,
+      "a saída CONDICIONAL virou veto geral: a chamada seguinte foi tratada como inalcançável"
+    );
+    exigeMotivo(
+      condicional,
+      /CÓDIGO DE SAÍDA NÃO PRESERVADO em `Guardião da auditabilidade`/,
+      "duas linhas e um `&&` no passo do guardião passaram a entregar ao job o resultado da última"
     );
   });
 
@@ -459,7 +496,7 @@ test("AUD/EXECUÇÃO — presença textual não satisfaz nenhuma autoridade", as
         TRECHOS.runDoJuiz,
         "        run: test -f \"node ci/portao_do_ci.js\" && echo \"node ci/portao_do_ci.js $EVIDENCIA/npm-test.txt $EVIDENCIA/exit.txt\""
       ),
-      /INVOCAÇÃO AUSENTE.*juiz fail-closed/,
+      /VEREDITO COM ATRIBUTO ESTRANHO.*`run`/,
       "o alvo apareceu duas vezes num comando composto e nenhuma delas era execução"
     );
   });

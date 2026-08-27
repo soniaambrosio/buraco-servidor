@@ -55,7 +55,13 @@ const { exigirArtefatoUnico } = require("../ci/artefato.js");
 // invocação dela no workflow é reprovada por `ci/auditabilidade.js`, que roda
 // aqui.
 const { conferirAuditabilidade } = require("../ci/auditabilidade.js");
-const { conferirPisosDeclarados } = require("../ci/pisos_autorizados.js");
+// [OS 54-C6] A autoridade que responde "o passo DEPENDE do resultado disso?".
+// Aqui ela roda com a PROVA COMPORTAMENTAL ligada: o entrypoint da ação do
+// portão é executado contra evidência forjada, nos dois sentidos, e o código de
+// saída dele tem de ser idêntico ao do juiz. Estrutura sozinha é o que a
+// OS 54-R4 já mostrou não bastar.
+const { conferirPreservacaoDoCodigo } = require("../ci/codigo_de_saida.js");
+const { conferirPisosDeclarados, conferirPesoDosNominais } = require("../ci/pisos_autorizados.js");
 const { OBRIGATORIAS, conferirCenso } = require("./censo_de_suites.js");
 
 try {
@@ -85,7 +91,9 @@ try {
 
   const motivos = [
     ...conferirAuditabilidade({}),
+    ...conferirPreservacaoDoCodigo({ executar: true }),
     ...conferirPisosDeclarados(OBRIGATORIAS),
+    ...conferirPesoDosNominais(),
   ];
   if (motivos.length > 0) {
     throw new Error(
@@ -101,7 +109,7 @@ try {
     "piso ancorado: " + piso.comparacoes + " comparações contra " +
     piso.ancoras.map((s) => s.slice(0, 7)).join(", ") +
     " · amarrações: " + amarracoes +
-    " · auditabilidade e pisos declarados: verdes\n"
+    " · auditabilidade, código de saída e pisos declarados: verdes\n"
   );
 } catch (erro) {
   process.stderr.write("\n[guarda do portão] REPROVADO\n" + ((erro && erro.message) || erro) + "\n");

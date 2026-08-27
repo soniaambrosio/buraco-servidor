@@ -59,13 +59,15 @@ const MINIMO_DECLARADO_NO_CENSO = Object.freeze({
   // [OS 52-C4] A AUTORIDADE do artefato produtivo único, herdada da base
   // homologada. Sem entrada aqui, o piso dela seria editável num arquivo só.
   "artefato_unico.test.js": 54,
-  "ci_obrigatorio.test.js": 99,
+  "ci_obrigatorio.test.js": 100,
   // [OS 54-C2, portadas pela OS 54-C4] As duas suítes próprias da cadeia
   // externa: a do guardião do rastro e a do inventário por execução.
-  "auditabilidade_ci.test.js": 42,
+  "auditabilidade_ci.test.js": 43,
   "inventario_executado.test.js": 24,
   // [OS 54-C5] A suíte da autoridade das invocações executáveis.
   "invocacao_executavel.test.js": 32,
+  // [OS 54-C6] A suíte da preservação do código de saída.
+  "codigo_de_saida.test.js": 31,
 });
 
 /** Piso EXECUTADO: casos aprovados, por arquivo de origem.
@@ -94,6 +96,7 @@ const MINIMO_EXECUTADO = Object.freeze({
   "auditabilidade_ci.test.js": 41,
   "inventario_executado.test.js": 22,
   "invocacao_executavel.test.js": 31,
+  "codigo_de_saida.test.js": 29,
 });
 
 /** CASOS NOMINAIS que têm de EXECUTAR E APROVAR, no arquivo indicado.
@@ -159,7 +162,107 @@ const NOMES_OBRIGATORIOS = Object.freeze({
     "EXE-00", "EXE-01", "EXE-02", "EXE-06", "EXE-09", "EXE-09b", "EXE-19",
   ]),
   "inventario_executado.test.js": Object.freeze(["INV-00", "INV-01", "INV-05", "INV-09"]),
+  // [OS 54-C6] `SAI-00` é a trava anti-vácuo (a árvore real passa, inclusive
+  // rodando); `SAI-04` é o escape material da R5 escrito na forma de hoje;
+  // `SAI-09` são as oito composições do Grupo A; `SAI-19` e `SAI-20` são a
+  // prova comportamental do §4 — a suíte vermelha de verdade e o `bash -e`.
+  "codigo_de_saida.test.js": Object.freeze([
+    "SAI-00", "SAI-02", "SAI-04", "SAI-09", "SAI-17", "SAI-18", "SAI-19", "SAI-20", "SAI-22",
+  ]),
 });
+
+/** [OS 54-C6] O PESO MÍNIMO DE CADA CASO NOMINAL, em asserções.
+ *
+ *  Os três pisos acima medem QUANTOS casos existem e quantos executam. Nenhum
+ *  deles vê um caso cujo corpo virou `assert.ok(true)`: o nome continua lá, o
+ *  evento de aprovação continua sendo emitido, a contagem textual não muda, e
+ *  o inventário aprova. Trivializar um caso nominal é a sabotagem mais barata
+ *  que sobrou depois de todas as outras.
+ *
+ *  Os números foram MEDIDOS nesta árvore, não escritos de cabeça, e são o valor
+ *  REAL — sem folga, porque folga aqui é espaço para apagar asserção sem
+ *  reprovar.
+ *
+ *  O QUE ISTO NÃO PEGA, dito em voz alta: um corpo reescrito com o mesmo número
+ *  de asserções triviais. Não existe leitura barata que separe uma asserção
+ *  forte de uma fraca, e fingir que existe seria pior do que declarar o limite.
+ *  O que ele fecha é o caso barato — apagar o corpo — e ele mora FORA do
+ *  arquivo que protege, que é a lição da OS 54-R2. */
+const PESO_DOS_NOMINAIS = Object.freeze({
+  "codigo_de_saida.test.js": Object.freeze({
+    "SAI-00": 1, "SAI-02": 1, "SAI-04": 1, "SAI-09": 1,
+    "SAI-17": 1, "SAI-18": 1, "SAI-19": 8, "SAI-20": 6, "SAI-22": 2,
+  }),
+});
+
+/** Os corpos dos casos de um arquivo de suíte, por nome.
+ *
+ *  O recorte é do começo de um `t.test("NOME…` até o começo do próximo — sem
+ *  casar chaves. Casar chaves num arquivo com strings, expressões regulares e
+ *  comentários é uma gramática inteira, e uma gramática mal feita erra para o
+ *  lado errado; este recorte erra para o lado de INCLUIR demais, o que só pode
+ *  aprovar um caso trivializado se o SEGUINTE for gordo — e o seguinte é medido
+ *  também. */
+function corposDosCasos(fonte) {
+  const texto = String(fonte).split("\r\n").join("\n");
+  const marca = /\bt\.test\(\s*"([^"]+)"/g;
+  const achados = [];
+  let m;
+  while ((m = marca.exec(texto)) !== null) achados.push({ nome: m[1], inicio: m.index });
+  const corpos = new Map();
+  for (let i = 0; i < achados.length; i++) {
+    const fim = i + 1 < achados.length ? achados[i + 1].inicio : texto.length;
+    corpos.set(achados[i].nome.split(":")[0].trim(), texto.slice(achados[i].inicio, fim));
+  }
+  return corpos;
+}
+
+/** As AFIRMAÇÕES de um corpo de caso.
+ *
+ *  Não é só `assert.`: uma suíte bem escrita concentra a afirmação num
+ *  ajudante — aqui, `exigeMotivo(...)`, que confere que a autoridade reprovou
+ *  PELO MOTIVO certo. Contar só `assert.` daria zero para casos densos, e um
+ *  piso de zero é o contrário de proteger. */
+const contarAssercoes = (corpo) =>
+  (String(corpo).match(/\bassert\.|\bexigeMotivo\s*\(/g) || []).length;
+
+/** Reprova se algum caso nominal ficou mais leve do que o declarado. */
+function conferirPesoDosNominais(raiz) {
+  const fs2 = require("node:fs");
+  const path2 = require("node:path");
+  const base = raiz || path2.join(__dirname, "..");
+  const reprovacoes = [];
+
+  for (const [arquivo, exigidos] of Object.entries(PESO_DOS_NOMINAIS)) {
+    const caminho = path2.join(base, "test", arquivo);
+    let fonte;
+    try {
+      fonte = fs2.readFileSync(caminho, "utf8");
+    } catch (erro) {
+      reprovacoes.push("SUÍTE ILEGÍVEL PARA O PESO: `" + arquivo + "` — " + ((erro && erro.message) || erro));
+      continue;
+    }
+    const corpos = corposDosCasos(fonte);
+    for (const [caso, minimo] of Object.entries(exigidos)) {
+      const corpo = corpos.get(caso);
+      if (corpo === undefined) {
+        reprovacoes.push(
+          "CASO NOMINAL AUSENTE: `" + caso + "` sumiu de `" + arquivo + "` — nome que não existe não prova nada."
+        );
+        continue;
+      }
+      const peso = contarAssercoes(corpo);
+      if (peso < minimo) {
+        reprovacoes.push(
+          "CASO NOMINAL TRIVIALIZADO: `" + caso + "` em `" + arquivo + "` caiu de " + minimo + " para " +
+          peso + " asserção(ões) — o nome continua no lugar, continua executando e continua aprovando, " +
+          "e é exatamente por isso que nenhum contador o alcança."
+        );
+      }
+    }
+  }
+  return reprovacoes;
+}
 
 /** O piso efetivo por arquivo: o MAIOR entre o externo e o declarado. */
 function pisoTextualEfetivo(arquivo, declaradoNoCenso) {
@@ -201,6 +304,6 @@ function conferirPisosDeclarados(censo) {
 }
 
 module.exports = {
-  MINIMO_DECLARADO_NO_CENSO, MINIMO_EXECUTADO, NOMES_OBRIGATORIOS,
-  pisoTextualEfetivo, conferirPisosDeclarados,
+  MINIMO_DECLARADO_NO_CENSO, MINIMO_EXECUTADO, NOMES_OBRIGATORIOS, PESO_DOS_NOMINAIS,
+  pisoTextualEfetivo, conferirPisosDeclarados, corposDosCasos, contarAssercoes, conferirPesoDosNominais,
 };

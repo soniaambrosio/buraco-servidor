@@ -277,8 +277,20 @@ const SABOTAGENS = [
     // ele é medido na cadeia local; que os passos `always()` do provedor não
     // convertem a falha em sucesso é propriedade do runner, e está provada por
     // run externo real no placar desta OS.
+    // [OS 54-C6] A ÂNCORA SAI DO ARQUIVO, e não de um literal.
+    //
+    // Ela era `"casos_minimos": 927,` escrito à mão. O piso subiu para 956 nesta
+    // ponta e o caso ABORTOU por âncora ausente — cópia de número dentro do
+    // arnês envelhece calada, que é a mesma lição do controle `E27` deste
+    // arquivo, aplicada agora a um número em vez de a um trecho de YAML. A
+    // sabotagem não mudou: continua sendo "o piso exige mais casos do que
+    // existem".
     id: "E23", nome: "DELIBERADAMENTE VERMELHO: o piso exige mais casos do que existem",
-    aplicar: (d, i) => trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 99999,', i),
+    aplicar: (d, i) => {
+      const atual = JSON.parse(fs.readFileSync(path.join(d, PISO_GLOBAL), "utf8")).casos_minimos;
+      if (!Number.isInteger(atual)) throw new Error(i + ": `casos_minimos` ilegivel no piso global");
+      trocar(d, PISO_GLOBAL, '"casos_minimos": ' + atual + ",", '"casos_minimos": 99999,', i);
+    },
   },
 
   // --- os CONTROLES, e eles são dois -------------------------------------

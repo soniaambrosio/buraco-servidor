@@ -73,6 +73,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const EXECUTAVEL = require("./invocacao_executavel.js");
+const CODIGO = require("./codigo_de_saida.js");
 
 const CAMINHO_RELATIVO_DO_WORKFLOW = path.join(".github", "workflows", "provas-do-servidor.yml");
 
@@ -92,13 +93,24 @@ const CAMINHO_RELATIVO_DO_WORKFLOW = path.join(".github", "workflows", "provas-d
  *  descaracterizam. O juiz proíbe `--resumo` porque quem imprime o painel é
  *  outro passo, e um passo que só imprimisse não julgaria nada. */
 const INVOCACOES_OBRIGATORIAS = Object.freeze([
+  // [OS 54-C6] O JUIZ SAIU DESTA LISTA, e não por enfraquecimento.
+  //
+  // Ele deixou de ser um `run:`: virou `uses: ./.github/actions/portao`, uma
+  // ação JavaScript local, porque a OS 54-R5 provou que num campo de shell
+  // livre "o comando executa" e "o passo depende do comando" são duas coisas
+  // diferentes — `|| echo "seguimos"` mantinha a primeira e matava a segunda.
+  //
+  // A pergunta que este arquivo faz — "a invocação EXECUTA?" — não se aplica a
+  // um `uses:`, que não tem script. Quem cobra a forma do passo do juiz, a
+  // forma da ação e a preservação do código de saída é `ci/codigo_de_saida.js`,
+  // e a invocação DELE está logo abaixo: tirá-lo do workflow reprova aqui.
   Object.freeze({
-    oQue: "o juiz fail-closed da evidência",
-    passo: "Portão fail-closed",
+    oQue: "a autoridade da preservação do código de saída",
+    passo: "Preservação do código de saída",
     binario: "node",
-    alvo: "ci/portao_do_ci.js",
-    exige: Object.freeze(["$EVIDENCIA/npm-test.txt", "$EVIDENCIA/exit.txt"]),
-    proibe: Object.freeze(["--resumo"]),
+    alvo: "ci/codigo_de_saida.js",
+    exige: Object.freeze([]),
+    proibe: Object.freeze([]),
   }),
   Object.freeze({
     oQue: "este guardião da auditabilidade",
@@ -282,16 +294,19 @@ function conferirAuditabilidade(opcoes) {
       reprovacoes.push("ARTEFATO SEM `path:`: não arquiva coisa nenhuma.");
     } else {
       const arquivado = normalizarCaminho(passoUpload.atributos["path"]);
-      const veredito = EXECUTAVEL.passoChamado(passos, INVOCACOES_OBRIGATORIAS[0].passo);
-      const comando = veredito && veredito.run.presente
-        ? EXECUTAVEL.invocacaoAutoritativa(veredito.run.script, INVOCACOES_OBRIGATORIAS[0]).comando
-        : null;
-      if (!comando) {
+      // [OS 54-C6] O QUE É JULGADO vem das ENTRADAS DA AÇÃO do portão, e não
+      // mais dos argumentos de um comando: o passo do juiz não tem comando.
+      // A leitura mora em `ci/codigo_de_saida.js` porque é lá que a forma do
+      // passo é o contrato — duas leituras do mesmo endereço seriam duas
+      // verdades, e é assim que um caminho muda de um lado só.
+      const julgados = CODIGO.caminhosJulgados(passos);
+      if (julgados === null) {
         reprovacoes.push(
-          "ARTEFATO SEM REFERÊNCIA: não há invocação executável do veredito para comparar o caminho."
+          "ARTEFATO SEM REFERÊNCIA: o passo do veredito não declara as duas entradas de evidência, " +
+          "e sem elas não há o que comparar com o que é arquivado."
         );
       } else {
-        const lidos = comando.argumentos.filter((a) => a.startsWith("$EVIDENCIA/")).map(normalizarCaminho);
+        const lidos = julgados.map(normalizarCaminho).filter((a) => a.startsWith("$EVIDENCIA/"));
         if (lidos.length !== 2) {
           reprovacoes.push(
             "VEREDITO NÃO LÊ DOIS ARQUIVOS DE EVIDÊNCIA: " + JSON.stringify(lidos) +
@@ -358,6 +373,14 @@ function conferirAuditabilidade(opcoes) {
   // chamada de `conferirCenso` de DENTRO das suítes virou defesa redundante: a
   // obrigatória passou a ser a de fora.
   for (const motivo of conferirCadeiaDoPretest(raiz)) reprovacoes.push(motivo);
+
+  // --- [OS 54-C6] o CÓDIGO DE SAÍDA do veredito chega ao job ---------------
+  //
+  // Leitura ESTRUTURAL aqui (a prova comportamental é pedida pelo passo próprio
+  // e pelo `pretest`, que rodam uma vez cada). Este guardião roda em dezenas de
+  // árvores forjadas por caso de teste; executar quatro processos em cada uma
+  // dobraria a corrida sem medir nada que o passo próprio já não meça.
+  for (const motivo of CODIGO.conferirPreservacaoDoCodigo({ raiz })) reprovacoes.push(motivo);
 
   // --- o CONTEÚDO que o gerador de fato produz -----------------------------
   //
@@ -446,12 +469,21 @@ function conferirInvocacao(passos, exigencia) {
 const CHAMADAS_DO_PRETEST = Object.freeze([
   ["o censo das suítes obrigatórias", /(?:^|[^/])\bconferirCenso\s*\(/m],
   ["o guardião da auditabilidade", /(?:^|[^/])\bconferirAuditabilidade\s*\(/m],
+  // [OS 54-C6] A PROVA COMPORTAMENTAL do código de saída. Ela é pedida aqui, e
+  // não pelo guardião, porque é a única chamada da cadeia que EXECUTA quatro
+  // processos: no `pretest` isso acontece uma vez por corrida, e é a metade
+  // desta autoridade que vive fora de `test/*.test.js`.
+  ["a preservação do código de saída do veredito", /(?:^|[^/])\bconferirPreservacaoDoCodigo\s*\(/m],
   ["a autoridade do artefato produtivo único", /(?:^|[^/])\bexigirArtefatoUnico\s*\(/m],
   ["a prova da unicidade por capacidade composta", /(?:^|[^/])\bconferirProvaDaUnicidade\s*\(/m],
   ["o glob oficial do portão", /(?:^|[^/])\bconferirGlobOficial\s*\(/m],
   ["o piso ancorado no commit anterior", /(?:^|[^/])\bconferirPisoAncorado\s*\(/m],
   ["a amarração da autoridade do piso", /(?:^|[^/])\bconferirAmarracao\s*\(/m],
   ["os mínimos externos de piso", /(?:^|[^/])\bconferirPisosDeclarados\s*\(/m],
+  // [OS 54-C6] O PESO dos casos nominais. Sem esta linha, um caso nominal
+  // trivializado — nome no lugar, corpo virando `assert.ok(true)` — passa por
+  // todos os contadores: ele existe, executa e aprova.
+  ["o peso dos casos nominais", /(?:^|[^/])\bconferirPesoDosNominais\s*\(/m],
 ]);
 
 /** Recorta comentários de JavaScript, com trava contra o próprio recorte.
@@ -539,8 +571,10 @@ function principal() {
   if (reprovacoes.length === 0) {
     process.stdout.write(
       "AUDITABILIDADE VERDE — artefato e resumo presentes, sempre executados, apontando para a " +
-      "evidência julgada, o gerador do painel produz conteúdo, e as autoridades externas (juiz, " +
-      "guardião, inventário e artefato produtivo) são INVOCADAS DE VERDADE nos passos canônicos.\n"
+      "evidência julgada, o gerador do painel produz conteúdo, as autoridades externas (guardião, " +
+      "preservação do código de saída, inventário e artefato produtivo) são INVOCADAS DE VERDADE " +
+      "nos passos canônicos, e o veredito continua sendo a ação local cujo código de saída é o " +
+      "do juiz.\n"
     );
     return 0;
   }

@@ -78,17 +78,21 @@ const OBRIGATORIAS = Object.freeze({
   "artefato_unico.test.js": 54,           // OS 52-C4 — artefato produtivo unico
   // [OS 54] A metade de dentro do CI obrigatorio. Ela le o workflow e reprova
   // quem o desliga; registrada aqui, a remocao DELA reprova pelas outras tres.
-  "ci_obrigatorio.test.js": 99,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3; +16 na OS 54-C4 (os subcasos da auditabilidade e a CI-20)
+  "ci_obrigatorio.test.js": 100,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3; +16 na OS 54-C4 (os subcasos da auditabilidade e a CI-20)
   // [OS 54-C4] As duas suites proprias da CADEIA EXTERNA: a do guardiao do
   // rastro e a do inventario por execucao. Sem registro aqui, apaga-las seria
   // mudo — e sao elas que provam que as autoridades de fora nao foram
   // esvaziadas. Registradas, a remocao de qualquer uma reprova pelas outras.
-  "auditabilidade_ci.test.js": 42,
+  "auditabilidade_ci.test.js": 43,
   "inventario_executado.test.js": 24,
   // [OS 54-C5] A suite da autoridade que separa TEXTO de EXECUCAO. Ela nasce
   // do escape da OS 54-R4: `echo node ci/portao_do_ci.js` mantinha o texto e
   // desligava o juiz, e nenhuma guarda percebia.
   "invocacao_executavel.test.js": 32,
+  // [OS 54-C6] A suíte da autoridade do código de saída do veredito. Ela é a
+  // metade de dentro do §3: a de fora é `ci/codigo_de_saida.js`, e nenhuma
+  // das duas responde sozinha pela própria presença.
+  "codigo_de_saida.test.js": 31,
 });
 
 /** Conta casos, INCLUINDO subtestes.

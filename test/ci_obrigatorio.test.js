@@ -92,7 +92,7 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
  *  continuam aqui como a segunda leitura, e CI-23 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 927;
+const CASOS_MEDIDOS_NA_BASE = 956;
 const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação
@@ -227,21 +227,57 @@ test("CI/WORKFLOW — o CI externo existe, dispara sozinho e roda o alvo oficial
     );
   });
 
-  await t.test("CI-06: o veredito é um passo próprio, incondicional e não rebaixado", () => {
-    const chamada = /node\s+ci\/portao_do_ci\.js\s+"\$EVIDENCIA\/npm-test\.txt"\s+"\$EVIDENCIA\/exit\.txt"/;
-    assert.match(texto, chamada, "o portão fail-closed não é chamado pelo workflow");
-
+  // [OS 54-C6] O VEREDITO DEIXOU DE SER UM `run:`.
+  //
+  // A OS 54-R5 provou de ponta a ponta que "o comando executa" e "o passo
+  // depende do comando" são coisas diferentes num campo de shell livre:
+  //
+  //     run: node ci/portao_do_ci.js "$E/npm-test.txt" "$E/exit.txt" || echo "seguimos"
+  //
+  // O juiz rodava, reprovava, saía com 1 — e o passo terminava com 0. A
+  // correção não foi proibir mais uma forma: foi tirar o passo decisivo do
+  // campo de shell. `uses:` não tem script, e `run:` e `uses:` são mutuamente
+  // exclusivos no mesmo passo, então não sobrou onde compor.
+  //
+  // Este caso mede a FORMA. Que o código de saída chegue ao job de verdade é
+  // medido rodando, em `test/codigo_de_saida.test.js` e em
+  // `ci/codigo_de_saida.js` — as duas metades do §3, e nenhuma delas mora aqui.
+  await t.test("CI-06: o veredito é um passo próprio, sem campo de shell e não rebaixado", () => {
     const passos = passosDo(texto);
-    const doVeredito = passos.filter((p) => chamada.test(p.corpo) && !/--resumo/.test(p.corpo));
+    const doVeredito = passos.filter((p) => /^\s{4,}-\s+name:\s*Portão fail-closed\s*$/m.test(p.corpo));
     assert.equal(
       doVeredito.length, 1,
       "o passo do veredito tem de existir exatamente uma vez (encontrados: " + doVeredito.length + ")"
     );
+    const corpo = doVeredito[0].corpo;
+
+    assert.match(
+      corpo, /^\s+uses:\s*\.\/\.github\/actions\/portao\s*$/m,
+      "o veredito deixou de ser a ação local do portão — um `uses:` que não começa por `./` sai do checkout"
+    );
     assert.ok(
-      !/^\s+if:/m.test(doVeredito[0].corpo),
+      !/^\s+run:/m.test(corpo),
+      "o passo do veredito voltou a ter `run:` — é exatamente o campo de shell que a R5 usou para " +
+      "trocar o código de saída do juiz por sucesso"
+    );
+    assert.match(corpo, /^\s+saida:\s*\$\{\{ env\.EVIDENCIA \}\}\/npm-test\.txt\s*$/m, "a evidência julgada mudou de endereço");
+    assert.match(corpo, /^\s+marcador:\s*\$\{\{ env\.EVIDENCIA \}\}\/exit\.txt\s*$/m, "o marcador julgado mudou de endereço");
+    assert.ok(
+      !/^\s+if:/m.test(corpo),
       "o passo do veredito ganhou um `if:` — condicionar o portão é desligá-lo sem apagá-lo"
     );
+    assert.ok(
+      !/continue-on-error/.test(corpo),
+      "o passo do veredito perdoa o próprio erro — o job deixaria de depender do veredito"
+    );
+
     assert.ok(fs.existsSync(CAMINHO_DO_PORTAO), "`ci/portao_do_ci.js` sumiu — o veredito ficou sem juiz");
+    const acao = path.join(RAIZ, ".github", "actions", "portao");
+    assert.ok(fs.existsSync(path.join(acao, "action.yml")), "a ação local do portão sumiu do checkout");
+    assert.ok(fs.existsSync(path.join(acao, "index.js")), "o entrypoint da ação local do portão sumiu");
+    const manifesto = fs.readFileSync(path.join(acao, "action.yml"), "utf8");
+    assert.match(manifesto, /using:\s*'node24'/, "o runtime da ação deixou de ser fixado em `node24`");
+    assert.match(manifesto, /main:\s*'index\.js'/, "o entrypoint declarado da ação mudou");
   });
 
   await t.test("CI-07: permissão de leitura, e só", () => {

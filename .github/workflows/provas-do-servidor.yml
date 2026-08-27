@@ -37,13 +37,46 @@
 #                                     do que foi julgado;
 #   * `ci/inventario_de_execucao.js` — quantos casos CADA arquivo executou e
 #                                     aprovou, e quais casos NOMINAIS rodaram;
-#   * `ci/portao_do_ci.js`          — o juiz fail-closed da evidência;
+#   * `ci/codigo_de_saida.js`       — [OS 54-C6] o código de saída do juiz
+#                                     chega ao job, medido rodando;
+#   * `ci/portao_do_ci.js`          — o juiz fail-closed da evidência, hoje
+#                                     executado pela ação local do portão;
 #   * `ci/artefato.js`              — a autoridade do artefato produtivo único,
 #                                     herdada da OS 52-C4 e preservada aqui.
 #
 # As quatro se vigiam: o guardião cobra a PRESENÇA das outras três neste
 # arquivo, e ele mesmo roda também no `pretest`, então tirá-lo daqui reprova de
 # dentro do `npm test`. Nenhuma delas depende de a suíte ter rodado.
+#
+# [OS 54-C6] E O VEREDITO SAIU DO CAMPO DE SHELL LIVRE.
+#
+# A OS 54-R5 mediu, de ponta a ponta e com uma suíte realmente vermelha, que
+# executar o juiz não é o mesmo que depender dele:
+#
+#     run: node ci/portao_do_ci.js "$EVIDENCIA/…" "$EVIDENCIA/…" || echo "seguimos"
+#
+# O juiz rodava, imprimia `PORTÃO VERMELHO`, saía com 1 — e o PASSO saía com 0,
+# porque o código de saída de um `run:` é o do SCRIPT, não o do comando que
+# interessa. As guardas da C5 aprovavam com razão: a pergunta delas era "isso
+# vai rodar?", e a resposta era sim.
+#
+# Duas mudanças fecham o eixo:
+#
+#   * o passo do veredito virou `uses: ./.github/actions/portao` — uma ação
+#     JavaScript LOCAL, sem dependência e sem shell no meio. O runner executa o
+#     entrypoint dela com Node e usa o CÓDIGO DE SAÍDA DO PROCESSO como
+#     resultado do passo. `run:` e `uses:` são mutuamente exclusivos, então o
+#     passo decisivo deixou de ter campo onde compor;
+#   * os passos que continuam em `run:` e cujo resultado É um veredito passaram
+#     a aceitar UM COMANDO SIMPLES sozinho no script — nem `;`, nem `&&`, nem
+#     `||`, nem cano, nem segundo plano, nem redirecionamento. Não é lista
+#     negra: é a única forma em que o código de saída do script é, por
+#     definição, o do comando.
+#
+# Quem confere isso é `ci/codigo_de_saida.js`, que roda como PASSO PRÓPRIO
+# abaixo (antes do julgamento), no `pretest` e pela suíte obrigatória — e que
+# EXECUTA o entrypoint contra evidência forjada em vez de acreditar no texto
+# dele.
 #
 # NÃO USA SEGREDO NENHUM, e não pode passar a usar: o servidor não tem
 # dependência privada, e as suítes sobem tudo em portas locais.
@@ -130,6 +163,22 @@ jobs:
       - name: Guardião da auditabilidade
         run: node ci/auditabilidade.js
 
+      # [OS 54-C6] A AUTORIDADE DO CÓDIGO DE SAÍDA, num passo próprio e ANTES
+      # do julgamento.
+      #
+      # Ela responde a pergunta que faltava — "o passo DEPENDE do resultado
+      # disso?" — e responde EXECUTANDO: roda o entrypoint da ação do portão
+      # contra evidência forjada, nos dois sentidos, e exige que o código de
+      # saída dele seja idêntico ao do juiz. Um fio que traduza o veredito
+      # reprova aqui, com o job ainda longe do veredito de verdade.
+      #
+      # Passo próprio, e não uma linha dentro do `npm test`, pelo mesmo motivo
+      # de sempre: quem estreita o glob desliga tudo o que vive dentro dele.
+      # Ela roda no `pretest` TAMBÉM, e é essa dupla morada que faz tirá-la
+      # daqui reprovar de dentro do `npm test`.
+      - name: Preservação do código de saída
+        run: node ci/codigo_de_saida.js
+
       # [OS 54-C4] A AUTORIDADE DE QUANTIDADE. Executa as suítes obrigatórias
       # pelo stream de eventos do `node:test` e conta por ARQUIVO DE ORIGEM —
       # caso apagado não emite evento, caso comentado não emite evento, e caso
@@ -138,10 +187,27 @@ jobs:
       - name: Inventário por execução
         run: node ci/inventario_de_execucao.js
 
-      # O VEREDITO. Sem `if:`, sem tolerância a erro: se este passo não rodar,
-      # o job não fica verde por conta própria — e se rodar, é ele quem decide.
+      # [OS 54-C6] O VEREDITO, E ELE SAIU DO CAMPO DE SHELL LIVRE.
+      #
+      # A OS 54-R5 provou que `run:` tem uma porta que nenhuma leitura de
+      # "isso vai rodar?" fecha: o juiz executa, imprime `PORTÃO VERMELHO`, sai
+      # com 1 — e o PASSO termina com 0, porque quem decide o código de saída de
+      # um `run:` é o script INTEIRO. Bastava `|| echo "seguimos"`.
+      #
+      # `uses:` não tem script. O runner executa `runs.main` da ação com Node e
+      # usa o CÓDIGO DE SAÍDA DO PROCESSO como resultado do passo; `run:` e
+      # `uses:` são mutuamente exclusivos, então não sobrou campo onde compor.
+      # A ação mora em `.github/actions/portao/`, é local (não baixa nada), não
+      # tem dependência e só faz uma coisa: executar o juiz e devolver o código
+      # dele.
+      #
+      # Sem `if:`, sem `continue-on-error:` e sem atributo nenhum além destes
+      # três — `ci/codigo_de_saida.js` recusa o passo se aparecer um quarto.
       - name: Portão fail-closed
-        run: node ci/portao_do_ci.js "$EVIDENCIA/npm-test.txt" "$EVIDENCIA/exit.txt"
+        uses: ./.github/actions/portao
+        with:
+          saida: ${{ env.EVIDENCIA }}/npm-test.txt
+          marcador: ${{ env.EVIDENCIA }}/exit.txt
 
       # [OS 52-C4] A AUTORIDADE DO ARTEFATO PRODUTIVO, num passo próprio.
       #
