@@ -120,6 +120,17 @@ const INVOCACOES_OBRIGATORIAS = Object.freeze([
     exige: Object.freeze([]),
     proibe: Object.freeze([]),
   }),
+  // [OS 54-C7] A AUTORIDADE DO CONTEÚDO NOMINAL, num passo próprio. Ela roda
+  // no `pretest` TAMBÉM, e é a dupla morada que faz tirá-la daqui reprovar de
+  // dentro do `npm test`.
+  Object.freeze({
+    oQue: "a autoridade do conteúdo material dos casos nominais",
+    passo: "Conteúdo dos casos nominais",
+    binario: "node",
+    alvo: "ci/pisos_autorizados.js",
+    exige: Object.freeze([]),
+    proibe: Object.freeze(["--medir"]),
+  }),
   Object.freeze({
     oQue: "o inventário por execução",
     passo: "Inventário por execução",
@@ -483,7 +494,10 @@ const CHAMADAS_DO_PRETEST = Object.freeze([
   // [OS 54-C6] O PESO dos casos nominais. Sem esta linha, um caso nominal
   // trivializado — nome no lugar, corpo virando `assert.ok(true)` — passa por
   // todos os contadores: ele existe, executa e aprova.
-  ["o peso dos casos nominais", /(?:^|[^/])\bconferirPesoDosNominais\s*\(/m],
+  // [OS 54-C7] O CONTEÚDO MATERIAL dos casos nominais. Trocou o peso em
+  // afirmações da C6, que a R6 derrubou: `assert.ok(true)` tinha o mesmo peso
+  // do corpo real em cinco dos nove casos protegidos.
+  ["o conteúdo material dos casos nominais", /(?:^|[^/])\bconferirConteudoDosNominais\s*\(/m],
 ]);
 
 /** Recorta comentários de JavaScript, com trava contra o próprio recorte.

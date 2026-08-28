@@ -123,12 +123,23 @@ nova cobra que o passo do guardião é comando único; e a autoridade nova está
 **própria** lista de comando único — quem puder compor o passo que confere
 composição desliga a conferência sem tocar em mais nada.
 
-**O peso dos casos nominais** (`ci/pisos_autorizados.js`) é novo e fecha a última
-sabotagem barata: um caso nominal cujo corpo vira `assert.ok(true)` continua
-existindo, continua executando e continua aprovando — nenhum contador o alcança.
-Os mínimos foram medidos, vivem fora do conjunto varrido pelo glob, e o limite
-está declarado em voz alta no arquivo: isso pega o corpo apagado, não o corpo
-reescrito com o mesmo número de afirmações fracas.
+> **[OS 54-C7] ESTA AFIRMAÇÃO ESTAVA ERRADA, e a OS 54-R6 provou.**
+>
+> O parágrafo abaixo dizia que o peso em afirmações fechava a trivialização de
+> um caso nominal. Não fechava, e o erro era aritmético: cinco dos nove casos
+> protegidos tinham peso **1**, porque concentram a afirmação num ajudante — e
+> `assert.ok(true)` também dá 1. `SAI-02` (`E36`) e `SAI-22` (`E38`) foram
+> trivializados com a cadeia oficial VERDE. `PESO_DOS_NOMINAIS` foi **removido**
+> e substituído por `CONTEUDO_DOS_NOMINAIS`, que confere o PROGRAMA do corpo —
+> token e digest —, com a monotonicidade ancorada no commit anterior. Ver
+> `docs/OS54-C7-AUTORIDADE-NOMINAL-V1.md`.
+
+**O peso dos casos nominais** (`ci/pisos_autorizados.js`) era novo nesta ponta e
+tentava fechar a última sabotagem barata: um caso nominal cujo corpo vira
+`assert.ok(true)` continua existindo, continua executando e continua aprovando —
+nenhum contador o alcança. Os mínimos foram medidos e viviam fora do conjunto
+varrido pelo glob. O que a C6 não viu é que contar afirmações mede a FORMA da
+prova, e não o conteúdo dela.
 
 ## 5. A prova comportamental, e ela é execução
 
@@ -180,7 +191,12 @@ de confiar numa lista.
    runner.** Que o runner use o código de saída do processo de uma ação
    JavaScript é propriedade do provedor, e nenhum arnês local a demonstra. O que
    está provado aqui é que o fio devolve o código do juiz.
-3. **O peso dos casos nominais pega corpo apagado, não corpo fraco.** Não existe
-   leitura barata que separe uma afirmação forte de uma trivial.
+3. ~~**O peso dos casos nominais pega corpo apagado, não corpo fraco.**~~
+   **[OS 54-C7] LIMITE MAL MEDIDO.** Ele não pegava nem o corpo apagado quando o
+   peso declarado era 1 — que era o caso de cinco dos nove protegidos. O
+   mecanismo foi substituído pela contagem de TOKENS DE PROGRAMA mais digest,
+   ancorados no commit anterior. O limite honesto do substituto é outro, e está
+   declarado em `ci/pisos_autorizados.js`: ele não pega um corpo do MESMO
+   TAMANHO em tokens que não prova nada.
 4. **Rebaixar os dois pisos ao mesmo tempo continua possível**, e é a intenção
    herdada: o custo é uma edição em duas famílias, visível na revisão.

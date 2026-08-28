@@ -54,6 +54,11 @@ const path = require("node:path");
 const cp = require("node:child_process");
 const assert = require("node:assert/strict");
 
+// [OS 54-C7] O MEDIDOR do conteúdo material vem da fonte canônica dos pisos,
+// e não de uma cópia local: duas medidas do mesmo corpo seriam duas verdades,
+// e a que ficasse para trás viraria a folga.
+const NOMINAIS = require("../ci/pisos_autorizados.js");
+
 /** Os arquivos que sustentam a autoridade do piso, e o papel de cada um.
  *  A amarração entre eles é conferida por `conferirAmarracao`, e também pelo
  *  juiz do CI — que roda fora da suíte. */
@@ -62,6 +67,12 @@ const ARQUIVOS_DA_AUTORIDADE = Object.freeze({
   "test/censo_de_suites.js": "chama a comparação de dentro do censo",
   "test/guarda_do_portao.js": "chama a comparação antes do glob, no `pretest`",
   "ci/piso_do_portao.json": "declara o piso que a comparação protege",
+  // [OS 54-C7] Os pisos EXTERNOS, os nomes obrigatórios e o CONTEÚDO MATERIAL
+  // dos casos protegidos moram todos aqui. A OS 54-R6 mostrou o preço de eles
+  // não estarem sob a autoridade ancorada: peso reduzido, peso removido,
+  // nomes esvaziados e pisos rebaixados passavam, porque a única leitura era
+  // a do próprio arquivo — e o próprio arquivo é editável.
+  "ci/pisos_autorizados.js": "declara os pisos externos, os nomes obrigatórios e o conteúdo material dos casos protegidos",
 });
 
 /** Quem TEM de citar `piso_ancorado` no programa, sob pena de a chamada ter
@@ -105,6 +116,16 @@ function ancorasDe(raiz) {
     // registrada em vez de silenciada.
   }
   return { ancoras };
+}
+
+/** `a` é ancestral de `b`? Ausência de resposta é NÃO — fail-closed. */
+function ehAncestral(raiz, a, b) {
+  try {
+    git(raiz, ["merge-base", "--is-ancestor", a, b]);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function conteudoNoCommit(raiz, sha, caminho) {
@@ -163,6 +184,54 @@ function constantesDoPisoDoPiso(fonte) {
   if (casos) r.casos = Number(casos[1]);
   if (suites) r.suites = Number(suites[1]);
   return r;
+}
+
+/** [OS 54-C7] Os mapas de `ci/pisos_autorizados.js`, lidos do TEXTO.
+ *
+ *  Por texto e não por `require`: o objeto de um commit antigo não é um módulo
+ *  carregável, e avaliar código do passado seria pior do que lê-lo. É a mesma
+ *  disciplina que `pisosPorSuiteNoTexto` já seguia. */
+function mapaNumericoNoTexto(fonte, nome) {
+  const mapa = {};
+  if (fonte === null || fonte === undefined) return mapa;
+  const bloco = new RegExp(nome + "\\s*=\\s*Object\\.freeze\\(\\{([\\s\\S]*?)\\n\\}\\)").exec(String(fonte));
+  if (!bloco) return mapa;
+  const re = /["']([^"']+\.test\.js)["']\s*:\s*(\d+)/g;
+  let m;
+  while ((m = re.exec(bloco[1]))) mapa[m[1]] = Number(m[2]);
+  return mapa;
+}
+
+/** Os NOMES OBRIGATÓRIOS por arquivo, lidos do texto. */
+function nomesObrigatoriosNoTexto(fonte) {
+  const mapa = {};
+  if (fonte === null || fonte === undefined) return mapa;
+  const bloco = /NOMES_OBRIGATORIOS\s*=\s*Object\.freeze\(\{([\s\S]*?)\n\}\)/.exec(String(fonte));
+  if (!bloco) return mapa;
+  const re = /["']([^"']+\.test\.js)["']\s*:\s*Object\.freeze\(\[([\s\S]*?)\]\)/g;
+  let m;
+  while ((m = re.exec(bloco[1]))) {
+    mapa[m[1]] = (m[2].match(/"([^"]+)"/g) || []).map((s) => s.slice(1, -1));
+  }
+  return mapa;
+}
+
+/** O CONTEÚDO MATERIAL declarado por arquivo e por caso, lido do texto. */
+function conteudoNominalNoTexto(fonte) {
+  const mapa = {};
+  if (fonte === null || fonte === undefined) return mapa;
+  const bloco = /CONTEUDO_DOS_NOMINAIS\s*=\s*Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(String(fonte));
+  if (!bloco) return mapa;
+  const porArquivo = /["']([^"']+\.test\.js)["']\s*:\s*Object\.freeze\(\{([\s\S]*?)\n  \}\)/g;
+  let a;
+  while ((a = porArquivo.exec(bloco[1]))) {
+    const casos = {};
+    const re = /["']([^"']+)["']\s*:\s*Object\.freeze\(\{\s*peso:\s*(\d+)\s*,\s*digest:\s*["']([0-9a-f]+)["']/g;
+    let c;
+    while ((c = re.exec(a[2]))) casos[c[1]] = { peso: Number(c[2]), digest: c[3] };
+    mapa[a[1]] = casos;
+  }
+  return mapa;
 }
 
 function pisoDeclarado(fonte) {
@@ -334,6 +403,158 @@ function conferirPisoAncorado(raizDoRepo) {
           " casos. Piso pode acompanhar migração de caso; não pode abrir folga."
       );
     }
+
+    // =====================================================================
+    // [OS 54-C7] OS PISOS EXTERNOS, OS NOMES E O CONTEÚDO MATERIAL
+    // =====================================================================
+    //
+    // A OS 54-R6 encontrou sete escapes que têm a MESMA forma: um número ou um
+    // nome que só existia em `ci/pisos_autorizados.js` — e o arquivo é
+    // editável. Reduzir peso (`E21`), remover a fonte de pesos (`E22`),
+    // rebaixar o piso executado (`E32`) ou o textual (`E33`), esvaziar os
+    // nomes obrigatórios (`E34`) e trivializar um caso com recarimbo
+    // (`E36`/`E38`) passavam todos pela mesma porta.
+    //
+    // Aqui eles caem pela mesma regra de sempre: SUBIR É LIVRE, DESCER É
+    // VERMELHO, e a referência é o commit — que nenhuma edição na árvore de
+    // trabalho alcança.
+    const pisosFonte = conteudoNoCommit(raiz, sha, "ci/pisos_autorizados.js");
+    const pisosAgoraFonte = (() => {
+      try { return fs.readFileSync(path.join(raiz, "ci", "pisos_autorizados.js"), "utf8"); }
+      catch (_) { return null; }
+    })();
+    if (pisosFonte !== null) {
+      assert.ok(
+        pisosAgoraFonte !== null,
+        "AUTORIDADE DOS PISOS EXTERNOS APAGADA: `ci/pisos_autorizados.js` existia no commit `" +
+          sha.slice(0, 7) + "` e sumiu do disco — apagar a fonte é a forma mais direta de rebaixar " +
+          "tudo o que ela declara."
+      );
+
+      for (const nome of ["MINIMO_DECLARADO_NO_CENSO", "MINIMO_EXECUTADO"]) {
+        const antes = mapaNumericoNoTexto(pisosFonte, nome);
+        const agoraMapa = mapaNumericoNoTexto(pisosAgoraFonte, nome);
+        for (const [arquivo, valorAntes] of Object.entries(antes)) {
+          laudo.comparacoes++;
+          const valorAgora = agoraMapa[arquivo];
+          assert.ok(
+            valorAgora !== undefined,
+            "PISO EXTERNO APAGADO: `" + arquivo + "` tinha " + nome + " = " + valorAntes +
+              " no commit `" + sha.slice(0, 7) + "` e sumiu de `ci/pisos_autorizados.js`."
+          );
+          assert.ok(
+            valorAgora >= valorAntes,
+            "PISO EXTERNO REBAIXADO: " + nome + " de `" + arquivo + "` caiu de " + valorAntes +
+              " para " + valorAgora + " desde o commit `" + sha.slice(0, 7) + "`."
+          );
+        }
+      }
+
+      const nomesAntes = nomesObrigatoriosNoTexto(pisosFonte);
+      const nomesAgora = nomesObrigatoriosNoTexto(pisosAgoraFonte);
+      for (const [arquivo, listaAntes] of Object.entries(nomesAntes)) {
+        laudo.comparacoes++;
+        const listaAgora = nomesAgora[arquivo] || [];
+        const perdidos = listaAntes.filter((n) => !listaAgora.includes(n));
+        assert.deepEqual(
+          perdidos, [],
+          "NOME OBRIGATÓRIO REMOVIDO: `" + arquivo + "` perdeu " + perdidos.join(", ") +
+            " desde o commit `" + sha.slice(0, 7) + "` — esvaziar a lista é como um caso nominal " +
+            "deixa de ser cobrado sem ninguém reprovar."
+        );
+      }
+
+      // O CONTEÚDO MATERIAL, e é aqui que o RECARIMBO morre.
+      //
+      // Três leituras, e a terceira é a que não se recarimba: ela não compara
+      // declaração com declaração, e sim o PROGRAMA do corpo de hoje com o
+      // PROGRAMA do corpo que o commit já gravou. Trivializar o caso e
+      // atualizar peso e digest na mesma alteração continua deixando o corpo
+      // menor do que o passado — e o passado não se edita.
+      const conteudoAntes = conteudoNominalNoTexto(pisosFonte);
+      const conteudoAgora = conteudoNominalNoTexto(pisosAgoraFonte);
+      for (const [arquivo, casosAntes] of Object.entries(conteudoAntes)) {
+        const declaradosAgora = conteudoAgora[arquivo] || {};
+        const fonteAntes = conteudoNoCommit(raiz, sha, "test/" + arquivo);
+        const corposAntes = fonteAntes === null ? new Map() : NOMINAIS.corposDosCasos(fonteAntes);
+        let corposAgora = new Map();
+        try {
+          corposAgora = NOMINAIS.corposDosCasos(
+            fs.readFileSync(path.join(raiz, "test", arquivo), "utf8")
+          );
+        } catch (_) { corposAgora = new Map(); }
+
+        for (const [caso, antes] of Object.entries(casosAntes)) {
+          laudo.comparacoes++;
+          const agoraDeclarado = declaradosAgora[caso];
+          assert.ok(
+            agoraDeclarado !== undefined,
+            "CASO PROTEGIDO REMOVIDO DA AUTORIDADE: `" + caso + "` de `" + arquivo +
+              "` estava protegido no commit `" + sha.slice(0, 7) + "` e saiu de " +
+              "`CONTEUDO_DOS_NOMINAIS` — tirar o caso da lista é desprotegê-lo sem tocar nele."
+          );
+          assert.ok(
+            agoraDeclarado.peso >= antes.peso,
+            "PESO MATERIAL DECLARADO REBAIXADO: `" + caso + "` caiu de " + antes.peso + " para " +
+              agoraDeclarado.peso + " desde o commit `" + sha.slice(0, 7) + "`."
+          );
+
+          const corpoAntes = corposAntes.get(caso);
+          if (corpoAntes === undefined) continue;
+          laudo.comparacoes++;
+          const pesoAntes = NOMINAIS.pesoMaterial(corpoAntes);
+          const corpoAgora = corposAgora.get(caso);
+          assert.ok(
+            corpoAgora !== undefined,
+            "CASO PROTEGIDO SUMIU DO ARQUIVO: `" + caso + "` existia em `test/" + arquivo +
+              "` no commit `" + sha.slice(0, 7) + "` e não existe hoje."
+          );
+          const pesoAgora = NOMINAIS.pesoMaterial(corpoAgora);
+          assert.ok(
+            pesoAgora >= pesoAntes,
+            "CASO NOMINAL TRIVIALIZADO: o PROGRAMA de `" + caso + "` em `test/" + arquivo +
+              "` caiu de " + pesoAntes + " para " + pesoAgora + " token(s) desde o commit `" +
+              sha.slice(0, 7) + "`. Título, posição, nome, número de casos, número de afirmações e " +
+              "mensagens podem ter sido preservados — o conteúdo, não. E recarimbar o peso e o " +
+              "digest na mesma alteração não muda o que o commit já gravou."
+          );
+        }
+      }
+
+      // O SHA DE MEDIÇÃO não pode virar um SHA conveniente: ele tem de ser um
+      // ancestral de `HEAD` (medir contra commit que não está na história é
+      // medir contra nada) e não pode ANDAR PARA TRÁS.
+      const medidoAntes = (pisoDeclarado(conteudoNoCommit(raiz, sha, "ci/piso_do_portao.json")) || {}).medido_sobre;
+      const medidoAgora = (agora.piso || {}).medido_sobre;
+      // A EXIGÊNCIA SÓ VALE QUANDO O SHA MUDA, e isso não é indulgência: é a
+      // diferença entre medir a sabotagem e medir a bancada.
+      //
+      // Uma cópia descartável — que é como toda campanha deste repositório roda —
+      // é um repositório NOVO com um commit só. O `medido_sobre` herdado aponta
+      // para um commit que aquela cópia nunca teve, e exigir ancestralidade ali
+      // reprovaria a ÁRVORE ÍNTEGRA por falta de história. Vermelho pelo motivo
+      // errado esconde o que estava sendo medido, e foi assim que este caso
+      // apareceu: o controle da sonda caiu antes de qualquer sabotagem.
+      //
+      // Quem quer um SHA conveniente precisa TROCAR o valor — e aí as duas
+      // exigências caem em cima, sem folga: o novo tem de estar na história e
+      // tem de descender do antigo.
+      if (medidoAntes && medidoAgora && medidoAgora !== medidoAntes) {
+        laudo.comparacoes++;
+        assert.ok(
+          ehAncestral(raiz, medidoAgora, "HEAD"),
+          "SHA DE MEDIÇÃO FORA DA HISTÓRIA: `medido_sobre` mudou para `" +
+            String(medidoAgora).slice(0, 7) + "`, que não é ancestral de `HEAD` — medir contra um " +
+            "commit que a história não alcança é medir contra nada."
+        );
+        assert.ok(
+          ehAncestral(raiz, medidoAntes, medidoAgora),
+          "SHA DE MEDIÇÃO RETROCEDIDO: era `" + String(medidoAntes).slice(0, 7) + "` no commit `" +
+            sha.slice(0, 7) + "` e virou `" + String(medidoAgora).slice(0, 7) + "`, que não o " +
+            "descende — trocar a régua por uma mais velha afrouxa tudo o que ela mede."
+        );
+      }
+    }
   }
 
   assert.ok(
@@ -375,6 +596,7 @@ function conferirAmarracao(raizDoRepo) {
 module.exports = {
   ARQUIVOS_DA_AUTORIDADE, AMARRACOES,
   contarCasos, pisosPorSuiteNoTexto, pisoDeclarado, constantesDoPisoDoPiso,
+  mapaNumericoNoTexto, nomesObrigatoriosNoTexto, conteudoNominalNoTexto, ehAncestral,
   ancorasDe, conteudoNoCommit, suitesNoCommit,
   conferirPisoAncorado, conferirAmarracao,
 };

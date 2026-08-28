@@ -530,3 +530,230 @@ test("SAI/CADEIA — a autoridade externa e esta suíte se prendem uma na outra"
     );
   });
 });
+// ===========================================================================
+// [OS 54-C7] O CONTEÚDO MATERIAL DOS CASOS NOMINAIS
+// ===========================================================================
+//
+// A OS 54-C6 protegia o NOME e a FORMA de um caso nominal: título, posição,
+// contagem de casos, contagem de afirmações. A OS 54-R6 mostrou que nada disso
+// é o conteúdo — `SAI-02` tinha peso 1 porque concentra a afirmação num
+// ajudante, e `assert.ok(true)` também dá 1. O caso continuava existindo,
+// executando e APROVANDO, e a cadeia oficial ficava verde.
+//
+// O que se confere agora é o PROGRAMA do corpo, e em duas moradas que se
+// vigiam:
+//
+//   * `ci/pisos_autorizados.js` — token e digest do corpo de HOJE contra a
+//     declaração; roda no `pretest` e como PASSO PRÓPRIO do workflow;
+//   * `test/piso_ancorado.js` — o mesmo programa contra o CORPO NO COMMIT
+//     ANTERIOR, que nenhuma edição na árvore de trabalho alcança. É esta
+//     segunda que faz o recarimbo — trivializar e atualizar peso e digest na
+//     mesma alteração — continuar vermelho.
+
+const NOMINAIS = require("../ci/pisos_autorizados.js");
+const ANCORADO = require("./piso_ancorado.js");
+
+/** Uma árvore mínima, com histórico próprio, para exercitar a autoridade
+ *  ancorada: um repositório novo com UM commit da árvore ÍNTEGRA, feito ANTES
+ *  da sabotagem. Sem histórico o piso ancorado reprova por falta de git, que é
+ *  vermelho pelo motivo errado. */
+function arvoreComHistorico() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "os54c7-ancora-"));
+  for (const item of ["ci", "test"]) {
+    fs.cpSync(path.join(RAIZ_REAL, item), path.join(dir, item), { recursive: true });
+  }
+  fs.copyFileSync(path.join(RAIZ_REAL, "package.json"), path.join(dir, "package.json"));
+  const git = (...args) =>
+    spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  git("init", "-q");
+  git("config", "user.email", "arnes@os54c7.local");
+  git("config", "user.name", "arnes OS 54-C7");
+  git("add", "-A");
+  git("commit", "-q", "-m", "arvore integra (ancora do conteudo)");
+  return dir;
+}
+
+/** Troca o corpo de um caso preservando título, posição e nome — que é
+ *  exatamente o que a sabotagem faz. */
+function trivializarCaso(dir, arquivo, caso, corpoNovo) {
+  const alvo = path.join(dir, "test", arquivo);
+  const bruto = fs.readFileSync(alvo, "utf8");
+  const crlf = bruto.includes("\r\n");
+  const texto = bruto.split("\r\n").join("\n");
+  const marca = new RegExp('^[ \\t]*(?:await\\s+)?(?:t\\.)?test\\(\\s*"' + caso + ':[^"]*"', "m");
+  const m = marca.exec(texto);
+  assert.ok(m, "caso não encontrado para trivializar: " + caso);
+  const inicio = m.index;
+  const seguintes = [...texto.matchAll(/^[ \t]*(?:await\s+)?(?:t\.)?test\(\s*"([^"]+)"/gm)];
+  const proximo = seguintes.find((x) => x.index > inicio);
+  const fim = proximo ? proximo.index : texto.length;
+  const cabeca = texto.slice(inicio, texto.indexOf("=> {", inicio) + 4);
+  const recuo = /^[ \t]*/.exec(m[0])[0];
+  const novo = texto.slice(0, inicio) + cabeca + NL + recuo + "  " + corpoNovo + NL +
+    recuo + "});" + NL + NL + texto.slice(fim);
+  assert.notEqual(novo, texto, "a trivialização de " + caso + " não alterou byte nenhum");
+  fs.writeFileSync(alvo, crlf ? novo.split(NL).join("\r\n") : novo, "utf8");
+}
+
+/** Recarimba a tabela com o que os corpos de HOJE medem — o gesto de quem
+ *  trivializa e atualiza a declaração na mesma alteração. */
+function recarimbarTabela(dir) {
+  const alvo = path.join(dir, "ci", "pisos_autorizados.js");
+  const bruto = fs.readFileSync(alvo, "utf8");
+  const crlf = bruto.includes("\r\n");
+  let texto = bruto.split("\r\n").join("\n");
+  for (const linha of NOMINAIS.medirNominais(dir)) {
+    const m = /^(\S+) :: (\S+) :: peso (\d+) digest (\S+)$/.exec(linha);
+    if (!m) continue;
+    texto = texto.replace(
+      new RegExp('"' + m[2] + '": Object\\.freeze\\(\\{ peso: \\d+, digest: "[0-9a-f]+" \\}\\)'),
+      '"' + m[2] + '": Object.freeze({ peso: ' + m[3] + ', digest: "' + m[4] + '" })'
+    );
+  }
+  fs.writeFileSync(alvo, crlf ? texto.split(NL).join("\r\n") : texto, "utf8");
+}
+
+test("SAI/CONTEÚDO — o corpo de um caso nominal não pode desaparecer", async (t) => {
+  await t.test("SAI-24: a árvore REAL passa na autoridade de conteúdo", () => {
+    // A trava anti-vácuo. Sem ela, uma autoridade que recusasse tudo passaria
+    // em cada negativo abaixo e pareceria rigorosa estando quebrada.
+    assert.deepEqual(NOMINAIS.conferirConteudoDosNominais(), []);
+    const protegidos = Object.values(NOMINAIS.CONTEUDO_DOS_NOMINAIS)
+      .reduce((total, mapa) => total + Object.keys(mapa).length, 0);
+    assert.ok(protegidos >= 10, "a proteção encolheu para " + protegidos + " caso(s)");
+  });
+
+  await t.test("SAI-25: os DEZ casos protegidos morrem se o corpo for trivializado", () => {
+    // Um a um, e não em bloco: uma trivialização coletiva poderia ser pega por
+    // um efeito colateral qualquer, e o que se afirma aqui é que CADA caso
+    // sobrevive por conta própria.
+    for (const [arquivo, casos] of Object.entries(NOMINAIS.CONTEUDO_DOS_NOMINAIS)) {
+      for (const caso of Object.keys(casos)) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "os54c7-triv-"));
+        try {
+          fs.mkdirSync(path.join(dir, "test"), { recursive: true });
+          fs.mkdirSync(path.join(dir, "ci"), { recursive: true });
+          fs.copyFileSync(
+            path.join(RAIZ_REAL, "test", arquivo), path.join(dir, "test", arquivo)
+          );
+          fs.copyFileSync(
+            path.join(RAIZ_REAL, "ci", "pisos_autorizados.js"),
+            path.join(dir, "ci", "pisos_autorizados.js")
+          );
+          for (const outro of Object.keys(NOMINAIS.CONTEUDO_DOS_NOMINAIS)) {
+            if (outro === arquivo) continue;
+            fs.copyFileSync(path.join(RAIZ_REAL, "test", outro), path.join(dir, "test", outro));
+          }
+          trivializarCaso(dir, arquivo, caso, "assert.ok(true);");
+          exigeMotivo(
+            NOMINAIS.conferirConteudoDosNominais(dir),
+            new RegExp("CONTEÚDO DO CASO NOMINAL DIVERGE: `" + caso + "`"),
+            "`" + caso + "` foi trivializado com o título preservado e a autoridade aprovou"
+          );
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+  });
+
+  await t.test("SAI-26: esconder o corpo em STRING ou em COMENTÁRIO colapsa o peso", () => {
+    // As duas formas que preservariam o TAMANHO BRUTO do arquivo e o número de
+    // linhas, e que a §11 da OS manda não aceitar como prova de conteúdo.
+    const real = 'const x = reprovacoesCom([[WORKFLOW, alvo, linha]]); assert.ok(x.length > 0);';
+    const emString = 'const x = "const x = reprovacoesCom([[WORKFLOW, alvo, linha]]); assert.ok(x.length > 0);";';
+    const emComentario = "// " + real + NL + "assert.ok(true);";
+    assert.ok(
+      NOMINAIS.pesoMaterial(real) > 3 * NOMINAIS.pesoMaterial(emString),
+      "o corpo dentro de uma string não colapsou o peso"
+    );
+    assert.ok(
+      NOMINAIS.pesoMaterial(real) > 3 * NOMINAIS.pesoMaterial(emComentario),
+      "o corpo dentro de um comentário não colapsou o peso"
+    );
+    // E o digest não perdoa nenhuma das duas.
+    assert.notEqual(NOMINAIS.digestDoCorpo(real), NOMINAIS.digestDoCorpo(emString));
+    assert.notEqual(NOMINAIS.digestDoCorpo(real), NOMINAIS.digestDoCorpo(emComentario));
+  });
+
+  await t.test("SAI-27: o leitor não se perde em expressão regular nem em `test(` citado", () => {
+    // As duas armadilhas do tokenizador, e as duas custaram medição:
+    //
+    // 1. uma expressão regular que contém aspas ou crase — e esta suíte tem
+    //    várias — abriria uma string fantasma e engoliria o resto do corpo;
+    // 2. um `test(` dentro de uma string abriria um caso fantasma e o recorte
+    //    do caso anterior terminaria cedo. A §3 da OS proíbe, em voz alta,
+    //    vermelho vindo de coincidência de `test(` em string.
+    const comRegex = 'assert.match(m, /VEREDITO `run` "x"/); const depois = 1 + 2;';
+    const tokens = NOMINAIS.tokensDoPrograma(comRegex);
+    assert.ok(tokens.includes("depois"), "o corpo depois da expressão regular foi engolido: " + tokens.join(" "));
+
+    const comTestCitado = 'const s = "await t.test(\\"SAI-99: isca\\", () => {});" ; assert.ok(s);';
+    const corpos = NOMINAIS.corposDosCasos(
+      'await t.test("SAI-98: real", () => {' + NL + "  " + comTestCitado + NL + "});" + NL
+    );
+    assert.deepEqual([...corpos.keys()], ["SAI-98"], "um `test(` citado em string abriu caso fantasma");
+  });
+
+  await t.test("SAI-28: reformatar e reescrever a PROSA não move o conteúdo", () => {
+    // O contraste que impede a autoridade de virar veto geral: comentário e
+    // espaço em branco não são conteúdo, e mexer neles não pode custar uma
+    // redeclaração. Vermelho pelo motivo errado é tão cego quanto verde
+    // indevido.
+    const antes = "assert.ok(x);" + NL + "assert.equal(y, 1);";
+    const depois = "// uma explicação nova" + NL + "assert.ok(x);" + NL + NL +
+      "  /* e outra */  assert.equal(y,   1);";
+    assert.equal(NOMINAIS.digestDoCorpo(antes), NOMINAIS.digestDoCorpo(depois));
+    assert.equal(NOMINAIS.pesoMaterial(antes), NOMINAIS.pesoMaterial(depois));
+  });
+
+  await t.test("SAI-29: trivializar E RECARIMBAR continua vermelho", () => {
+    // O gesto que a §11 da OS chama pelo nome: a fonte que protege os casos não
+    // pode ser recarimbada na mesma alteração mantendo o CI verde. Quem faz
+    // isso passa pela autoridade de conteúdo — a declaração volta a bater com o
+    // corpo — e esbarra no CORPO DO COMMIT ANTERIOR, que não se edita.
+    const dir = arvoreComHistorico();
+    try {
+      trivializarCaso(dir, "codigo_de_saida.test.js", "SAI-02", "assert.ok(true);");
+      recarimbarTabela(dir);
+      // A conferência tem de vir do módulo DAQUELA árvore, e não deste: a
+      // declaração mora no arquivo recarimbado, e usar o módulo daqui mediria a
+      // tabela errada — o caso passaria pelo motivo errado.
+      const daArvore = require(path.join(dir, "ci", "pisos_autorizados.js"));
+      assert.deepEqual(
+        daArvore.conferirConteudoDosNominais(dir), [],
+        "o recarimbo deveria ter reconciliado a declaração com o corpo — sem isso este caso mede outra coisa"
+      );
+      assert.throws(
+        () => ANCORADO.conferirPisoAncorado(dir),
+        /CASO NOMINAL TRIVIALIZADO|PESO MATERIAL DECLARADO REBAIXADO/,
+        "trivializar e recarimbar na mesma alteração passou pela autoridade ancorada"
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("SAI-30: as duas metades estão presas uma na outra", () => {
+    // `ci/pisos_autorizados.js` sob a autoridade ancorada (a §2 da OS), a
+    // chamada no `pretest` (a §1) e o passo próprio no workflow.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(ANCORADO.ARQUIVOS_DA_AUTORIDADE, "ci/pisos_autorizados.js"),
+      "a fonte dos pisos e do conteúdo saiu da autoridade ancorada — voltaria a ser um arquivo editável"
+    );
+    const guarda = fs.readFileSync(path.join(RAIZ_REAL, "test", "guarda_do_portao.js"), "utf8");
+    assert.match(
+      guarda.split(NL).filter((l) => !/^\s*\/\//.test(l)).join(NL),
+      /conferirConteudoDosNominais\s*\(/,
+      "a chamada do conteúdo nominal saiu do `pretest`"
+    );
+    exigeMotivo(
+      reprovacoesCom([[
+        WORKFLOW, TRECHOS.runDoConteudoNominal,
+        '        run: node ci/pisos_autorizados.js || echo "seguimos"',
+      ]]),
+      /CÓDIGO DE SAÍDA NÃO PRESERVADO em `Conteúdo dos casos nominais`/,
+      "o passo da autoridade de conteúdo pôde ser composto"
+    );
+  });
+});

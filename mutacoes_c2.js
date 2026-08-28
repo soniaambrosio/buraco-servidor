@@ -46,6 +46,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const RAIZ = __dirname;
+const NL = String.fromCharCode(10);
 const WORKFLOW = ".github/workflows/provas-do-servidor.yml";
 const SUITE_CI = "test/ci_obrigatorio.test.js";
 const CENSO = "test/censo_de_suites.js";
@@ -224,6 +225,50 @@ function cadeiaOficial(dir, id) {
 // AS SABOTAGENS
 // ===========================================================================
 
+// [OS 54-C7] ÂNCORAS DERIVADAS DO ESTADO ATUAL, e não de valores históricos.
+//
+// A OS 54-R6 encontrou três sabotagens desta campanha que tinham DEIXADO DE
+// EXECUTAR — `M28`, `N20` e `N37` — porque as âncoras traziam `99`, `927` e a
+// forma antiga `run: node ci/portao_do_ci.js` escritas à mão. Os números
+// subiram, o passo do juiz virou `uses:`, e cada uma virou `ABORTA` no meio da
+// campanha. Sabotagem que morre por âncora não mede nada — ela só some do
+// placar, e some parecendo cobertura.
+//
+// A regra que fecha isso: nada de valor histórico literal. Tudo o que a árvore
+// pode mudar sozinha é LIDO da árvore, e a substituição continua conferida
+// (uma ocorrência, e os bytes têm de mudar).
+
+/** A linha inteira que declara o piso de uma suíte no censo, seja qual for o
+ *  número e o comentário de hoje. */
+function linhaDoCenso(dir, arquivo, id) {
+  const texto = ler(dir, CENSO).texto;
+  const re = new RegExp('^\\s*"' + arquivo.replace(/\./g, "\\.") + '":\\s*\\d+,.*$', "m");
+  const m = re.exec(texto);
+  if (!m) throw new Error(id + ": o censo nao declara `" + arquivo + "`");
+  return m[0];
+}
+
+/** O `casos_minimos` de hoje, lido do JSON. */
+function pisoDeCasos(dir, id) {
+  const valor = JSON.parse(ler(dir, PISO_GLOBAL).texto).casos_minimos;
+  if (!Number.isInteger(valor)) throw new Error(id + ": `casos_minimos` ilegivel");
+  return valor;
+}
+
+/** O PASSO INTEIRO do juiz, seja `run:` ou `uses:`, incluindo a linha em branco
+ *  que o separa do próximo. É esta a âncora de `N37`: remover o passo do
+ *  veredito do workflow, seja qual for a forma que ele tenha hoje. */
+function passoDoJuiz(dir, id) {
+  const linhas = ler(dir, WORKFLOW).texto.split(NL);
+  const inicio = linhas.findIndex((l) => /^\s{4,}-\s+name:\s*Portão fail-closed\s*$/.test(l));
+  if (inicio < 0) throw new Error(id + ": passo do juiz nao encontrado no workflow");
+  let fim = linhas.length;
+  for (let i = inicio + 1; i < linhas.length; i++) {
+    if (/^\s{4,}-\s+name:/.test(linhas[i]) || /^\s*#/.test(linhas[i])) { fim = i; break; }
+  }
+  return linhas.slice(inicio, fim).join(NL) + NL;
+}
+
 const yml = (de, para) => (dir, id) => trocar(dir, WORKFLOW, de, para, id);
 
 const SABOTAGENS = [
@@ -279,7 +324,11 @@ const SABOTAGENS = [
     nome: "bloco apagado + piso específico rebaixado",
     aplicar: (d, i) => {
       apagarBlocoDeAuditabilidade(d, "", i);
-      trocar(d, CENSO, '"ci_obrigatorio.test.js": 99,', '"ci_obrigatorio.test.js": 50,', i);
+      // [OS 54-C7] A linha do censo vem do arquivo: o piso desta suíte já subiu
+      // duas vezes desde que esta sabotagem foi escrita, e o literal `99` a
+      // matava por âncora.
+      const linha = linhaDoCenso(d, "ci_obrigatorio.test.js", i);
+      trocar(d, CENSO, linha, '  "ci_obrigatorio.test.js": 50,', i);
     },
   },
   { id: "H28", nome: "piso de gate_vip rebaixado (64 -> 1)", aplicar: (d, i) => trocar(d, CENSO, '"gate_vip.test.js": 64,', '"gate_vip.test.js": 1,', i) },
@@ -316,7 +365,9 @@ const SABOTAGENS = [
   { id: "N17", nome: "suíte-isca no lugar do glob", aplicar: (d, i) => trocar(d, PACOTE, '"test": "node --test \\"test/*.test.js\\""', '"test": "node --test \\"test/chat_*.test.js\\""', i) },
   { id: "N18", nome: "caso removido (um subcaso de CI-18)", aplicar: (d, i) => trocar(d, SUITE_CI, '    await t18.test("CI-18d: upload sem nome reprova", () => {', '    await t18.testDESLIGADO("CI-18d: upload sem nome reprova", () => {', i) },
   { id: "N19", nome: "suíte removida do glob", tipo: "renomear", de: "test/auditabilidade_ci.test.js", para: "test/auditabilidade_ci.test.js.desligado" },
-  { id: "N20", nome: "piso global rebaixado", aplicar: (d, i) => trocar(d, PISO_GLOBAL, '"casos_minimos": 927,', '"casos_minimos": 1,', i) },
+  // [OS 54-C7] O piso de hoje vem do JSON — era `927` literal, e o piso subiu.
+  { id: "N20", nome: "piso global rebaixado",
+    aplicar: (d, i) => trocar(d, PISO_GLOBAL, '"casos_minimos": ' + pisoDeCasos(d, i) + ",", '"casos_minimos": 1,', i) },
   { id: "N21", nome: "piso específico rebaixado no censo", aplicar: (d, i) => trocar(d, CENSO, '"descoberta.test.js": 98,', '"descoberta.test.js": 1,', i) },
   { id: "N22", nome: "atribuição de caso ao arquivo errado (nome exigido movido)", aplicar: (d, i) => trocar(d, PISOS, '"ci_obrigatorio.test.js": Object.freeze([', '"chat_contrato.test.js": Object.freeze(["CI-18"]),\n  "ci_obrigatorio.test.js": Object.freeze([', i) },
   { id: "N23", nome: "arquivo-isca emprestando casos ao piso executado", aplicar: (d, i) => trocar(d, PISOS, '  "ci_obrigatorio.test.js": 63,\n  "auditabilidade_ci.test.js": 41,', '  "ci_obrigatorio.test.js": 63,\n  "isca.test.js": 1,\n  "auditabilidade_ci.test.js": 41,', i) },
@@ -350,8 +401,12 @@ const SABOTAGENS = [
   // nela, a segunda porque nao existia naquela arvore. Quem percebe a ausencia
   // do juiz nao e o juiz: e o guardiao, que cobra a presenca das outras tres
   // autoridades no workflow e roda tambem no `pretest`.
+  // [OS 54-C7] O passo do juiz vem do workflow. Ele deixou de ser um `run:` na
+  // OS 54-C6 — virou `uses: ./.github/actions/portao` —, e a âncora literal com
+  // a forma antiga matava esta sabotagem por âncora ausente. A sabotagem não
+  // mudou: continua REMOVENDO o passo do veredito, seja qual for a forma dele.
   { id: "N37", nome: "invocacao do JUIZ removida do workflow",
-    aplicar: yml("      - name: Portão fail-closed\n        run: node ci/portao_do_ci.js \"$EVIDENCIA/npm-test.txt\" \"$EVIDENCIA/exit.txt\"\n\n", "") },
+    aplicar: (d, i) => trocar(d, WORKFLOW, passoDoJuiz(d, i), "", i) },
   { id: "N38", nome: "invocacao da AUTORIDADE DO ARTEFATO removida do workflow",
     aplicar: yml("      - name: Artefato produtivo único\n        run: node ci/artefato.js --conferir --raiz .\n\n", "") },
   { id: "N39", nome: "chamada da AUTORIDADE DO ARTEFATO removida do pretest",

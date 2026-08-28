@@ -61,7 +61,13 @@ const { conferirAuditabilidade } = require("../ci/auditabilidade.js");
 // saída dele tem de ser idêntico ao do juiz. Estrutura sozinha é o que a
 // OS 54-R4 já mostrou não bastar.
 const { conferirPreservacaoDoCodigo } = require("../ci/codigo_de_saida.js");
-const { conferirPisosDeclarados, conferirPesoDosNominais } = require("../ci/pisos_autorizados.js");
+// [OS 54-C7] `conferirConteudoDosNominais` substituiu `conferirPesoDosNominais`.
+// A OS 54-R6 mostrou que contar afirmações mede a FORMA da prova e não o
+// conteúdo: um corpo trocado por `assert.ok(true)` dá o mesmo número de um
+// corpo que concentra a afirmação num ajudante. O que passou a ser conferido é
+// o PROGRAMA do corpo — token e digest —, e a monotonicidade dele contra o
+// commit anterior mora em `test/piso_ancorado.js`.
+const { conferirPisosDeclarados, conferirConteudoDosNominais } = require("../ci/pisos_autorizados.js");
 const { OBRIGATORIAS, conferirCenso } = require("./censo_de_suites.js");
 
 try {
@@ -93,7 +99,7 @@ try {
     ...conferirAuditabilidade({}),
     ...conferirPreservacaoDoCodigo({ executar: true }),
     ...conferirPisosDeclarados(OBRIGATORIAS),
-    ...conferirPesoDosNominais(),
+    ...conferirConteudoDosNominais(),
   ];
   if (motivos.length > 0) {
     throw new Error(
@@ -109,7 +115,7 @@ try {
     "piso ancorado: " + piso.comparacoes + " comparações contra " +
     piso.ancoras.map((s) => s.slice(0, 7)).join(", ") +
     " · amarrações: " + amarracoes +
-    " · auditabilidade, código de saída e pisos declarados: verdes\n"
+    " · auditabilidade, código de saída, conteúdo nominal e pisos declarados: verdes\n"
   );
 } catch (erro) {
   process.stderr.write("\n[guarda do portão] REPROVADO\n" + ((erro && erro.message) || erro) + "\n");

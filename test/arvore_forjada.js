@@ -49,8 +49,29 @@ const ESSENCIAIS = Object.freeze([
 /** Copia a árvore mínima para um diretório temporário e aplica as edições
  *  pedidas. Cada edição é `[arquivo, de, para]`, com âncora conferida: âncora
  *  ausente ou ambígua ABORTA, em vez de produzir uma sabotagem que não sabota. */
+// [OS 54-C7] AS ÁRVORES FORJADAS SÃO APAGADAS NA SAÍDA DO PROCESSO.
+//
+// `forjar` cria um diretório temporário por chamada e nunca o removia. Cada
+// `npm test` deixa dezenas para trás, e cada campanha roda `npm test` dezenas de
+// vezes: a bancada acumulou **8053** diretórios órfãos e encheu o disco. O
+// sintoma não foi um aviso — foi um VERMELHO: o controle de chegada da campanha
+// de assento acusou 29 falhas numa árvore limpa, e a causa real era
+// `ENOSPC: no space left on device`.
+//
+// A limpeza é no `exit` e não no fim de cada caso porque o diretório precisa
+// viver enquanto o caso o usa, e nenhum chamador o devolve. Falha ao remover é
+// engolida de propósito: limpeza que derruba a suíte troca um problema de
+// bancada por um veredito falso, que é o defeito maior.
+const FORJADAS = new Set();
+process.on("exit", () => {
+  for (const dir of FORJADAS) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* bancada, não veredito */ }
+  }
+});
+
 function forjar(edicoes) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arvore-forjada-"));
+  FORJADAS.add(dir);
   for (const relativo of ESSENCIAIS) {
     const destino = path.join(dir, relativo);
     fs.mkdirSync(path.dirname(destino), { recursive: true });
@@ -226,6 +247,8 @@ const TRECHOS = Object.freeze({
   // uma forma canônica pela outra e exige VERDE. Um literal ali faria o caso
   // morrer por âncora nesse controle, que é morrer sem medir nada.
   get runDaPreservacao() { return runDoPasso("Preservação do código de saída"); },
+  // [OS 54-C7] O `run:` do passo da autoridade do conteúdo material.
+  get runDoConteudoNominal() { return runDoPasso("Conteúdo dos casos nominais"); },
   cabecalhoDoInventario: "      - name: Inventário por execução",
 });
 

@@ -179,6 +179,19 @@ jobs:
       - name: Preservação do código de saída
         run: node ci/codigo_de_saida.js
 
+      # [OS 54-C7] O CONTEÚDO MATERIAL DOS CASOS NOMINAIS, num passo próprio.
+      #
+      # A OS 54-R6 mostrou que a C6 protegia o NOME e a FORMA de um caso, e não
+      # o conteúdo dele: trocar o corpo por `assert.ok(true)` preservava título,
+      # posição, contagem de casos e até a contagem de afirmações, e a cadeia
+      # oficial ficava verde. O que se confere agora é o PROGRAMA do corpo — por
+      # token e por digest —, com a monotonicidade ancorada no commit anterior.
+      #
+      # Roda aqui E no `pretest`, pelo mesmo motivo das outras: quem estreita o
+      # glob desliga tudo o que vive dentro dele.
+      - name: Conteúdo dos casos nominais
+        run: node ci/pisos_autorizados.js
+
       # [OS 54-C4] A AUTORIDADE DE QUANTIDADE. Executa as suítes obrigatórias
       # pelo stream de eventos do `node:test` e conta por ARQUIVO DE ORIGEM —
       # caso apagado não emite evento, caso comentado não emite evento, e caso

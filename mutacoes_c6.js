@@ -394,13 +394,32 @@ const SABOTAGENS = [
       // realinha TODOS os números que a denunciariam — o piso global, o censo e
       // os dois pisos externos. É o encolhimento coordenado da OS 52-R2,
       // aplicado à família desta OS.
+      // [OS 54-C7] TODOS OS NÚMEROS SAEM DOS ARQUIVOS. Eram literais (`956`, o
+      // carimbo, `31` e `29`), e os pisos subiram nesta ponta — cada literal
+      // matava a sabotagem por âncora, que é como um vetor some do placar
+      // parecendo cobertura.
+      const piso = JSON.parse(ler(d, PISO_GLOBAL).texto);
+      const casos = piso.casos_minimos;
+      const suites = piso.suites_minimas;
+      const antes = piso.medido_na_arvore_desta_os;
+      const linhaDo = (relativo, valor) => {
+        const re = new RegExp("^\\s*\"codigo_de_saida\\.test\\.js\":\\s*" + valor + ",.*$", "m");
+        const m = re.exec(ler(d, relativo).texto);
+        if (!m) throw new Error(i + ": entrada de codigo_de_saida.test.js nao encontrada em " + relativo);
+        return m[0] + NL;
+      };
+      const P = require(path.join(d, PISOS));
+      const linhaCenso = linhaDo(CENSO, P.MINIMO_DECLARADO_NO_CENSO["codigo_de_saida.test.js"]);
+      const linhaTextual = linhaDo(PISOS, P.MINIMO_DECLARADO_NO_CENSO["codigo_de_saida.test.js"]);
+      const linhaExecutada = linhaDo(PISOS, P.MINIMO_EXECUTADO["codigo_de_saida.test.js"]);
       fs.rmSync(path.join(d, SUITE));
-      trocar(d, PISO_GLOBAL, '"casos_minimos": 956,', '"casos_minimos": 927,', i + "/piso");
-      trocar(d, PISO_GLOBAL, '"medido_na_arvore_desta_os": { "casos": 956, "suites": 87 }',
-        '"medido_na_arvore_desta_os": { "casos": 927, "suites": 87 }', i + "/carimbo");
-      trocar(d, CENSO, `  "codigo_de_saida.test.js": 31,`, "", i + "/censo");
-      trocar(d, PISOS, `  "codigo_de_saida.test.js": 31,`, "", i + "/piso-textual");
-      trocar(d, PISOS, `  "codigo_de_saida.test.js": 29,`, "", i + "/piso-executado");
+      trocar(d, PISO_GLOBAL, '"casos_minimos": ' + casos + ",", '"casos_minimos": 927,', i + "/piso");
+      trocar(d, PISO_GLOBAL,
+        '"medido_na_arvore_desta_os": { "casos": ' + antes.casos + ', "suites": ' + suites + " }",
+        '"medido_na_arvore_desta_os": { "casos": 927, "suites": ' + suites + " }", i + "/carimbo");
+      trocar(d, CENSO, linhaCenso, "", i + "/censo");
+      trocar(d, PISOS, linhaTextual, "", i + "/piso-textual");
+      trocar(d, PISOS, linhaExecutada, "", i + "/piso-executado");
     },
   },
   {

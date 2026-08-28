@@ -42,6 +42,7 @@
 //   node mutacoes_c3.js                  # campanha inteira
 //   node mutacoes_c3.js --so E1,E6,FRG-A # só estes vetores
 //   node mutacoes_c3.js --listar         # só lista os vetores
+//   node mutacoes_c3.js --secar          # só confere as âncoras, numa cópia
 // ===========================================================================
 "use strict";
 
@@ -103,6 +104,39 @@ const arq = {
     fs.writeFileSync(alvo, JSON.stringify(objeto, null, 2) + "\n");
   },
 };
+
+// ---------------------------------------------------------------------------
+// [OS 54-C7] ÂNCORAS DERIVADAS DO ESTADO ATUAL
+// ---------------------------------------------------------------------------
+//
+// A OS 54-R6 encontrou vetores desta campanha que tinham DEIXADO DE EXECUTAR:
+// `E6` trazia a linha do censo com o número e o comentário de uma OS antiga, e
+// `PIS-D` e `REC-B` traziam `CASOS_MEDIDOS_NA_BASE = 883`, que já estava
+// obsoleto na própria base da C6. Vetor que morre por âncora não mede nada —
+// ele some do placar parecendo cobertura.
+//
+// A regra: nada de valor histórico literal. O que a árvore pode mudar sozinha é
+// LIDO da árvore, e a substituição continua conferida por `arq.trocar`, que
+// exige uma ocorrência e bytes diferentes.
+
+/** A linha inteira que declara o piso de uma suíte no censo — número e
+ *  comentário de HOJE, quaisquer que sejam. */
+function linhaDoCenso(arquivo) {
+  const texto = fs.readFileSync(path.join(RAIZ, "test/censo_de_suites.js"), "utf8")
+    .split("\r\n").join("\n");
+  const re = new RegExp('^\\s*"' + arquivo.replace(/\./g, "\\.") + '":\\s*\\d+,.*$', "m");
+  const m = re.exec(texto);
+  if (!m) throw new Error("ANCORA INVALIDA: o censo nao declara `" + arquivo + "`");
+  return m[0] + "\n";
+}
+
+/** A declaração de HOJE de uma constante do piso do piso. */
+function constanteDoPisoDoPiso(nome) {
+  const texto = fs.readFileSync(path.join(RAIZ, "test/ci_obrigatorio.test.js"), "utf8");
+  const m = new RegExp("const\\s+" + nome + "\\s*=\\s*(\\d+)\\s*;").exec(texto);
+  if (!m) throw new Error("ANCORA INVALIDA: `" + nome + "` nao existe na suite do CI");
+  return { linha: "const " + nome + " = " + m[1] + ";", valor: Number(m[1]) };
+}
 
 // ---------------------------------------------------------------------------
 // PEÇAS DE SABOTAGEM
@@ -355,8 +389,7 @@ const VETORES = [
     o_que: "encolhimento coordenado: suite removida, censo, alcance, limiar e piso realinhados",
     aplicar: () => {
       arq.apagar("test/ci_obrigatorio.test.js");
-      arq.trocar("test/censo_de_suites.js",
-        '  "ci_obrigatorio.test.js": 99,   // OS 54 — CI externo obrigatorio; +15 na OS 54-C1; +3 na OS 52-C3; +16 na OS 54-C4 (os subcasos da auditabilidade e a CI-20)\n', "");
+      arq.trocar("test/censo_de_suites.js", linhaDoCenso("ci_obrigatorio.test.js"), "");
       arq.trocar("test/prova_da_unicidade.js",
         '  "test/ci_obrigatorio.test.js": {\n' +
         '    porque: "guarda o CI externo e o piso do portão",\n' +
@@ -523,9 +556,11 @@ const VETORES = [
   { id: "PIS-C", o_que: "rebaixamento de um piso POR SUITE",
     aplicar: () => arq.trocar("test/censo_de_suites.js",
       '"gate_vip.test.js": 64,', '"gate_vip.test.js": 58,') },
+  // [OS 54-C7] RECONSTITUÍDO. A propriedade continua existindo — o piso do piso
+  // ainda mora na suíte do CI —, e o que estava obsoleto era só o literal `883`.
   { id: "PIS-D", o_que: "rebaixamento do piso do piso (CI-13) na suite do CI",
     aplicar: () => arq.trocar("test/ci_obrigatorio.test.js",
-      "const CASOS_MEDIDOS_NA_BASE = 883;", "const CASOS_MEDIDOS_NA_BASE = 700;") },
+      constanteDoPisoDoPiso("CASOS_MEDIDOS_NA_BASE").linha, "const CASOS_MEDIDOS_NA_BASE = 700;") },
   { id: "PIS-E", o_que: "entrada do censo APAGADA para uma suite obrigatoria",
     aplicar: () => arq.trocar("test/censo_de_suites.js",
       '  "gate_vip.test.js": 64,\n', "") },
@@ -539,9 +574,9 @@ const VETORES = [
         o.medido_na_arvore_desta_os = { casos: 600, suites: 70 };
       });
       arq.trocar("test/ci_obrigatorio.test.js",
-        "const CASOS_MEDIDOS_NA_BASE = 883;", "const CASOS_MEDIDOS_NA_BASE = 600;");
+        constanteDoPisoDoPiso("CASOS_MEDIDOS_NA_BASE").linha, "const CASOS_MEDIDOS_NA_BASE = 600;");
       arq.trocar("test/ci_obrigatorio.test.js",
-        "const SUITES_MEDIDAS_NA_BASE = 87;", "const SUITES_MEDIDAS_NA_BASE = 70;");
+        constanteDoPisoDoPiso("SUITES_MEDIDAS_NA_BASE").linha, "const SUITES_MEDIDAS_NA_BASE = 70;");
     } },
   { id: "AUT-A", o_que: "a AUTORIDADE do piso ancorado e apagada do disco",
     aplicar: () => arq.apagar("test/piso_ancorado.js") },
@@ -643,8 +678,73 @@ function portao(comJuiz) {
 // A CAMPANHA
 // ---------------------------------------------------------------------------
 
+/** [OS 54-C7] SECAGEM: valida TODAS as âncoras sem julgar nada.
+ *
+ *  Ela não roda na árvore de trabalho. A campanha muta `server.js` no lugar e
+ *  restaura no fim — e a OS 54-C6 registrou o preço disso: morta pelo limite de
+ *  tempo, ela deixou a mutação injetada. A secagem copia a árvore, roda ESTE
+ *  MESMO arquivo dentro da cópia e joga a cópia fora. A árvore real não é
+ *  tocada, e `server.js` é conferido por hash antes e depois.
+ *
+ *  Âncora ausente, ambígua ou sem efeito termina VERMELHO. */
+function secar() {
+  const os2 = require("node:os");
+  const antes = cp.execFileSync("git", ["-C", RAIZ, "hash-object", "server.js"], { encoding: "utf8" }).trim();
+  const copia = fs.mkdtempSync(path.join(os2.tmpdir(), "os52c3-secagem-"));
+  try {
+    for (const item of fs.readdirSync(RAIZ)) {
+      if (item === ".git" || item === "node_modules") continue;
+      fs.cpSync(path.join(RAIZ, item), path.join(copia, item), { recursive: true });
+    }
+    const git2 = (...a) =>
+      cp.execFileSync("git", ["-C", copia, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    git2("init", "-q");
+    git2("config", "user.email", "secagem@os52c3.local");
+    git2("config", "user.name", "secagem");
+    git2("add", "-A");
+    git2("commit", "-q", "-m", "arvore integra (secagem)");
+    const saida = cp.spawnSync(process.execPath, [path.join(copia, "mutacoes_c3.js"), "--secar-interno"],
+      { cwd: copia, encoding: "utf8" });
+    process.stdout.write(String(saida.stdout || ""));
+    process.stderr.write(String(saida.stderr || ""));
+    const depois = cp.execFileSync("git", ["-C", RAIZ, "hash-object", "server.js"], { encoding: "utf8" }).trim();
+    if (antes !== depois) {
+      process.stderr.write("SECAGEM TOCOU `server.js` NA ARVORE REAL — " + antes + " -> " + depois + "\n");
+      return 2;
+    }
+    return typeof saida.status === "number" ? saida.status : 2;
+  } finally {
+    fs.rmSync(copia, { recursive: true, force: true });
+  }
+}
+
+/** A secagem por dentro: já está na cópia, e aqui pode aplicar à vontade. */
+function secarInterno() {
+  let ruins = 0;
+  for (const v of VETORES) {
+    if (!arvoreLimpa()) { console.log("!! ARVORE SUJA antes de " + v.id); ruins++; break; }
+    try {
+      v.aplicar();
+      if (arvoreLimpa()) {
+        ruins++;
+        console.log("SEM EFEITO  " + v.id.padEnd(8) + v.o_que);
+      } else {
+        console.log("ancora ok   " + v.id.padEnd(8) + v.o_que);
+      }
+    } catch (e) {
+      ruins++;
+      console.log("ANCORA RUIM " + v.id.padEnd(8) + String((e && e.message) || e).slice(0, 140));
+    }
+    restaurar();
+  }
+  console.log("ancoras invalidas ou sem efeito: " + ruins + "/" + VETORES.length);
+  return ruins === 0 ? 0 : 1;
+}
+
 function principal() {
   const args = process.argv.slice(2);
+  if (args.includes("--secar")) return secar();
+  if (args.includes("--secar-interno")) return secarInterno();
   if (args.includes("--listar")) {
     for (const v of VETORES) console.log(v.id.padEnd(8), (v.esperado || "VERMELHO").padEnd(9), v.o_que);
     console.log("total:", VETORES.length);

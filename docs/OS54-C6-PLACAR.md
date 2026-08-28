@@ -70,9 +70,14 @@ Piso por arquivo, medido e sem folga:
 | `auditabilidade_ci.test.js` | 42 → **43** | 41 |
 | os onze restantes | inalterados | inalterados |
 
-Novo: `PESO_DOS_NOMINAIS` em `ci/pisos_autorizados.js` — afirmações mínimas por
-caso nominal, medidas: `SAI-00` 1, `SAI-02` 1, `SAI-04` 1, `SAI-09` 1,
-`SAI-17` 1, `SAI-18` 1, `SAI-19` 8, `SAI-20` 6, `SAI-22` 2.
+Novo nesta ponta: `PESO_DOS_NOMINAIS` em `ci/pisos_autorizados.js` — afirmações
+mínimas por caso nominal, medidas: `SAI-00` 1, `SAI-02` 1, `SAI-04` 1,
+`SAI-09` 1, `SAI-17` 1, `SAI-18` 1, `SAI-19` 8, `SAI-20` 6, `SAI-22` 2.
+
+> **[OS 54-C7] Olhe a coluna: cinco pisos valem 1.** Um corpo trocado por
+> `assert.ok(true)` também vale 1, e por isso `E36` e `E38` passaram na R6. O
+> mecanismo foi REMOVIDO e substituído por `CONTEUDO_DOS_NOMINAIS` (tokens de
+> programa + digest, ancorados no commit anterior).
 
 ## 5. Campanha da OS 54-C6 — 24 sabotagens + 4 controles
 
@@ -194,11 +199,15 @@ própria base: `X07` → **VERDE, 927 casos**. O buraco é anterior a esta OS e 
 foi aberto por ela.
 
 O mecanismo que o fecharia é o que esta OS introduziu — `PESO_DOS_NOMINAIS` em
-`ci/pisos_autorizados.js`, que já reprova exatamente essa sabotagem para a suíte
-nova (é o cenário `C19`). Estendê-lo à família da unicidade **não** foi feito:
+`ci/pisos_autorizados.js`. Estendê-lo à família da unicidade **não** foi feito:
 exigiria declarar pesos para nove casos nominais de uma suíte que esta OS não
 estudou, e piso declarado sem medida é folga com outro nome. Fica nomeado para
 quem cuidar daquela família.
+
+> **[OS 54-C7] Fechado, e não pelo mecanismo desta ponta.** `PESO_DOS_NOMINAIS`
+> não teria fechado `X07`: ele reprovava por CONTAGEM DE AFIRMAÇÕES, e a R6
+> mostrou que o número sobrevive à trivialização. `UNI-B4` passou a ser
+> protegido por `CONTEUDO_DOS_NOMINAIS`, e `X07` está VERMELHO desde a OS 54-C7.
 
 `X11` e `X12` traziam o piso `927` em literais e **abortavam por âncora** com o
 piso em 956. As âncoras passaram a sair dos arquivos; as sabotagens são as

@@ -92,7 +92,7 @@ const CAMINHO_DO_PISO = path.join(RAIZ, "ci", "piso_do_portao.json");
  *  mora dentro do alvo não é autoridade. Quem sustenta o piso agora é
  *  `test/piso_ancorado.js`, que compara com o COMMIT ANTERIOR; estes números
  *  continuam aqui como a segunda leitura, e CI-23 os mantém em dia. */
-const CASOS_MEDIDOS_NA_BASE = 956;
+const CASOS_MEDIDOS_NA_BASE = 964;
 const SUITES_MEDIDAS_NA_BASE = 87;
 
 /** O ambiente homologado, escrito por extenso porque "manter" é uma afirmação

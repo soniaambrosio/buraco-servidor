@@ -161,6 +161,10 @@ const PASSOS_DE_COMANDO_UNICO = Object.freeze([
   // EXISTA é cobrado por `ci/auditabilidade.js`, que é outro arquivo — nenhuma
   // peça responde sozinha pela própria presença.
   Object.freeze({ passo: "Preservação do código de saída", alvo: "ci/codigo_de_saida.js" }),
+  // [OS 54-C7] E o passo da autoridade do conteúdo nominal. Mesma regra, mesmo
+  // motivo: um passo que pode ser composto é um passo cujo veredito não chega
+  // ao job.
+  Object.freeze({ passo: "Conteúdo dos casos nominais", alvo: "ci/pisos_autorizados.js" }),
 ]);
 
 // ---------------------------------------------------------------------------

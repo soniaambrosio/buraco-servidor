@@ -92,7 +92,7 @@ const OBRIGATORIAS = Object.freeze({
   // [OS 54-C6] A suíte da autoridade do código de saída do veredito. Ela é a
   // metade de dentro do §3: a de fora é `ci/codigo_de_saida.js`, e nenhuma
   // das duas responde sozinha pela própria presença.
-  "codigo_de_saida.test.js": 31,
+  "codigo_de_saida.test.js": 46,
 });
 
 /** Conta casos, INCLUINDO subtestes.
